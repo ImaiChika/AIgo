@@ -17,6 +17,8 @@ const imageLoading = ref(false);
 const generatedImages = ref([]);
 const currentQuestionId = ref("");
 const stats = ref({ question_count: 0, knowledge_count: 0 });
+const progressMsg = ref("");
+const startTime = ref(0);
 
 function showToast(message) {
   toast.value = message;
@@ -50,6 +52,15 @@ async function generateQuestion() {
     return;
   }
   loading.value = true;
+  progressMsg.value = "正在调用千问生成试题，请稍候...";
+  startTime.value = Date.now();
+
+  // 进度计时器
+  const timer = setInterval(() => {
+    const elapsed = ((Date.now() - startTime.value) / 1000).toFixed(0);
+    progressMsg.value = `千问生成中... 已等待 ${elapsed} 秒`;
+  }, 1000);
+
   try {
     const data = await api.generate({
       subject: "临床医学",
@@ -57,6 +68,8 @@ async function generateQuestion() {
       topic: selectedTopic.value,
       count: selectedCount.value,
     });
+    clearInterval(timer);
+    const elapsed = ((Date.now() - startTime.value) / 1000).toFixed(1);
     if (data.questions && data.questions.length > 0) {
       const q = data.questions[0];
       stem.value = q.clinical_stem || "";
@@ -64,9 +77,14 @@ async function generateQuestion() {
       answer.value = q.answer || "";
       explanation.value = q.explanation || "";
       currentQuestionId.value = q.id || "";
-      showToast(`已生成 ${data.count} 道题，当前显示第 1 题`);
+      progressMsg.value = `✓ 已生成 ${data.count} 道题，耗时 ${elapsed} 秒`;
+      showToast(`已生成 ${data.count} 道题，耗时 ${elapsed} 秒`);
+      // 刷新统计
+      loadStats();
     }
   } catch (e) {
+    clearInterval(timer);
+    progressMsg.value = `✗ 生成失败: ${e.message}`;
     showToast("生成失败: " + e.message);
   } finally {
     loading.value = false;
@@ -269,6 +287,14 @@ onMounted(() => {
           {{ loading ? "生成中..." : "AI自动生成试题" }}
         </button>
 
+        <!-- 进度条 -->
+        <div v-if="progressMsg" class="progress-bar">
+          <div class="progress-inner" :class="{ done: progressMsg.startsWith('✓'), error: progressMsg.startsWith('✗') }">
+            <span v-if="loading" class="spinner"></span>
+            {{ progressMsg }}
+          </div>
+        </div>
+
         <section v-if="stem" class="preview-card">
           <div class="section-heading compact">
             <span class="dot blue"></span>
@@ -306,5 +332,44 @@ onMounted(() => {
   color: #5f7087;
   font-size: 32px;
   font-weight: 700;
+}
+
+.progress-bar {
+  margin-top: 10px;
+}
+
+.progress-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 7px;
+  background: #eff8ff;
+  color: #0571dc;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.progress-inner.done {
+  background: #f0fff8;
+  color: #087c55;
+}
+
+.progress-inner.error {
+  background: #fff0f0;
+  color: #c54858;
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #b9ddff;
+  border-top-color: #0571dc;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 </style>
