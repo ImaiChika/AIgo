@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 
+	"aigo/internal/api"
 	"aigo/internal/config"
 	"aigo/internal/domain"
 	"aigo/internal/evaluator"
@@ -47,6 +49,31 @@ func run(ctx context.Context, args []string) error {
 	switch args[1] {
 	case "doctor":
 		return pipe.Doctor(ctx)
+
+	case "serve":
+		port := "8080"
+		if len(args) > 2 {
+			port = args[2]
+		}
+		server := api.NewServer(pipe, kpSvc, imageSvc, reviewSvc, questionStore)
+		addr := "127.0.0.1:" + port
+		fmt.Printf("AIgo HTTP 服务启动: http://%s\n", addr)
+		fmt.Println("API 文档:")
+		fmt.Println("  GET    /api/stats                    统计信息")
+		fmt.Println("  POST   /api/questions/generate        生成题目")
+		fmt.Println("  GET    /api/questions                  列出题目")
+		fmt.Println("  GET    /api/questions/{id}             题目详情")
+		fmt.Println("  GET    /api/knowledge-points           列出知识点")
+		fmt.Println("  GET    /api/knowledge-points/search?q= 搜索知识点")
+		fmt.Println("  POST   /api/knowledge-points/import    导入知识点(文件上传)")
+		fmt.Println("  POST   /api/images/prompt              生成生图提示词")
+		fmt.Println("  POST   /api/images/generate            生成候选图")
+		fmt.Println("  GET    /api/images/{questionId}        列出候选图")
+		fmt.Println("  POST   /api/images/review              审核图片")
+		fmt.Println("  POST   /api/review/submit              提交审核")
+		fmt.Println("  POST   /api/review/action              执行审核")
+		fmt.Println("  GET    /api/review/task/{id}           审核任务详情")
+		return http.ListenAndServe(addr, server.Handler())
 
 	case "import":
 		if len(args) < 3 {

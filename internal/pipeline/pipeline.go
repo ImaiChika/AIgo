@@ -44,6 +44,26 @@ func (p *Pipeline) Doctor(ctx context.Context) error {
 	return nil
 }
 
+// Generate 直接调用生成服务，供 API 使用。
+func (p *Pipeline) Generate(ctx context.Context, req domain.GenerationRequest) ([]domain.A2Question, error) {
+	questions, err := p.generator.Generate(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	for i := range questions {
+		if err := questions[i].Validate(); err != nil {
+			questions[i].SourceRefs = append(questions[i].SourceRefs, domain.SourceRef{
+				Title: "校验未通过",
+				Note:  err.Error(),
+			})
+		}
+		if err := p.store.SaveQuestion(ctx, questions[i]); err != nil {
+			return nil, err
+		}
+	}
+	return questions, nil
+}
+
 func (p *Pipeline) GenerateSample(ctx context.Context) error {
 	req := domain.GenerationRequest{
 		Subject:    "临床医学",
