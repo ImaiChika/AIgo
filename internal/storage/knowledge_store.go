@@ -20,7 +20,7 @@ type KnowledgeStore interface {
 	ListBySubject(ctx context.Context, subject string) ([]domain.KnowledgePoint, error)
 
 	// 统计
-	Count(ctx context.Context) (int, error)
+	KPCount(ctx context.Context) (int, error)
 }
 
 // MemoryKnowledgeStore 内存知识点存储。
@@ -96,7 +96,7 @@ func (s *MemoryKnowledgeStore) ListBySubject(_ context.Context, subject string) 
 	return result, nil
 }
 
-func (s *MemoryKnowledgeStore) Count(_ context.Context) (int, error) {
+func (s *MemoryKnowledgeStore) KPCount(_ context.Context) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.points), nil

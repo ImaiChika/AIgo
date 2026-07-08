@@ -67,7 +67,7 @@ func (s *Service) GetByID(ctx context.Context, id string) (*domain.KnowledgePoin
 
 // Count 统计知识点数量。
 func (s *Service) Count(ctx context.Context) (int, error) {
-	return s.store.Count(ctx)
+	return s.store.KPCount(ctx)
 }
 
 // ListSystems 列出所有系统分类。

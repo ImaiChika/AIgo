@@ -11,10 +11,19 @@ import (
 
 type Config struct {
 	Qwen llm.QwenConfig
+	DB   DBConfig
+}
+
+type DBConfig struct {
+	Driver string // "memory" or "postgres"
+	DSN    string
 }
 
 func FromEnv() Config {
 	loadDotEnv(".env")
+
+	dbDriver := firstNonEmpty(os.Getenv("DB_DRIVER"), "memory")
+	dbDSN := firstNonEmpty(os.Getenv("DB_DSN"), "postgres://localhost:5432/aigo?sslmode=disable")
 
 	return Config{
 		Qwen: llm.QwenConfig{
@@ -22,6 +31,10 @@ func FromEnv() Config {
 			BaseURL:     firstNonEmpty(os.Getenv("QWEN_BASE_URL"), "https://dashscope.aliyuncs.com/compatible-mode/v1"),
 			Model:       firstNonEmpty(os.Getenv("QWEN_MODEL"), "qwen3.6-flash"),
 			HTTPTimeout: 60 * time.Second,
+		},
+		DB: DBConfig{
+			Driver: dbDriver,
+			DSN:    dbDSN,
 		},
 	}
 }

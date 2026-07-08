@@ -18,6 +18,9 @@ import (
 	"aigo/internal/pipeline"
 	"aigo/internal/review"
 	"aigo/internal/storage"
+	"aigo/internal/storage/postgres"
+
+	_ "github.com/lib/pq"
 )
 
 func main() {
@@ -35,11 +38,47 @@ func run(ctx context.Context, args []string) error {
 
 	cfg := config.FromEnv()
 	client := llm.NewQwenClient(cfg.Qwen)
-	questionStore := storage.NewMemoryStore()
-	expertStore := storage.NewMemoryExpertStore()
-	reviewStore := storage.NewMemoryReviewStore()
-	imageStore := storage.NewMemoryImageStore()
-	kpStore := storage.NewMemoryKnowledgeStore()
+
+	// 初始化存储
+	var questionStore storage.QuestionStore
+	var expertStore storage.ExpertStore
+	var reviewStore storage.ReviewStore
+	var imageStore storage.ImageStore
+	var kpStore storage.KnowledgeStore
+	var pgStore *postgres.Store
+
+	if cfg.DB.Driver == "postgres" {
+		var err error
+		pgStore, err = postgres.New(cfg.DB.DSN)
+		if err != nil {
+			return fmt.Errorf("连接 PostgreSQL 失败: %w", err)
+		}
+		defer pgStore.Close()
+
+		// 初始化表结构
+		schemaBytes, err := os.ReadFile("internal/storage/postgres/schema.sql")
+		if err != nil {
+			return fmt.Errorf("读取 schema 文件失败: %w", err)
+		}
+		if err := pgStore.InitSchema(string(schemaBytes)); err != nil {
+			return fmt.Errorf("初始化数据库表失败: %w", err)
+		}
+
+		questionStore = pgStore
+		expertStore = pgStore
+		reviewStore = pgStore
+		imageStore = pgStore
+		kpStore = pgStore
+		fmt.Println("数据库: PostgreSQL")
+	} else {
+		questionStore = storage.NewMemoryStore()
+		expertStore = storage.NewMemoryExpertStore()
+		reviewStore = storage.NewMemoryReviewStore()
+		imageStore = storage.NewMemoryImageStore()
+		kpStore = storage.NewMemoryKnowledgeStore()
+		fmt.Println("数据库: 内存存储（重启丢失）")
+	}
+
 	reviewSvc := review.NewService(expertStore, reviewStore, questionStore)
 	mockImgGen := image.NewMockImageGenerator("output/images")
 	imageSvc := image.NewService(questionStore, imageStore, client, mockImgGen)
