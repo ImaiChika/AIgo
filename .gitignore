@@ -1,0 +1,12 @@
+# OS
+.DS_Store
+
+# Go
+output/
+
+# Node
+web/node_modules/
+web/dist/
+
+# Env
+.env
