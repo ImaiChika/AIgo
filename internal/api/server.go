@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
 
+	"aigo/internal/auth"
 	"aigo/internal/domain"
 	"aigo/internal/image"
 	"aigo/internal/knowledge"
@@ -16,11 +18,12 @@ import (
 
 // Server HTTP API 服务。
 type Server struct {
-	pipe      *pipeline.Pipeline
-	kpSvc     *knowledge.Service
-	imgSvc    *image.Service
-	reviewSvc *review.Service
+	pipe          *pipeline.Pipeline
+	kpSvc         *knowledge.Service
+	imgSvc        *image.Service
+	reviewSvc     *review.Service
 	questionStore storage.QuestionStore
+	authSvc       *auth.Service
 }
 
 func NewServer(
@@ -29,6 +32,7 @@ func NewServer(
 	imgSvc *image.Service,
 	reviewSvc *review.Service,
 	questionStore storage.QuestionStore,
+	authSvc *auth.Service,
 ) *Server {
 	return &Server{
 		pipe:          pipe,
@@ -36,6 +40,7 @@ func NewServer(
 		imgSvc:        imgSvc,
 		reviewSvc:     reviewSvc,
 		questionStore: questionStore,
+		authSvc:       authSvc,
 	}
 }
 
@@ -43,30 +48,35 @@ func NewServer(
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// 题目
-	mux.HandleFunc("POST /api/questions/generate", s.handleGenerate)
-	mux.HandleFunc("GET /api/questions", s.handleListQuestions)
-	mux.HandleFunc("GET /api/questions/{id}", s.handleGetQuestion)
+	// 认证
+	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
+	mux.HandleFunc("GET /api/auth/me", s.requireAuth("", s.handleMe))
+	mux.HandleFunc("POST /api/auth/change-password", s.requireAuth("", s.handleChangePassword))
+
+	// 统计（不需要 token）
+	mux.HandleFunc("GET /api/stats", s.handleStats)
+
+	// 题目（需要 token）
+	mux.HandleFunc("POST /api/questions/generate", s.requireAuth("question:generate", s.handleGenerate))
+	mux.HandleFunc("GET /api/questions", s.requireAuth("question:list", s.handleListQuestions))
+	mux.HandleFunc("GET /api/questions/{id}", s.requireAuth("question:view", s.handleGetQuestion))
 
 	// 知识点
-	mux.HandleFunc("GET /api/knowledge-points", s.handleListKP)
-	mux.HandleFunc("GET /api/knowledge-points/search", s.handleSearchKP)
-	mux.HandleFunc("POST /api/knowledge-points/import", s.handleImportKP)
+	mux.HandleFunc("GET /api/knowledge-points", s.requireAuth("knowledge:list", s.handleListKP))
+	mux.HandleFunc("GET /api/knowledge-points/search", s.requireAuth("knowledge:search", s.handleSearchKP))
+	mux.HandleFunc("POST /api/knowledge-points/import", s.requireAuth("knowledge:import", s.handleImportKP))
 
 	// 图片
-	mux.HandleFunc("POST /api/images/prompt", s.handleImagePrompt)
-	mux.HandleFunc("POST /api/images/generate", s.handleImageGenerate)
-	mux.HandleFunc("GET /api/images/{questionId}", s.handleListImages)
-	mux.HandleFunc("POST /api/images/review", s.handleImageReview)
+	mux.HandleFunc("POST /api/images/prompt", s.requireAuth("image:generate", s.handleImagePrompt))
+	mux.HandleFunc("POST /api/images/generate", s.requireAuth("image:generate", s.handleImageGenerate))
+	mux.HandleFunc("GET /api/images/{questionId}", s.requireAuth("image:view", s.handleListImages))
+	mux.HandleFunc("POST /api/images/review", s.requireAuth("image:review", s.handleImageReview))
 
 	// 审核
-	mux.HandleFunc("POST /api/review/submit", s.handleSubmitReview)
-	mux.HandleFunc("POST /api/review/action", s.handleReviewAction)
-	mux.HandleFunc("GET /api/review/task/{id}", s.handleGetReviewTask)
-	mux.HandleFunc("GET /api/review/records/{taskId}", s.handleReviewRecords)
-
-	// 统计
-	mux.HandleFunc("GET /api/stats", s.handleStats)
+	mux.HandleFunc("POST /api/review/submit", s.requireAuth("review:submit", s.handleSubmitReview))
+	mux.HandleFunc("POST /api/review/action", s.requireAuth("review:action", s.handleReviewAction))
+	mux.HandleFunc("GET /api/review/task/{id}", s.requireAuth("review:view", s.handleGetReviewTask))
+	mux.HandleFunc("GET /api/review/records/{taskId}", s.requireAuth("review:view", s.handleReviewRecords))
 
 	return withCORS(withJSON(mux))
 }
@@ -397,6 +407,98 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"knowledge_count":   kpCount,
 		"knowledge_systems": systems,
 	})
+}
+
+// ===== 认证 =====
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, "请求格式错误")
+		return
+	}
+
+	token, user, err := s.authSvc.Login(req.Username, req.Password)
+	if err != nil {
+		writeError(w, 401, err.Error())
+		return
+	}
+
+	writeJSON(w, 200, map[string]any{
+		"token": token,
+		"user":  user,
+	})
+}
+
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	userID := auth.GetUserID(r.Context())
+	user, err := s.authSvc.GetUserByID(userID)
+	if err != nil || user == nil {
+		writeError(w, 401, "用户不存在")
+		return
+	}
+	writeJSON(w, 200, user)
+}
+
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	userID := auth.GetUserID(r.Context())
+	var req struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, "请求格式错误")
+		return
+	}
+	if len(req.NewPassword) < 8 {
+		writeError(w, 400, "新密码至少8位")
+		return
+	}
+	if err := s.authSvc.ChangePassword(userID, req.OldPassword, req.NewPassword); err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+// requireAuth 创建带认证和权限检查的 handler。
+func (s *Server) requireAuth(action string, handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 解析 token
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			writeError(w, 401, "缺少登录凭证")
+			return
+		}
+		token := authHeader
+		if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
+			token = authHeader[7:]
+		}
+
+		claims, err := s.authSvc.ValidateToken(token)
+		if err != nil {
+			writeError(w, 401, err.Error())
+			return
+		}
+
+		// 注入用户信息
+		ctx := r.Context()
+		ctx = context.WithValue(ctx, auth.UserIDKey, claims.UserID)
+		ctx = context.WithValue(ctx, auth.UsernameKey, claims.Username)
+		ctx = context.WithValue(ctx, auth.DisplayNameKey, claims.DisplayName)
+		ctx = context.WithValue(ctx, auth.RoleKey, claims.Role)
+
+		// 权限检查（action 为空表示只要登录即可）
+		if action != "" && !auth.CheckPermission(claims.Role, action) {
+			writeError(w, 403, "权限不足")
+			return
+		}
+
+		handler(w, r.WithContext(ctx))
+	}
 }
 
 // ===== 工具函数 =====

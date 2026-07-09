@@ -44,6 +44,11 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// DB 返回底层数据库连接。
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
 // ===== 知识点 =====
 
 func (s *Store) SavePoints(ctx context.Context, points []domain.KnowledgePoint) (int, error) {

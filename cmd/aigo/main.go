@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"aigo/internal/api"
+	"aigo/internal/auth"
 	"aigo/internal/config"
 	"aigo/internal/domain"
 	"aigo/internal/evaluator"
@@ -85,6 +87,17 @@ func run(ctx context.Context, args []string) error {
 	kpSvc := knowledge.NewService(kpStore)
 	pipe := pipeline.New(generator.NewService(client), evaluator.NewService(), reviewSvc, imageSvc, kpSvc, questionStore)
 
+	// 初始化认证服务
+	var authSvc *auth.Service
+	if pgStore != nil {
+		authSvc = auth.NewService(pgStore.DB(), "aigo-jwt-secret-2025", 24*time.Hour)
+		if err := authSvc.InitAdmin("admin", "admin123", "系统管理员"); err != nil {
+			fmt.Printf("初始化管理员账号失败: %v\n", err)
+		} else {
+			fmt.Println("默认管理员: admin / admin123")
+		}
+	}
+
 	switch args[1] {
 	case "doctor":
 		return pipe.Doctor(ctx)
@@ -94,7 +107,7 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 2 {
 			port = args[2]
 		}
-		server := api.NewServer(pipe, kpSvc, imageSvc, reviewSvc, questionStore)
+		server := api.NewServer(pipe, kpSvc, imageSvc, reviewSvc, questionStore, authSvc)
 		addr := "127.0.0.1:" + port
 		fmt.Printf("AIgo HTTP 服务启动: http://%s\n", addr)
 		fmt.Println("API 文档:")
