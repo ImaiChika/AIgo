@@ -8,18 +8,24 @@ const total = ref(0);
 const page = ref(1);
 const searchQuery = ref("");
 const loading = ref(false);
-const importResult = ref(null);
+const showCreate = ref(false);
+
+const newKP = ref({
+  topic: "",
+  system: "",
+  keywords: "",
+});
 
 function showToast(msg) {
   toast.value = msg;
   window.clearTimeout(showToast.timer);
-  showToast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
+  toast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
 }
 
 async function loadPoints() {
   loading.value = true;
   try {
-    const data = await api.listKP({ page: page.value, page_size: 20 });
+    const data = await api.listKP({ page: page.value, page_size: 50 });
     points.value = data.points || [];
     total.value = data.total || 0;
   } catch (e) {
@@ -31,6 +37,7 @@ async function loadPoints() {
 
 async function search() {
   if (!searchQuery.value.trim()) {
+    page.value = 1;
     loadPoints();
     return;
   }
@@ -46,12 +53,48 @@ async function search() {
   }
 }
 
+async function createKP() {
+  if (!newKP.value.topic.trim()) {
+    showToast("知识点名称不能为空");
+    return;
+  }
+  try {
+    const keywords = newKP.value.keywords
+      .split(/[,，、\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    await api.createKP({
+      topic: newKP.value.topic.trim(),
+      system: newKP.value.system.trim(),
+      keywords,
+    });
+    showToast("添加成功");
+    newKP.value = { topic: "", system: "", keywords: "" };
+    showCreate.value = false;
+    page.value = 1;
+    loadPoints();
+  } catch (e) {
+    showToast("添加失败: " + e.message);
+  }
+}
+
+async function deleteKP(p) {
+  if (!confirm(`确定删除知识点：${p.topic}？`)) return;
+  try {
+    await api.deleteKP(p.id);
+    showToast("已删除");
+    points.value = points.value.filter((item) => item.id !== p.id);
+    total.value--;
+  } catch (e) {
+    showToast("删除失败: " + e.message);
+  }
+}
+
 async function handleImport(event) {
   const file = event.target.files[0];
   if (!file) return;
   try {
     const data = await api.importKP(file);
-    importResult.value = data;
     showToast(`导入成功: ${data.imported} 个知识点`);
     loadPoints();
   } catch (e) {
@@ -60,8 +103,19 @@ async function handleImport(event) {
   event.target.value = "";
 }
 
+function doSearch() {
+  page.value = 1;
+  search();
+}
+
+function clearSearch() {
+  searchQuery.value = "";
+  page.value = 1;
+  loadPoints();
+}
+
 function nextPage() {
-  if (page.value * 20 < total.value) {
+  if (page.value * 50 < total.value) {
     page.value++;
     loadPoints();
   }
@@ -86,26 +140,45 @@ onMounted(loadPoints);
         <small>共 {{ total }} 个知识点</small>
       </div>
 
-      <!-- 搜索 + 导入 -->
+      <!-- 操作栏 -->
       <div class="toolbar">
         <div class="search-row">
           <input
             v-model="searchQuery"
             placeholder="搜索知识点名称或关键词..."
-            @keyup.enter="search"
+            @keyup.enter="doSearch"
           />
-          <button class="primary-button" type="button" @click="search">搜索</button>
-          <button class="ghost-button" type="button" @click="searchQuery = ''; loadPoints()">重置</button>
+          <button class="primary-button" type="button" @click="doSearch">搜索</button>
+          <button class="ghost-button" type="button" @click="clearSearch">重置</button>
         </div>
-        <label class="ghost-button import-btn">
-          导入 Excel
-          <input type="file" accept=".xlsx,.xls" hidden @change="handleImport" />
-        </label>
+        <div class="action-btns">
+          <button class="primary-button" type="button" @click="showCreate = !showCreate">
+            {{ showCreate ? "取消" : "+ 添加知识点" }}
+          </button>
+          <label class="ghost-button import-btn">
+            导入 Excel
+            <input type="file" accept=".xlsx,.xls" hidden @change="handleImport" />
+          </label>
+        </div>
       </div>
 
-      <!-- 导入结果 -->
-      <div v-if="importResult" class="import-result">
-        导入 {{ importResult.imported }} 个知识点，当前总量 {{ importResult.total }}
+      <!-- 新建表单 -->
+      <div v-if="showCreate" class="create-form">
+        <div class="form-row">
+          <div class="field">
+            <label>知识点名称 *</label>
+            <input v-model="newKP.topic" placeholder="如：社区获得性肺炎" />
+          </div>
+          <div class="field">
+            <label>所属系统</label>
+            <input v-model="newKP.system" placeholder="如：呼吸内科" />
+          </div>
+          <div class="field">
+            <label>关键词（逗号分隔）</label>
+            <input v-model="newKP.keywords" placeholder="如：肺炎,发热,咳嗽" />
+          </div>
+        </div>
+        <button class="primary-button" type="button" @click="createKP">确认添加</button>
       </div>
 
       <!-- 列表 -->
@@ -117,6 +190,7 @@ onMounted(loadPoints);
             <th>系统</th>
             <th>知识点名称</th>
             <th>关键词</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -125,9 +199,12 @@ onMounted(loadPoints);
             <td><span class="system-tag">{{ p.system || "未分类" }}</span></td>
             <td>{{ p.topic }}</td>
             <td class="kw-cell">{{ (p.keywords || []).slice(0, 3).join("、") }}</td>
+            <td>
+              <button class="delete-btn" type="button" @click="deleteKP(p)" title="删除">×</button>
+            </td>
           </tr>
           <tr v-if="!points.length">
-            <td colspan="4" class="empty">暂无数据</td>
+            <td colspan="5" class="empty">暂无数据</td>
           </tr>
         </tbody>
       </table>
@@ -136,7 +213,7 @@ onMounted(loadPoints);
       <div class="pagination">
         <button class="ghost-button" :disabled="page <= 1" @click="prevPage">上一页</button>
         <span>第 {{ page }} 页</span>
-        <button class="ghost-button" :disabled="page * 20 >= total" @click="nextPage">下一页</button>
+        <button class="ghost-button" :disabled="page * 50 >= total" @click="nextPage">下一页</button>
       </div>
     </section>
   </div>
@@ -170,20 +247,47 @@ onMounted(loadPoints);
   font-size: 14px;
 }
 
+.action-btns {
+  display: flex;
+  gap: 8px;
+}
+
 .import-btn {
   cursor: pointer;
   display: inline-flex;
   align-items: center;
 }
 
-.import-result {
-  padding: 10px 14px;
-  background: #f0fff8;
-  border: 1px solid #bdecd9;
+.create-form {
+  padding: 16px;
+  background: #f8fbff;
+  border: 1px solid #dce8f7;
   border-radius: 8px;
-  color: #087c55;
+  margin-bottom: 16px;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.field label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6e7b8f;
+  margin-bottom: 4px;
+}
+
+.field input {
+  width: 100%;
+  height: 36px;
+  border: 1px solid #e5ebf3;
+  border-radius: 6px;
+  padding: 0 10px;
   font-size: 13px;
-  margin-bottom: 14px;
 }
 
 .kp-table {
@@ -233,6 +337,24 @@ onMounted(loadPoints);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.delete-btn {
+  width: 28px;
+  height: 28px;
+  border: 1px solid #e5ebf3;
+  border-radius: 6px;
+  background: #fff;
+  color: #c54858;
+  font-size: 18px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.delete-btn:hover {
+  background: #fff0f0;
+  border-color: #c54858;
 }
 
 .empty {

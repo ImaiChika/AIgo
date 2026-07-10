@@ -1,15 +1,18 @@
 <script setup>
 import { ref, onMounted } from "vue";
 import { api } from "../api.js";
+import { currentUser } from "../auth.js";
 
 const toast = ref("");
 const questions = ref([]);
+const flows = ref([]);
 const selectedQuestion = ref(null);
 const reviewTask = ref(null);
 const reviewRecords = ref([]);
 const reviewAction = ref("approved");
 const reviewOpinion = ref("");
 const loading = ref(false);
+const selectedFlowId = ref("");
 
 function showToast(msg) {
   toast.value = msg;
@@ -26,13 +29,28 @@ async function loadQuestions() {
   }
 }
 
+async function loadFlows() {
+  try {
+    const data = await api.listFlows();
+    flows.value = data.flows || [];
+    if (flows.value.length > 0 && !selectedFlowId.value) {
+      selectedFlowId.value = flows.value[0].id;
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
 async function selectQuestion(q) {
   selectedQuestion.value = q;
   reviewTask.value = null;
   reviewRecords.value = [];
+  reviewOpinion.value = "";
+
+  // 用题目 ID 查审核任务
   try {
-    const task = await api.getReviewTask(q.id).catch(() => null);
-    if (task) {
+    const task = await api.getTaskByQuestion(q.id);
+    if (task && task.id) {
       reviewTask.value = task;
       const recData = await api.reviewRecords(task.id).catch(() => ({ records: [] }));
       reviewRecords.value = recData.records || [];
@@ -44,10 +62,17 @@ async function selectQuestion(q) {
 
 async function submitToReview() {
   if (!selectedQuestion.value) return;
+  if (!selectedFlowId.value) {
+    showToast("请先选择审核流程");
+    return;
+  }
   loading.value = true;
   try {
-    const task = await api.submitReview(selectedQuestion.value.id, "flow-a2-2round");
+    const task = await api.submitReview(selectedQuestion.value.id, selectedFlowId.value);
     reviewTask.value = task;
+    // 刷新题目状态
+    const q = await api.getQuestion(selectedQuestion.value.id);
+    if (q) selectedQuestion.value = q;
     showToast("已提交到审核流程");
   } catch (e) {
     showToast("提交失败: " + e.message);
@@ -62,16 +87,20 @@ async function doReview() {
   try {
     await api.reviewAction({
       task_id: reviewTask.value.id,
-      expert_id: "E001",
+      expert_id: currentUser.value?.username || "admin",
       action: reviewAction.value,
       opinion: reviewOpinion.value,
     });
     showToast("审核完成");
     reviewOpinion.value = "";
-    // 刷新任务
+    // 刷新任务和记录
     reviewTask.value = await api.getReviewTask(reviewTask.value.id);
     const recData = await api.reviewRecords(reviewTask.value.id);
     reviewRecords.value = recData.records || [];
+    // 刷新题目状态
+    const q = await api.getQuestion(selectedQuestion.value.id);
+    if (q) selectedQuestion.value = q;
+    loadQuestions();
   } catch (e) {
     showToast("审核失败: " + e.message);
   } finally {
@@ -99,7 +128,20 @@ function statusClass(status) {
   return "";
 }
 
-onMounted(loadQuestions);
+// 判断是否可以提交审核
+function canSubmit(q) {
+  return q && (q.status === "ai_draft" || q.status === "auto_checked" || q.status === "revision_required");
+}
+
+// 判断是否可以执行审核
+function canReview(task) {
+  return task && (task.status === "reviewing" || task.status === "revision_required");
+}
+
+onMounted(() => {
+  loadQuestions();
+  loadFlows();
+});
 </script>
 
 <template>
@@ -156,20 +198,29 @@ onMounted(loadQuestions);
         <p>{{ selectedQuestion.explanation }}</p>
       </div>
 
-      <!-- 审核操作 -->
+      <!-- 审核操作区 -->
       <div class="review-actions">
-        <button
-          v-if="selectedQuestion.status === 'ai_draft' || selectedQuestion.status === 'auto_checked'"
-          class="primary-button"
-          type="button"
-          :disabled="loading"
-          @click="submitToReview"
-        >
-          提交到审核流程
-        </button>
+        <!-- 提交审核 -->
+        <div v-if="canSubmit(selectedQuestion) && !reviewTask" class="submit-section">
+          <div class="flow-select">
+            <label>审核流程：</label>
+            <select v-model="selectedFlowId">
+              <option v-for="f in flows" :key="f.id" :value="f.id">{{ f.name }}</option>
+            </select>
+          </div>
+          <button class="primary-button" type="button" :disabled="loading" @click="submitToReview">
+            提交到审核流程
+          </button>
+        </div>
 
-        <div v-if="reviewTask" class="review-form">
-          <h3>审核任务: {{ reviewTask.status }}</h3>
+        <!-- 审核任务信息 -->
+        <div v-if="reviewTask" class="task-info">
+          <h3>审核任务 <span class="task-status" :class="statusClass(reviewTask.status)">{{ statusText(reviewTask.status) }}</span></h3>
+          <p>当前轮次：第 {{ reviewTask.current_round }} 轮 | 审核人：{{ (reviewTask.assigned_to || []).join(", ") }}</p>
+        </div>
+
+        <!-- 审核表单 -->
+        <div v-if="reviewTask && canReview(reviewTask)" class="review-form">
           <div class="review-form-row">
             <select v-model="reviewAction">
               <option value="approved">通过</option>
@@ -181,6 +232,11 @@ onMounted(loadQuestions);
               提交审核
             </button>
           </div>
+        </div>
+
+        <!-- 已完成审核 -->
+        <div v-if="reviewTask && !canReview(reviewTask)" class="task-done">
+          <p>审核已结束，最终状态：{{ statusText(reviewTask.status) }}</p>
         </div>
 
         <!-- 审核记录 -->
@@ -262,20 +318,9 @@ onMounted(loadQuestions);
   white-space: nowrap;
 }
 
-.status-good {
-  background: #f0fff8;
-  color: #087c55;
-}
-
-.status-bad {
-  background: #fff0f0;
-  color: #c54858;
-}
-
-.status-active {
-  background: #eff8ff;
-  color: #0571dc;
-}
+.status-good { background: #f0fff8; color: #087c55; }
+.status-bad { background: #fff0f0; color: #c54858; }
+.status-active { background: #eff8ff; color: #0571dc; }
 
 .detail-section {
   margin-bottom: 16px;
@@ -326,14 +371,52 @@ onMounted(loadQuestions);
   margin-top: 16px;
 }
 
-.review-form {
-  margin-top: 12px;
+.submit-section {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
-.review-form h3 {
+.flow-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.flow-select label {
   font-size: 13px;
   color: #6e7b8f;
-  margin: 0 0 10px;
+  white-space: nowrap;
+}
+
+.flow-select select {
+  height: 36px;
+  border: 1px solid #e5ebf3;
+  border-radius: 7px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.task-info {
+  margin-bottom: 12px;
+}
+
+.task-info h3 {
+  font-size: 14px;
+  margin: 0 0 6px;
+}
+
+.task-status {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-left: 8px;
+}
+
+.task-info p {
+  font-size: 13px;
+  color: #6e7b8f;
+  margin: 0;
 }
 
 .review-form-row {
@@ -354,6 +437,19 @@ onMounted(loadQuestions);
   border: 1px solid #e5ebf3;
   border-radius: 7px;
   padding: 0 10px;
+}
+
+.task-done {
+  padding: 10px 14px;
+  background: #f0fff8;
+  border: 1px solid #bdecd9;
+  border-radius: 7px;
+}
+
+.task-done p {
+  margin: 0;
+  font-size: 13px;
+  color: #087c55;
 }
 
 .review-records {

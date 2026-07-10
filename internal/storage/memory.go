@@ -12,6 +12,7 @@ type QuestionStore interface {
 	SaveQuestions(ctx context.Context, questions []domain.A2Question) (int, error)
 	ListQuestions(ctx context.Context) ([]domain.A2Question, error)
 	GetQuestion(ctx context.Context, id string) (*domain.A2Question, error)
+	DeleteQuestion(ctx context.Context, id string) error
 	Count(ctx context.Context) (int, error)
 }
 
@@ -68,6 +69,24 @@ func (s *MemoryStore) GetQuestion(ctx context.Context, id string) (*domain.A2Que
 	}
 	q := s.questions[idx]
 	return &q, nil
+}
+
+func (s *MemoryStore) DeleteQuestion(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx, ok := s.index[id]
+	if !ok {
+		return nil
+	}
+	// 删除：用最后一个覆盖当前位置，然后截断
+	lastIdx := len(s.questions) - 1
+	if idx != lastIdx {
+		s.questions[idx] = s.questions[lastIdx]
+		s.index[s.questions[idx].ID] = idx
+	}
+	s.questions = s.questions[:lastIdx]
+	delete(s.index, id)
+	return nil
 }
 
 func (s *MemoryStore) Count(ctx context.Context) (int, error) {

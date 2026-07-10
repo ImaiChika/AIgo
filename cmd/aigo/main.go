@@ -91,10 +91,19 @@ func run(ctx context.Context, args []string) error {
 	var authSvc *auth.Service
 	if pgStore != nil {
 		authSvc = auth.NewService(pgStore.DB(), "aigo-jwt-secret-2025", 24*time.Hour)
-		if err := authSvc.InitAdmin("admin", "admin123", "系统管理员"); err != nil {
+		if err := authSvc.InitAdmin("admin", "admin", "系统管理员"); err != nil {
 			fmt.Printf("初始化管理员账号失败: %v\n", err)
 		} else {
-			fmt.Println("默认管理员: admin / admin123")
+			fmt.Println("默认管理员: admin / admin")
+		}
+	}
+
+	// 自动加载审核流程配置
+	if _, err := os.Stat("configs/review_flows.json"); err == nil {
+		if n, err := reviewSvc.LoadFlowsFromFile(ctx, "configs/review_flows.json"); err != nil {
+			fmt.Printf("加载审核流程失败: %v\n", err)
+		} else if n > 0 {
+			fmt.Printf("已加载 %d 个审核流程\n", n)
 		}
 	}
 

@@ -44,6 +44,21 @@ func (s *Service) ListExperts(ctx context.Context) ([]domain.Expert, error) {
 	return s.expertStore.ListExperts(ctx)
 }
 
+// GetExpert 获取专家。
+func (s *Service) GetExpert(ctx context.Context, id string) (*domain.Expert, error) {
+	return s.expertStore.GetExpert(ctx, id)
+}
+
+// UpdateExpert 更新专家。
+func (s *Service) UpdateExpert(ctx context.Context, expert domain.Expert) error {
+	return s.expertStore.UpdateExpert(ctx, expert)
+}
+
+// DeleteExpert 删除专家。
+func (s *Service) DeleteExpert(ctx context.Context, id string) error {
+	return s.expertStore.DeleteExpert(ctx, id)
+}
+
 // ===== 流程管理 =====
 
 // CreateFlow 创建审核流程配置。
@@ -165,6 +180,7 @@ type ReviewRequest struct {
 	ExpertID string             `json:"expert_id"`
 	Action   domain.QuestionStatus `json:"action"` // approved / rejected / revision_required
 	Opinion  string             `json:"opinion"`
+	Role     string             `json:"role"` // admin 可审核任意轮次
 }
 
 // Review 专家执行审核。
@@ -188,12 +204,14 @@ func (s *Service) Review(ctx context.Context, req ReviewRequest) error {
 	}
 	currentRoundConfig := flow.Rounds[roundIdx]
 
-	// 校验审核人是否在当前轮次
-	isAssigned := false
-	for _, id := range currentRoundConfig.ExpertIDs {
-		if id == req.ExpertID {
-			isAssigned = true
-			break
+	// 校验审核人是否在当前轮次（admin 可审核任意轮次）
+	isAssigned := req.Role == "admin"
+	if !isAssigned {
+		for _, id := range currentRoundConfig.ExpertIDs {
+			if id == req.ExpertID {
+				isAssigned = true
+				break
+			}
 		}
 	}
 	if !isAssigned {

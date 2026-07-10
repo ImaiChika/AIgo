@@ -19,6 +19,9 @@ type KnowledgeStore interface {
 	SearchPoints(ctx context.Context, keyword string) ([]domain.KnowledgePoint, error)
 	ListBySubject(ctx context.Context, subject string) ([]domain.KnowledgePoint, error)
 
+	// 删除
+	DeletePoint(ctx context.Context, id string) error
+
 	// 统计
 	KPCount(ctx context.Context) (int, error)
 }
@@ -94,6 +97,23 @@ func (s *MemoryKnowledgeStore) ListBySubject(_ context.Context, subject string) 
 		}
 	}
 	return result, nil
+}
+
+func (s *MemoryKnowledgeStore) DeletePoint(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx, ok := s.index[id]
+	if !ok {
+		return nil
+	}
+	lastIdx := len(s.points) - 1
+	if idx != lastIdx {
+		s.points[idx] = s.points[lastIdx]
+		s.index[s.points[idx].ID] = idx
+	}
+	s.points = s.points[:lastIdx]
+	delete(s.index, id)
+	return nil
 }
 
 func (s *MemoryKnowledgeStore) KPCount(_ context.Context) (int, error) {

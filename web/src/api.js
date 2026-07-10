@@ -1,22 +1,76 @@
+import { getToken, clearAuth } from "./auth.js";
+
 const BASE = "http://127.0.0.1:8080/api";
 
 async function request(path, options = {}) {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
+  const token = getToken();
+  const headers = { ...options.headers };
+
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  if (!(options.body instanceof FormData)) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  const res = await fetch(`${BASE}${path}`, { ...options, headers });
+
+  if (res.status === 401) {
+    clearAuth();
+    window.location.href = "/login";
+    throw new Error("登录已过期");
+  }
+
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || `请求失败: ${res.status}`);
   return data;
 }
 
 export const api = {
+  // 认证
+  login: (username, password) =>
+    request("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+  me: () => request("/auth/me"),
+  changePassword: (old_password, new_password) =>
+    request("/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ old_password, new_password }),
+    }),
+  updateProfile: (display_name) =>
+    request("/auth/profile", {
+      method: "PUT",
+      body: JSON.stringify({ display_name }),
+    }),
+
+  // 用户管理
+  listUsers: () => request("/users"),
+  createUser: (params) =>
+    request("/users", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+
   // 统计
   stats: () => request("/stats"),
 
   // 题目
   listQuestions: () => request("/questions"),
   getQuestion: (id) => request(`/questions/${id}`),
+  updateQuestion: (id, data) =>
+    request(`/questions/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  deleteQuestion: (id) => request(`/questions/${id}`, { method: "DELETE" }),
+  searchQuestions: (q, status = "") => {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (status) params.set("status", status);
+    return request(`/questions/search?${params}`);
+  },
   generate: (params) =>
     request("/questions/generate", {
       method: "POST",
@@ -29,16 +83,19 @@ export const api = {
     return request(`/knowledge-points?${qs}`);
   },
   searchKP: (q) => request(`/knowledge-points/search?q=${encodeURIComponent(q)}`),
+  createKP: (data) =>
+    request("/knowledge-points", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  deleteKP: (id) => request(`/knowledge-points/${id}`, { method: "DELETE" }),
   importKP: async (file) => {
     const form = new FormData();
     form.append("file", file);
-    const res = await fetch(`${BASE}/knowledge-points/import`, {
+    return request("/knowledge-points/import", {
       method: "POST",
       body: form,
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "导入失败");
-    return data;
   },
 
   // 图片
@@ -59,6 +116,20 @@ export const api = {
       body: JSON.stringify(params),
     }),
 
+  // 专家
+  listExperts: () => request("/experts"),
+  createExpert: (data) =>
+    request("/experts", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateExpert: (id, data) =>
+    request(`/experts/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  deleteExpert: (id) => request(`/experts/${id}`, { method: "DELETE" }),
+
   // 审核
   submitReview: (questionId, flowId) =>
     request("/review/submit", {
@@ -71,5 +142,7 @@ export const api = {
       body: JSON.stringify(params),
     }),
   getReviewTask: (id) => request(`/review/task/${id}`),
+  getTaskByQuestion: (questionId) => request(`/review/task-by-question/${questionId}`),
   reviewRecords: (taskId) => request(`/review/records/${taskId}`),
+  listFlows: () => request("/review/flows"),
 };

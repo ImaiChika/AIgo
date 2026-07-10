@@ -18,6 +18,16 @@ func NewService(store storage.KnowledgeStore) *Service {
 	return &Service{store: store}
 }
 
+// SavePoints 保存知识点。
+func (s *Service) SavePoints(ctx context.Context, points []domain.KnowledgePoint) (int, error) {
+	return s.store.SavePoints(ctx, points)
+}
+
+// DeletePoint 删除知识点。
+func (s *Service) DeletePoint(ctx context.Context, id string) error {
+	return s.store.DeletePoint(ctx, id)
+}
+
 // ImportFromXlsx 从 xlsx 文件导入知识点。
 func (s *Service) ImportFromXlsx(ctx context.Context, path string) (int, error) {
 	rows, err := importer.ReadKnowledgePoints(path)

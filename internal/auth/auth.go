@@ -164,6 +164,64 @@ func (s *Service) GetUserByID(id string) (*User, error) {
 	return &user, nil
 }
 
+// ListUsers 列出所有用户。
+func (s *Service) ListUsers() ([]User, error) {
+	rows, err := s.db.Query(`SELECT id, username, display_name, role, enabled, created_at, updated_at FROM users ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.Enabled, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, u)
+	}
+	return result, rows.Err()
+}
+
+// CreateUser 创建用户。
+func (s *Service) CreateUser(username, password, displayName, role string) (*User, error) {
+	if username == "" || password == "" {
+		return nil, fmt.Errorf("用户名和密码不能为空")
+	}
+	if role != "admin" && role != "expert" && role != "teacher" {
+		return nil, fmt.Errorf("无效的角色: %s", role)
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, err
+	}
+
+	user := User{
+		ID:          fmt.Sprintf("user-%d", time.Now().UnixNano()),
+		Username:    username,
+		DisplayName: displayName,
+		Role:        role,
+		Enabled:     true,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+
+	_, err = s.db.Exec(`
+		INSERT INTO users (id, username, password_hash, display_name, role, enabled, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+	`, user.ID, user.Username, string(hash), user.DisplayName, user.Role, user.Enabled, user.CreatedAt, user.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// UpdateDisplayName 修改昵称。
+func (s *Service) UpdateDisplayName(userID, displayName string) error {
+	_, err := s.db.Exec("UPDATE users SET display_name=$1, updated_at=NOW() WHERE id=$2", displayName, userID)
+	return err
+}
+
 // ChangePassword 修改密码。
 func (s *Service) ChangePassword(userID, oldPassword, newPassword string) error {
 	var passwordHash string
@@ -189,7 +247,7 @@ func (s *Service) ChangePassword(userID, oldPassword, newPassword string) error 
 func CheckPermission(role, action string) bool {
 	permissions := map[string][]string{
 		"admin": {
-			"question:generate", "question:list", "question:view",
+			"question:generate", "question:list", "question:view", "question:delete",
 			"knowledge:import", "knowledge:search", "knowledge:list",
 			"expert:create", "expert:list", "expert:update",
 			"flow:create", "flow:list",
@@ -199,17 +257,18 @@ func CheckPermission(role, action string) bool {
 			"user:manage",
 		},
 		"expert": {
-			"question:list", "question:view",
-			"knowledge:search", "knowledge:list",
-			"review:action", "review:view",
-			"image:review", "image:view",
+			"question:generate", "question:list", "question:view", "question:delete",
+			"knowledge:import", "knowledge:search", "knowledge:list",
+			"expert:list",
+			"review:submit", "review:action", "review:view",
+			"image:generate", "image:review", "image:view",
 			"export:questions",
 		},
 		"teacher": {
 			"question:generate", "question:list", "question:view",
-			"knowledge:import", "knowledge:search", "knowledge:list",
+			"knowledge:search", "knowledge:list",
 			"review:submit", "review:view",
-			"image:generate", "image:view",
+			"image:view",
 		},
 	}
 

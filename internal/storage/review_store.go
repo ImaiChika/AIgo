@@ -13,6 +13,7 @@ type ExpertStore interface {
 	GetExpert(ctx context.Context, id string) (*domain.Expert, error)
 	ListExperts(ctx context.Context) ([]domain.Expert, error)
 	UpdateExpert(ctx context.Context, expert domain.Expert) error
+	DeleteExpert(ctx context.Context, id string) error
 }
 
 // ReviewStore 审核相关存储。
@@ -74,6 +75,13 @@ func (s *MemoryExpertStore) UpdateExpert(_ context.Context, expert domain.Expert
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.experts[expert.ID] = expert
+	return nil
+}
+
+func (s *MemoryExpertStore) DeleteExpert(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.experts, id)
 	return nil
 }
 

@@ -3,9 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"aigo/internal/auth"
 	"aigo/internal/domain"
@@ -51,7 +54,10 @@ func (s *Server) Handler() http.Handler {
 	// 认证
 	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	mux.HandleFunc("GET /api/auth/me", s.requireAuth("", s.handleMe))
+	mux.HandleFunc("PUT /api/auth/profile", s.requireAuth("", s.handleUpdateProfile))
 	mux.HandleFunc("POST /api/auth/change-password", s.requireAuth("", s.handleChangePassword))
+	mux.HandleFunc("GET /api/users", s.requireAuth("user:manage", s.handleListUsers))
+	mux.HandleFunc("POST /api/users", s.requireAuth("user:manage", s.handleCreateUser))
 
 	// 统计（不需要 token）
 	mux.HandleFunc("GET /api/stats", s.handleStats)
@@ -60,11 +66,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/questions/generate", s.requireAuth("question:generate", s.handleGenerate))
 	mux.HandleFunc("GET /api/questions", s.requireAuth("question:list", s.handleListQuestions))
 	mux.HandleFunc("GET /api/questions/{id}", s.requireAuth("question:view", s.handleGetQuestion))
+	mux.HandleFunc("PUT /api/questions/{id}", s.requireAuth("question:generate", s.handleUpdateQuestion))
+	mux.HandleFunc("DELETE /api/questions/{id}", s.requireAuth("question:delete", s.handleDeleteQuestion))
+	mux.HandleFunc("GET /api/questions/search", s.requireAuth("question:list", s.handleSearchQuestions))
 
 	// 知识点
 	mux.HandleFunc("GET /api/knowledge-points", s.requireAuth("knowledge:list", s.handleListKP))
 	mux.HandleFunc("GET /api/knowledge-points/search", s.requireAuth("knowledge:search", s.handleSearchKP))
 	mux.HandleFunc("POST /api/knowledge-points/import", s.requireAuth("knowledge:import", s.handleImportKP))
+	mux.HandleFunc("POST /api/knowledge-points", s.requireAuth("knowledge:import", s.handleCreateKP))
+	mux.HandleFunc("DELETE /api/knowledge-points/{id}", s.requireAuth("knowledge:import", s.handleDeleteKP))
 
 	// 图片
 	mux.HandleFunc("POST /api/images/prompt", s.requireAuth("image:generate", s.handleImagePrompt))
@@ -72,11 +83,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/images/{questionId}", s.requireAuth("image:view", s.handleListImages))
 	mux.HandleFunc("POST /api/images/review", s.requireAuth("image:review", s.handleImageReview))
 
+	// 专家
+	mux.HandleFunc("GET /api/experts", s.requireAuth("expert:list", s.handleListExperts))
+	mux.HandleFunc("POST /api/experts", s.requireAuth("expert:create", s.handleCreateExpert))
+	mux.HandleFunc("PUT /api/experts/{id}", s.requireAuth("expert:update", s.handleUpdateExpert))
+	mux.HandleFunc("DELETE /api/experts/{id}", s.requireAuth("expert:update", s.handleDeleteExpert))
+
 	// 审核
 	mux.HandleFunc("POST /api/review/submit", s.requireAuth("review:submit", s.handleSubmitReview))
 	mux.HandleFunc("POST /api/review/action", s.requireAuth("review:action", s.handleReviewAction))
 	mux.HandleFunc("GET /api/review/task/{id}", s.requireAuth("review:view", s.handleGetReviewTask))
+	mux.HandleFunc("GET /api/review/task-by-question/{questionId}", s.requireAuth("review:view", s.handleGetTaskByQuestion))
 	mux.HandleFunc("GET /api/review/records/{taskId}", s.requireAuth("review:view", s.handleReviewRecords))
+	mux.HandleFunc("GET /api/review/flows", s.requireAuth("review:view", s.handleListFlows))
 
 	return withCORS(withJSON(mux))
 }
@@ -158,6 +177,96 @@ func (s *Server) handleGetQuestion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, q)
 }
 
+func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	existing, err := s.questionStore.GetQuestion(r.Context(), id)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	if existing == nil {
+		writeError(w, 404, "题目不存在")
+		return
+	}
+
+	var req struct {
+		ClinicalStem string `json:"clinical_stem"`
+		Options      []struct {
+			Label string `json:"label"`
+			Text  string `json:"text"`
+		} `json:"options"`
+		Answer      string `json:"answer"`
+		Explanation string `json:"explanation"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, "请求格式错误: "+err.Error())
+		return
+	}
+
+	if req.ClinicalStem != "" {
+		existing.ClinicalStem = req.ClinicalStem
+	}
+	if len(req.Options) > 0 {
+		existing.Options = make([]domain.Option, len(req.Options))
+		for i, o := range req.Options {
+			existing.Options[i] = domain.Option{Label: o.Label, Text: o.Text}
+		}
+	}
+	if req.Answer != "" {
+		existing.Answer = req.Answer
+	}
+	if req.Explanation != "" {
+		existing.Explanation = req.Explanation
+	}
+	existing.Version++
+	existing.UpdatedAt = time.Now()
+
+	if err := s.questionStore.SaveQuestion(r.Context(), *existing); err != nil {
+		writeError(w, 500, "保存失败: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, existing)
+}
+
+func (s *Server) handleDeleteQuestion(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.questionStore.DeleteQuestion(r.Context(), id); err != nil {
+		writeError(w, 500, "删除失败: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "ok", "id": id})
+}
+
+func (s *Server) handleSearchQuestions(w http.ResponseWriter, r *http.Request) {
+	keyword := r.URL.Query().Get("q")
+	status := r.URL.Query().Get("status")
+	ctx := r.Context()
+
+	questions, err := s.questionStore.ListQuestions(ctx)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+
+	var filtered []domain.A2Question
+	for _, q := range questions {
+		if status != "" && string(q.Status) != status {
+			continue
+		}
+		if keyword != "" {
+			keywordLower := strings.ToLower(keyword)
+			stemMatch := strings.Contains(strings.ToLower(q.ClinicalStem), keywordLower)
+			answerMatch := strings.Contains(strings.ToLower(q.Answer), keywordLower)
+			if !stemMatch && !answerMatch {
+				continue
+			}
+		}
+		filtered = append(filtered, q)
+	}
+
+	writeJSON(w, 200, map[string]any{"questions": filtered, "total": len(filtered)})
+}
+
 // ===== 知识点 =====
 
 func (s *Server) handleListKP(w http.ResponseWriter, r *http.Request) {
@@ -217,6 +326,52 @@ func (s *Server) handleSearchKP(w http.ResponseWriter, r *http.Request) {
 		"points": points,
 		"total":  len(points),
 	})
+}
+
+func (s *Server) handleCreateKP(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID       string   `json:"id"`
+		Subject  string   `json:"subject"`
+		System   string   `json:"system"`
+		Topic    string   `json:"topic"`
+		Keywords []string `json:"keywords"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, "请求格式错误")
+		return
+	}
+	if req.Topic == "" {
+		writeError(w, 400, "知识点名称不能为空")
+		return
+	}
+	if req.ID == "" {
+		req.ID = fmt.Sprintf("kp-custom-%d", time.Now().UnixNano())
+	}
+	if req.Subject == "" {
+		req.Subject = "临床医学"
+	}
+
+	kp := domain.KnowledgePoint{
+		ID:       req.ID,
+		Subject:  req.Subject,
+		System:   req.System,
+		Topic:    req.Topic,
+		Keywords: req.Keywords,
+	}
+	if _, err := s.kpSvc.SavePoints(r.Context(), []domain.KnowledgePoint{kp}); err != nil {
+		writeError(w, 500, "保存失败: "+err.Error())
+		return
+	}
+	writeJSON(w, 201, kp)
+}
+
+func (s *Server) handleDeleteKP(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.kpSvc.DeletePoint(r.Context(), id); err != nil {
+		writeError(w, 500, "删除失败: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "ok", "id": id})
 }
 
 func (s *Server) handleImportKP(w http.ResponseWriter, r *http.Request) {
@@ -346,7 +501,7 @@ func (s *Server) handleReviewAction(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TaskID   string `json:"task_id"`
 		ExpertID string `json:"expert_id"`
-		Action   string `json:"action"` // approved / rejected / revision_required
+		Action   string `json:"action"`
 		Opinion  string `json:"opinion"`
 	}
 	if err := readJSON(r, &req); err != nil {
@@ -354,11 +509,14 @@ func (s *Server) handleReviewAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	role := auth.GetRole(r.Context())
+
 	err := s.reviewSvc.Review(r.Context(), review.ReviewRequest{
 		TaskID:   req.TaskID,
 		ExpertID: req.ExpertID,
 		Action:   domain.QuestionStatus(req.Action),
 		Opinion:  req.Opinion,
+		Role:     role,
 	})
 	if err != nil {
 		writeError(w, 500, "审核失败: "+err.Error())
@@ -379,6 +537,29 @@ func (s *Server) handleGetReviewTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, task)
+}
+
+func (s *Server) handleGetTaskByQuestion(w http.ResponseWriter, r *http.Request) {
+	questionID := r.PathValue("questionId")
+	task, err := s.reviewSvc.GetTaskByQuestionID(r.Context(), questionID)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	if task == nil {
+		writeJSON(w, 200, nil)
+		return
+	}
+	writeJSON(w, 200, task)
+}
+
+func (s *Server) handleListFlows(w http.ResponseWriter, r *http.Request) {
+	flows, err := s.reviewSvc.ListFlows(r.Context())
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"flows": flows, "total": len(flows)})
 }
 
 func (s *Server) handleReviewRecords(w http.ResponseWriter, r *http.Request) {
@@ -407,6 +588,104 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"knowledge_count":   kpCount,
 		"knowledge_systems": systems,
 	})
+}
+
+// ===== 专家 =====
+
+func (s *Server) handleListExperts(w http.ResponseWriter, r *http.Request) {
+	experts, err := s.reviewSvc.ListExperts(r.Context())
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"experts": experts, "total": len(experts)})
+}
+
+func (s *Server) handleCreateExpert(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID         string   `json:"id"`
+		Name       string   `json:"name"`
+		Department string   `json:"department"`
+		Title      string   `json:"title"`
+		Specialties []string `json:"specialties"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, "请求格式错误")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, 400, "专家姓名不能为空")
+		return
+	}
+	if req.ID == "" {
+		req.ID = fmt.Sprintf("E%03d", time.Now().UnixNano()%10000)
+	}
+	expert := domain.Expert{
+		ID:          req.ID,
+		Name:        req.Name,
+		Department:  req.Department,
+		Title:       req.Title,
+		Specialties: req.Specialties,
+		Enabled:     true,
+	}
+	if err := s.reviewSvc.CreateExpert(r.Context(), expert); err != nil {
+		writeError(w, 500, "创建失败: "+err.Error())
+		return
+	}
+	writeJSON(w, 201, expert)
+}
+
+func (s *Server) handleUpdateExpert(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	existing, err := s.reviewSvc.GetExpert(r.Context(), id)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	if existing == nil {
+		writeError(w, 404, "专家不存在")
+		return
+	}
+	var req struct {
+		Name       string   `json:"name"`
+		Department string   `json:"department"`
+		Title      string   `json:"title"`
+		Specialties []string `json:"specialties"`
+		Enabled    *bool    `json:"enabled"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, "请求格式错误")
+		return
+	}
+	if req.Name != "" {
+		existing.Name = req.Name
+	}
+	if req.Department != "" {
+		existing.Department = req.Department
+	}
+	if req.Title != "" {
+		existing.Title = req.Title
+	}
+	if req.Specialties != nil {
+		existing.Specialties = req.Specialties
+	}
+	if req.Enabled != nil {
+		existing.Enabled = *req.Enabled
+	}
+	if err := s.reviewSvc.UpdateExpert(r.Context(), *existing); err != nil {
+		writeError(w, 500, "更新失败: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, existing)
+}
+
+func (s *Server) handleDeleteExpert(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.reviewSvc.DeleteExpert(r.Context(), id); err != nil {
+		writeError(w, 500, "删除失败: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "ok", "id": id})
 }
 
 // ===== 认证 =====
@@ -443,6 +722,27 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, user)
 }
 
+func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
+	userID := auth.GetUserID(r.Context())
+	var req struct {
+		DisplayName string `json:"display_name"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, "请求格式错误")
+		return
+	}
+	if req.DisplayName == "" {
+		writeError(w, 400, "昵称不能为空")
+		return
+	}
+	if err := s.authSvc.UpdateDisplayName(userID, req.DisplayName); err != nil {
+		writeError(w, 500, "更新失败")
+		return
+	}
+	user, _ := s.authSvc.GetUserByID(userID)
+	writeJSON(w, 200, user)
+}
+
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	userID := auth.GetUserID(r.Context())
 	var req struct {
@@ -462,6 +762,34 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := s.authSvc.ListUsers()
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"users": users, "total": len(users)})
+}
+
+func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username    string `json:"username"`
+		Password    string `json:"password"`
+		DisplayName string `json:"display_name"`
+		Role        string `json:"role"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, "请求格式错误")
+		return
+	}
+	user, err := s.authSvc.CreateUser(req.Username, req.Password, req.DisplayName, req.Role)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 201, user)
 }
 
 // requireAuth 创建带认证和权限检查的 handler。

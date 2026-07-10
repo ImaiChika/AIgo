@@ -6,23 +6,25 @@ const toast = ref("");
 const questions = ref([]);
 const loading = ref(false);
 const filterStatus = ref("");
+const searchQuery = ref("");
 const selectedQuestion = ref(null);
 
 function showToast(msg) {
   toast.value = msg;
   window.clearTimeout(showToast.timer);
-  showToast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
+  toast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
 }
 
 async function loadQuestions() {
   loading.value = true;
   try {
-    const data = await api.listQuestions();
-    let list = data.questions || [];
-    if (filterStatus.value) {
-      list = list.filter((q) => q.status === filterStatus.value);
+    let data;
+    if (searchQuery.value || filterStatus.value) {
+      data = await api.searchQuestions(searchQuery.value, filterStatus.value);
+    } else {
+      data = await api.listQuestions();
     }
-    questions.value = list;
+    questions.value = data.questions || [];
   } catch (e) {
     showToast("加载失败: " + e.message);
   } finally {
@@ -32,6 +34,28 @@ async function loadQuestions() {
 
 function selectQuestion(q) {
   selectedQuestion.value = q;
+}
+
+async function deleteQuestion(q) {
+  if (!confirm(`确定删除题目？\n${(q.clinical_stem || "").slice(0, 50)}...`)) return;
+  try {
+    await api.deleteQuestion(q.id);
+    showToast("已删除");
+    questions.value = questions.value.filter((item) => item.id !== q.id);
+    if (selectedQuestion.value?.id === q.id) selectedQuestion.value = null;
+  } catch (e) {
+    showToast("删除失败: " + e.message);
+  }
+}
+
+function doSearch() {
+  loadQuestions();
+}
+
+function clearSearch() {
+  searchQuery.value = "";
+  filterStatus.value = "";
+  loadQuestions();
 }
 
 function statusText(status) {
@@ -81,7 +105,13 @@ onMounted(loadQuestions);
       </div>
 
       <div class="filter-row">
-        <select v-model="filterStatus" @change="loadQuestions">
+        <input
+          v-model="searchQuery"
+          placeholder="搜索题干或答案..."
+          @keyup.enter="doSearch"
+          class="search-input"
+        />
+        <select v-model="filterStatus" @change="doSearch">
           <option value="">全部状态</option>
           <option value="ai_draft">AI草稿</option>
           <option value="auto_checked">已初评</option>
@@ -90,6 +120,11 @@ onMounted(loadQuestions);
           <option value="rejected">已驳回</option>
           <option value="published">已入库</option>
         </select>
+        <button class="ghost-button" type="button" @click="doSearch">搜索</button>
+        <button class="ghost-button" type="button" @click="clearSearch">重置</button>
+      </div>
+
+      <div class="action-row">
         <button class="ghost-button" type="button" @click="exportJSON">导出 JSON</button>
       </div>
 
@@ -107,7 +142,10 @@ onMounted(loadQuestions);
             <span class="q-stem">{{ (q.clinical_stem || "").slice(0, 50) }}...</span>
             <span class="q-meta">答案: {{ q.answer }} | 选项: {{ (q.options || []).length }}个</span>
           </div>
-          <span class="q-status" :class="statusClass(q.status)">{{ statusText(q.status) }}</span>
+          <div class="q-actions">
+            <span class="q-status" :class="statusClass(q.status)">{{ statusText(q.status) }}</span>
+            <button class="delete-btn" type="button" @click.stop="deleteQuestion(q)" title="删除">×</button>
+          </div>
         </button>
         <div v-if="!questions.length" class="empty">暂无题目</div>
       </div>
@@ -166,7 +204,7 @@ onMounted(loadQuestions);
 <style scoped>
 .bank-layout {
   display: grid;
-  grid-template-columns: 360px minmax(0, 1fr);
+  grid-template-columns: 400px minmax(0, 1fr);
   gap: 16px;
 }
 
@@ -178,15 +216,28 @@ onMounted(loadQuestions);
 .filter-row {
   display: flex;
   gap: 8px;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
-.filter-row select {
+.search-input {
   flex: 1;
   height: 36px;
   border: 1px solid #e5ebf3;
   border-radius: 7px;
   padding: 0 10px;
+  font-size: 13px;
+}
+
+.filter-row select {
+  height: 36px;
+  border: 1px solid #e5ebf3;
+  border-radius: 7px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+
+.action-row {
+  margin-bottom: 14px;
 }
 
 .question-list {
@@ -235,6 +286,13 @@ onMounted(loadQuestions);
   color: #6e7b8f;
 }
 
+.q-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .q-status {
   font-size: 11px;
   font-weight: 700;
@@ -248,6 +306,24 @@ onMounted(loadQuestions);
 .status-good { background: #f0fff8; color: #087c55; }
 .status-bad { background: #fff0f0; color: #c54858; }
 .status-active { background: #eff8ff; color: #0571dc; }
+
+.delete-btn {
+  width: 28px;
+  height: 28px;
+  border: 1px solid #e5ebf3;
+  border-radius: 6px;
+  background: #fff;
+  color: #c54858;
+  font-size: 18px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.delete-btn:hover {
+  background: #fff0f0;
+  border-color: #c54858;
+}
 
 .detail-field {
   margin-bottom: 16px;

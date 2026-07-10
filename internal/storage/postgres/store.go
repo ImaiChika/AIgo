@@ -133,6 +133,11 @@ func (s *Store) KPCount(ctx context.Context) (int, error) {
 	return n, err
 }
 
+func (s *Store) DeletePoint(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM knowledge_points WHERE id=$1`, id)
+	return err
+}
+
 // ===== 题目 =====
 
 func (s *Store) SaveQuestion(ctx context.Context, q domain.A2Question) error {
@@ -193,6 +198,11 @@ func (s *Store) GetQuestion(ctx context.Context, id string) (*domain.A2Question,
 	return scanQuestion(row)
 }
 
+func (s *Store) DeleteQuestion(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM questions WHERE id=$1`, id)
+	return err
+}
+
 func (s *Store) ListQuestions(ctx context.Context) ([]domain.A2Question, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, clinical_stem, options, answer, explanation, source_refs, knowledge_points, media_refs, difficulty, status, version, created_at, updated_at
@@ -243,6 +253,11 @@ func (s *Store) ListExperts(ctx context.Context) ([]domain.Expert, error) {
 
 func (s *Store) UpdateExpert(ctx context.Context, e domain.Expert) error {
 	return s.SaveExpert(ctx, e)
+}
+
+func (s *Store) DeleteExpert(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM experts WHERE id=$1`, id)
+	return err
 }
 
 // ===== 审核流程 =====
