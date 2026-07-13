@@ -19,13 +19,14 @@ func (s *Server) handleListExperts(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCreateExpert 创建专家。
+// 请求：{"name": "张三", "department": "内科", "title": "主任医师", "specialties": ["肺炎"]}
 func (s *Server) handleCreateExpert(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID         string   `json:"id"`
-		Name       string   `json:"name"`
-		Department string   `json:"department"`
-		Title      string   `json:"title"`
-		Specialties []string `json:"specialties"`
+		ID         string   `json:"id"`          // 可选，不填自动生成
+		Name       string   `json:"name"`        // 姓名（必填）
+		Department string   `json:"department"`  // 科室
+		Title      string   `json:"title"`       // 职称
+		Specialties []string `json:"specialties"` // 擅长知识点
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, 400, "请求格式错误")
@@ -38,6 +39,7 @@ func (s *Server) handleCreateExpert(w http.ResponseWriter, r *http.Request) {
 	if req.ID == "" {
 		req.ID = fmt.Sprintf("E%03d", time.Now().UnixNano()%10000)
 	}
+
 	expert := domain.Expert{
 		ID:          req.ID,
 		Name:        req.Name,
@@ -53,7 +55,7 @@ func (s *Server) handleCreateExpert(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, expert)
 }
 
-// handleUpdateExpert 更新专家信息。
+// handleUpdateExpert 更新专家信息（姓名、科室、职称、擅长、启用/停用）。
 func (s *Server) handleUpdateExpert(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	existing, err := s.reviewSvc.GetExpert(r.Context(), id)
@@ -65,17 +67,19 @@ func (s *Server) handleUpdateExpert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "专家不存在")
 		return
 	}
+
 	var req struct {
 		Name       string   `json:"name"`
 		Department string   `json:"department"`
 		Title      string   `json:"title"`
 		Specialties []string `json:"specialties"`
-		Enabled    *bool    `json:"enabled"`
+		Enabled    *bool    `json:"enabled"` // 用指区分"未传"和"传false"
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, 400, "请求格式错误")
 		return
 	}
+	// 按字段更新
 	if req.Name != "" {
 		existing.Name = req.Name
 	}

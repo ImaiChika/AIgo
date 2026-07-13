@@ -6,6 +6,7 @@ import (
 	"strings"
 )
 
+// systemPrompt 千问系统提示词，定义 AI 的角色和行为约束。
 const systemPrompt = `你是医学考试命题助手，负责生成国家执业医师考试A2型单选题。
 你必须输出严格JSON，不要输出任何其他文字。
 如请求中包含多模态素材，只能根据已结构化的文字描述使用，不得声称自己读取了图片或影像。
@@ -27,6 +28,8 @@ const A2JSONSchema = `{
     "difficulty": "medium"
 }`
 
+// buildPrompt 构建发送给千问的用户提示词。
+// 包含科目、难度、知识点、数量和 JSON schema 要求。
 func buildPrompt(subject string, difficulty string, topic string, count int) string {
 	var b strings.Builder
 	b.WriteString("请根据以下要求生成国家执业医师考试A2型单选题。\n\n")
@@ -40,8 +43,12 @@ func buildPrompt(subject string, difficulty string, topic string, count int) str
 	b.WriteString("\n\n只输出JSON数组，不要输出其他任何内容。")
 	return b.String()
 }
+
+// parseQuestions 从 LLM 返回的文本中解析 JSON 数组。
+// 兼容 LLM 可能用 ```json ... ``` 包裹的情况。
 func parseQuestions(raw string) ([]map[string]interface{}, error) {
 	raw = strings.TrimSpace(raw)
+	// 去掉可能的 markdown 代码块标记
 	if strings.HasPrefix(raw, "```") {
 		lines := strings.Split(raw, "\n")
 		var cleaned []string
@@ -56,11 +63,11 @@ func parseQuestions(raw string) ([]map[string]interface{}, error) {
 			}
 		}
 		raw = strings.Join(cleaned, "\n")
-
 	}
+
 	var result []map[string]interface{}
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+		return nil, fmt.Errorf("JSON解析失败: %w", err)
 	}
 	return result, nil
 }

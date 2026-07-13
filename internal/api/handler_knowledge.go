@@ -9,11 +9,13 @@ import (
 	"aigo/internal/domain"
 )
 
-// handleListKP 列出知识点（分页，可按系统筛选）。
+// handleListKP 列出知识点（支持分页和按系统筛选）。
+// 查询参数：system=系统名，page=页码，page_size=每页数量。
 func (s *Server) handleListKP(w http.ResponseWriter, r *http.Request) {
 	system := r.URL.Query().Get("system")
 	ctx := r.Context()
 
+	// 按系统筛选或列出全部
 	var points []domain.KnowledgePoint
 	var err error
 	if system != "" {
@@ -52,7 +54,8 @@ func (s *Server) handleListKP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleSearchKP 搜索知识点。
+// handleSearchKP 搜索知识点（按名称或关键词匹配）。
+// 查询参数：q=搜索关键词。
 func (s *Server) handleSearchKP(w http.ResponseWriter, r *http.Request) {
 	keyword := r.URL.Query().Get("q")
 	if keyword == "" {
@@ -71,13 +74,14 @@ func (s *Server) handleSearchKP(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCreateKP 创建单个知识点。
+// 请求：{"topic": "肺炎", "system": "呼吸内科", "keywords": ["发热","咳嗽"]}
 func (s *Server) handleCreateKP(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID       string   `json:"id"`
-		Subject  string   `json:"subject"`
-		System   string   `json:"system"`
-		Topic    string   `json:"topic"`
-		Keywords []string `json:"keywords"`
+		ID       string   `json:"id"`       // 可选，不填自动生成
+		Subject  string   `json:"subject"`  // 科目，默认"临床医学"
+		System   string   `json:"system"`   // 所属系统
+		Topic    string   `json:"topic"`    // 知识点名称（必填）
+		Keywords []string `json:"keywords"` // 关键词列表
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, 400, "请求格式错误")
@@ -108,7 +112,7 @@ func (s *Server) handleCreateKP(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, kp)
 }
 
-// handleDeleteKP 删除知识点。
+// handleDeleteKP 根据 ID 删除知识点。
 func (s *Server) handleDeleteKP(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := s.kpSvc.DeletePoint(r.Context(), id); err != nil {
@@ -119,6 +123,7 @@ func (s *Server) handleDeleteKP(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleImportKP 从 Excel 文件批量导入知识点。
+// 请求格式：multipart/form-data，字段名 "file"。
 func (s *Server) handleImportKP(w http.ResponseWriter, r *http.Request) {
 	file, header, err := r.FormFile("file")
 	if err != nil {
@@ -127,12 +132,14 @@ func (s *Server) handleImportKP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	// 保存到临时文件
 	tmpPath := "/tmp/aigo_kp_import_" + header.Filename
 	if err := saveUploadedFile(tmpPath, file); err != nil {
 		writeError(w, 500, "保存临时文件失败: "+err.Error())
 		return
 	}
 
+	// 调用知识点服务解析并导入
 	count, err := s.kpSvc.ImportFromXlsx(r.Context(), tmpPath)
 	if err != nil {
 		writeError(w, 500, "导入失败: "+err.Error())
@@ -141,7 +148,7 @@ func (s *Server) handleImportKP(w http.ResponseWriter, r *http.Request) {
 
 	total, _ := s.kpSvc.Count(r.Context())
 	writeJSON(w, 200, map[string]any{
-		"imported": count,
-		"total":    total,
+		"imported": count, // 本次导入数量
+		"total":    total, // 导入后总量
 	})
 }

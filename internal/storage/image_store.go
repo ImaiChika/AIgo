@@ -7,7 +7,7 @@ import (
 	"aigo/internal/domain"
 )
 
-// ImageStore 图片相关存储。
+// ImageStore 图片相关存储接口。
 type ImageStore interface {
 	// 提示词
 	SavePrompt(ctx context.Context, prompt domain.ImagePrompt) error
@@ -21,7 +21,7 @@ type ImageStore interface {
 	ListImagesByPromptID(ctx context.Context, promptID string) ([]domain.GeneratedImage, error)
 	UpdateImageStatus(ctx context.Context, id string, status domain.ImageStatus, note string) error
 
-	// 审核记录
+	// 图片审核记录
 	SaveReviewRecord(ctx context.Context, record domain.ImageReviewRecord) error
 	ListReviewRecordsByImageID(ctx context.Context, imageID string) ([]domain.ImageReviewRecord, error)
 }
@@ -29,9 +29,9 @@ type ImageStore interface {
 // MemoryImageStore 内存图片存储。
 type MemoryImageStore struct {
 	mu       sync.Mutex
-	prompts  map[string]domain.ImagePrompt           // promptID → prompt
-	images   map[string]domain.GeneratedImage        // imageID → image
-	records  map[string][]domain.ImageReviewRecord    // imageID → records
+	prompts  map[string]domain.ImagePrompt          // promptID → 提示词
+	images   map[string]domain.GeneratedImage        // imageID → 候选图
+	records  map[string][]domain.ImageReviewRecord    // imageID → 审核记录
 	byQID    map[string]string                        // questionID → promptID
 	byPrompt map[string][]string                      // promptID → imageIDs
 }

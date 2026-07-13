@@ -1,3 +1,5 @@
+// Package image 提供图片相关的业务服务。
+// 包括结构化生图提示词生成、候选图生成（当前为 Mock）和图片审核。
 package image
 
 import (
@@ -13,19 +15,21 @@ import (
 	"aigo/internal/storage"
 )
 
-// ImageGenerator 外部生图接口。
+// ImageGenerator 外部生图模型接口。
+// 当前为 Mock 实现，后续可接入真实生图 API。
 type ImageGenerator interface {
 	Generate(ctx context.Context, prompt domain.ImagePrompt) ([]domain.GeneratedImage, error)
 }
 
 // Service 图片服务。
 type Service struct {
-	questionStore storage.QuestionStore
-	imageStore    storage.ImageStore
-	llmClient     llm.Client
-	imgGen        ImageGenerator
+	questionStore storage.QuestionStore // 题目存储
+	imageStore    storage.ImageStore    // 图片存储
+	llmClient     llm.Client            // LLM 客户端（用于生成提示词）
+	imgGen        ImageGenerator        // 生图模型
 }
 
+// NewService 创建图片服务实例。
 func NewService(questionStore storage.QuestionStore, imageStore storage.ImageStore, llmClient llm.Client, imgGen ImageGenerator) *Service {
 	return &Service{
 		questionStore: questionStore,
@@ -36,6 +40,7 @@ func NewService(questionStore storage.QuestionStore, imageStore storage.ImageSto
 }
 
 // GeneratePrompt 为题目生成结构化生图提示词。
+// 调用千问分析题干，输出图片用途、类型、主题、必须出现/不能出现的要素等。
 func (s *Service) GeneratePrompt(ctx context.Context, questionID string) (*domain.ImagePrompt, error) {
 	q, err := s.questionStore.GetQuestion(ctx, questionID)
 	if err != nil {
@@ -86,7 +91,7 @@ func (s *Service) GeneratePrompt(ctx context.Context, questionID string) (*domai
 		return nil, fmt.Errorf("生成提示词失败: %w", err)
 	}
 
-	// 解析JSON
+	// 解析 JSON
 	var parsed struct {
 		Purpose     string   `json:"purpose"`
 		ImageType   string   `json:"image_type"`
@@ -97,7 +102,7 @@ func (s *Service) GeneratePrompt(ctx context.Context, questionID string) (*domai
 		ReviewFocus string   `json:"review_focus"`
 	}
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return nil, fmt.Errorf("解析提示词JSON失败: %w, 原始输出: %s", err, raw[:min(200, len(raw))])
+		return nil, fmt.Errorf("解析提示词JSON失败: %w", err)
 	}
 
 	imagePrompt := domain.ImagePrompt{
@@ -122,8 +127,8 @@ func (s *Service) GeneratePrompt(ctx context.Context, questionID string) (*domai
 }
 
 // GenerateImages 为题目生成候选图。
+// 当前使用 Mock 实现，后续替换为真实生图模型。
 func (s *Service) GenerateImages(ctx context.Context, questionID string, count int) ([]domain.GeneratedImage, error) {
-	// 获取提示词
 	prompt, err := s.imageStore.GetPromptByQuestionID(ctx, questionID)
 	if err != nil {
 		return nil, err
@@ -133,13 +138,13 @@ func (s *Service) GenerateImages(ctx context.Context, questionID string, count i
 	}
 
 	if count < 3 {
-		count = 3
+		count = 3 // 至少 3 张
 	}
 	if count > 5 {
-		count = 5
+		count = 5 // 最多 5 张
 	}
 
-	// 调外部生图
+	// 调用生图模型
 	var images []domain.GeneratedImage
 	for i := 0; i < count; i++ {
 		imgs, err := s.imgGen.Generate(ctx, *prompt)
@@ -149,7 +154,7 @@ func (s *Service) GenerateImages(ctx context.Context, questionID string, count i
 		images = append(images, imgs...)
 	}
 
-	// 保存
+	// 保存到数据库
 	for i := range images {
 		images[i].PromptID = prompt.ID
 		images[i].QuestionID = questionID
@@ -162,12 +167,12 @@ func (s *Service) GenerateImages(ctx context.Context, questionID string, count i
 	return images, nil
 }
 
-// ListImages 列出题目的候选图。
+// ListImages 列出题目的所有候选图。
 func (s *Service) ListImages(ctx context.Context, questionID string) ([]domain.GeneratedImage, error) {
 	return s.imageStore.ListImagesByQuestionID(ctx, questionID)
 }
 
-// ReviewImage 审核图片。
+// ReviewImage 审核候选图（通过/驳回）。
 func (s *Service) ReviewImage(ctx context.Context, imageID string, expertID string, action domain.ImageStatus, opinion string) error {
 	img, err := s.imageStore.GetImage(ctx, imageID)
 	if err != nil {
@@ -197,38 +202,33 @@ func (s *Service) ReviewImage(ctx context.Context, imageID string, expertID stri
 	return s.imageStore.SaveReviewRecord(ctx, record)
 }
 
-// GetPrompt 获取题目的提示词。
+// GetPrompt 获取题目的生图提示词。
 func (s *Service) GetPrompt(ctx context.Context, questionID string) (*domain.ImagePrompt, error) {
 	return s.imageStore.GetPromptByQuestionID(ctx, questionID)
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // ===== Mock 生图实现 =====
 
-// MockImageGenerator Mock生图器，生成占位文件。
+// MockImageGenerator Mock 生图器，生成占位文件。
+// 用于开发测试，后续替换为真实生图 API。
 type MockImageGenerator struct {
-	OutputDir string
+	OutputDir string // 输出目录
 }
 
+// NewMockImageGenerator 创建 Mock 生图器。
 func NewMockImageGenerator(outputDir string) *MockImageGenerator {
 	return &MockImageGenerator{OutputDir: outputDir}
 }
 
+// Generate 生成一个占位文件作为"候选图"。
 func (m *MockImageGenerator) Generate(ctx context.Context, prompt domain.ImagePrompt) ([]domain.GeneratedImage, error) {
-	// 确保输出目录存在
 	os.MkdirAll(m.OutputDir, 0755)
 
 	imgID := fmt.Sprintf("img-%s-%d", prompt.QuestionID, time.Now().UnixNano())
 	filename := fmt.Sprintf("%s.png", imgID)
 	path := filepath.Join(m.OutputDir, filename)
 
-	// 生成一个占位文本文件（真实场景会是图片）
+	// 生成占位文本文件（真实场景会是图片）
 	placeholder := fmt.Sprintf(`[占位图 - Mock]
 题目: %s
 主题: %s

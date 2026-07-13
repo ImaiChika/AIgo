@@ -1,3 +1,5 @@
+// Package importer 提供 Excel 数据导入功能。
+// 支持从 xlsx 文件读取真题和知识点数据。
 package importer
 
 import (
@@ -9,20 +11,20 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
-// ExcelRow 对应 xlsx 中的一行原始数据。
+// ExcelRow 对应真题 xlsx 中的一行原始数据。
 type ExcelRow struct {
-	ID            string
-	Stem          string
-	Answer        string
-	Explanation   string
-	OptionA       string
-	OptionB       string
-	OptionC       string
-	OptionD       string
-	OptionE       string
+	ID          string // 题目 ID
+	Stem        string // 题干
+	Answer      string // 正确答案
+	Explanation string // 解析
+	OptionA     string // 选项 A
+	OptionB     string // 选项 B
+	OptionC     string // 选项 C
+	OptionD     string // 选项 D
+	OptionE     string // 选项 E
 }
 
-// ReadXlsx 读取 xlsx 文件，返回原始行数据。
+// ReadXlsx 读取真题 xlsx 文件，返回原始行数据。
 // skipHeader 为 true 时跳过第一行表头。
 func ReadXlsx(path string, skipHeader bool) ([]ExcelRow, error) {
 	f, err := excelize.OpenFile(path)
@@ -46,7 +48,7 @@ func ReadXlsx(path string, skipHeader bool) ([]ExcelRow, error) {
 	for i := start; i < len(rows); i++ {
 		row := rows[i]
 		if len(row) < 9 {
-			continue // 跳过列数不足的行
+			continue // 列数不足则跳过
 		}
 		result = append(result, ExcelRow{
 			ID:          strings.TrimSpace(row[0]),
@@ -64,7 +66,7 @@ func ReadXlsx(path string, skipHeader bool) ([]ExcelRow, error) {
 }
 
 // ConvertToQuestions 将原始行数据转换为 A2Question 切片。
-// 跳过题干为空的行，跳过选项不足 4 个的行。
+// 跳过题干为空或选项不足 4 个的行。
 func ConvertToQuestions(rows []ExcelRow) ([]domain.A2Question, []error) {
 	var questions []domain.A2Question
 	var errs []error
@@ -75,7 +77,7 @@ func ConvertToQuestions(rows []ExcelRow) ([]domain.A2Question, []error) {
 			continue
 		}
 
-		// 构建选项：先加非空选项，至少需要 4 个
+		// 构建选项列表（只保留非空选项）
 		optionTexts := []string{row.OptionA, row.OptionB, row.OptionC, row.OptionD, row.OptionE}
 		labels := []string{"A", "B", "C", "D", "E"}
 		var options []domain.Option

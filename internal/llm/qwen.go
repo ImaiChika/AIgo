@@ -11,18 +11,21 @@ import (
 	"time"
 )
 
+// QwenConfig 千问 API 配置。
 type QwenConfig struct {
-	APIKey      string
-	BaseURL     string
-	Model       string
-	HTTPTimeout time.Duration
+	APIKey      string        // API 密钥
+	BaseURL     string        // 接口地址（OpenAI 兼容格式）
+	Model       string        // 模型名称，如 qwen3.6-flash
+	HTTPTimeout time.Duration // HTTP 超时时间
 }
 
+// QwenClient 千问 API 客户端，使用标准库 net/http 调用 OpenAI 兼容接口。
 type QwenClient struct {
 	cfg        QwenConfig
 	httpClient *http.Client
 }
 
+// NewQwenClient 创建千问客户端实例。
 func NewQwenClient(cfg QwenConfig) *QwenClient {
 	timeout := cfg.HTTPTimeout
 	if timeout == 0 {
@@ -36,14 +39,16 @@ func NewQwenClient(cfg QwenConfig) *QwenClient {
 	}
 }
 
+// Complete 调用千问 Chat Completions API。
 func (c *QwenClient) Complete(ctx context.Context, messages []Message, opts GenerateOptions) (string, error) {
 	if c.cfg.APIKey == "" {
-		return "", errors.New("missing DASHSCOPE_API_KEY or QWEN_API_KEY")
+		return "", errors.New("缺少 DASHSCOPE_API_KEY 或 QWEN_API_KEY")
 	}
 	if len(messages) == 0 {
 		return "", errors.New("messages cannot be empty")
 	}
 
+	// 构建请求体
 	requestBody := chatRequest{
 		Model:    firstNonEmpty(c.cfg.Model, "qwen-plus"),
 		Messages: messages,
@@ -60,6 +65,7 @@ func (c *QwenClient) Complete(ctx context.Context, messages []Message, opts Gene
 		return "", err
 	}
 
+	// 构建 HTTP 请求
 	endpoint := strings.TrimRight(firstNonEmpty(c.cfg.BaseURL, "https://dashscope.aliyuncs.com/compatible-mode/v1"), "/") + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
@@ -68,12 +74,14 @@ func (c *QwenClient) Complete(ctx context.Context, messages []Message, opts Gene
 	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 
+	// 发送请求
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
+	// 解析响应
 	var decoded chatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return "", err
@@ -87,6 +95,7 @@ func (c *QwenClient) Complete(ctx context.Context, messages []Message, opts Gene
 	return decoded.Choices[0].Message.Content, nil
 }
 
+// chatRequest 千问 API 请求体。
 type chatRequest struct {
 	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
@@ -94,6 +103,7 @@ type chatRequest struct {
 	MaxTokens   int       `json:"max_tokens,omitempty"`
 }
 
+// chatResponse 千问 API 响应体。
 type chatResponse struct {
 	Choices []struct {
 		Message Message `json:"message"`
@@ -103,6 +113,7 @@ type chatResponse struct {
 	} `json:"error"`
 }
 
+// firstNonEmpty 返回第一个非空字符串。
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if value != "" {

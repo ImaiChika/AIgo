@@ -7,59 +7,47 @@ import (
 	"strings"
 )
 
+// context key 类型，避免与其他包的 key 冲突。
 type contextKey string
 
 const (
-	UserIDKey      contextKey = "user_id"
-	UsernameKey    contextKey = "username"
-	DisplayNameKey contextKey = "display_name"
-	RoleKey        contextKey = "role"
+	UserIDKey      contextKey = "user_id"      // 用户 ID
+	UsernameKey    contextKey = "username"      // 用户名
+	DisplayNameKey contextKey = "display_name" // 昵称
+	RoleKey        contextKey = "role"         // 角色
 )
 
-// Middleware JWT 认证中间件。
+// Middleware 返回一个 HTTP 中间件，用于验证 JWT token 并注入用户信息到 context。
+// 适用于需要统一认证的路由组。
 func Middleware(authSvc *Service) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// 从 Header 提取 token
+			// 从 Authorization 头提取 Bearer token
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
 				http.Error(w, `{"error":"缺少登录凭证"}`, http.StatusUnauthorized)
 				return
 			}
-
 			token := strings.TrimPrefix(authHeader, "Bearer ")
 			if token == authHeader {
 				http.Error(w, `{"error":"无效的凭证格式"}`, http.StatusUnauthorized)
 				return
 			}
 
+			// 验证 token
 			claims, err := authSvc.ValidateToken(token)
 			if err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusUnauthorized)
 				return
 			}
 
-			// 注入用户信息到 context
+			// 将用户信息注入 context
 			ctx := context.WithValue(r.Context(), UserIDKey, claims.UserID)
 			ctx = context.WithValue(ctx, UsernameKey, claims.Username)
 			ctx = context.WithValue(ctx, DisplayNameKey, claims.DisplayName)
 			ctx = context.WithValue(ctx, RoleKey, claims.Role)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	}
-}
-
-// RequirePermission 权限检查中间件。
-func RequirePermission(action string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			role := GetRole(r.Context())
-			if !CheckPermission(role, action) {
-				http.Error(w, `{"error":"权限不足"}`, http.StatusForbidden)
-				return
-			}
-			next.ServeHTTP(w, r)
 		})
 	}
 }
@@ -80,7 +68,7 @@ func GetUsername(ctx context.Context) string {
 	return ""
 }
 
-// GetDisplayName 从 context 获取显示名。
+// GetDisplayName 从 context 获取昵称。
 func GetDisplayName(ctx context.Context) string {
 	if v, ok := ctx.Value(DisplayNameKey).(string); ok {
 		return v

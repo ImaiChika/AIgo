@@ -10,19 +10,19 @@ import (
 
 // KnowledgeStore 知识点存储接口。
 type KnowledgeStore interface {
-	// 批量导入
+	// SavePoints 批量保存知识点（新增或更新）。
 	SavePoints(ctx context.Context, points []domain.KnowledgePoint) (int, error)
-
-	// 查询
+	// GetPoint 根据 ID 获取知识点。
 	GetPoint(ctx context.Context, id string) (*domain.KnowledgePoint, error)
+	// ListPoints 列出所有知识点。
 	ListPoints(ctx context.Context) ([]domain.KnowledgePoint, error)
+	// SearchPoints 搜索知识点（按名称或关键词匹配）。
 	SearchPoints(ctx context.Context, keyword string) ([]domain.KnowledgePoint, error)
+	// ListBySubject 按科目筛选知识点。
 	ListBySubject(ctx context.Context, subject string) ([]domain.KnowledgePoint, error)
-
-	// 删除
+	// DeletePoint 删除知识点。
 	DeletePoint(ctx context.Context, id string) error
-
-	// 统计
+	// KPCount 返回知识点总数。
 	KPCount(ctx context.Context) (int, error)
 }
 
@@ -30,7 +30,7 @@ type KnowledgeStore interface {
 type MemoryKnowledgeStore struct {
 	mu     sync.Mutex
 	points []domain.KnowledgePoint
-	index  map[string]int // id → slice index
+	index  map[string]int // ID → 切片索引
 }
 
 func NewMemoryKnowledgeStore() *MemoryKnowledgeStore {
@@ -39,15 +39,16 @@ func NewMemoryKnowledgeStore() *MemoryKnowledgeStore {
 	}
 }
 
+// SavePoints 批量保存知识点，已存在的会更新。
 func (s *MemoryKnowledgeStore) SavePoints(_ context.Context, points []domain.KnowledgePoint) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	count := 0
 	for _, p := range points {
 		if idx, ok := s.index[p.ID]; ok {
-			s.points[idx] = p
+			s.points[idx] = p // 更新
 		} else {
-			s.points = append(s.points, p)
+			s.points = append(s.points, p) // 新增
 			s.index[p.ID] = len(s.points) - 1
 		}
 		count++
@@ -74,6 +75,7 @@ func (s *MemoryKnowledgeStore) ListPoints(_ context.Context) ([]domain.Knowledge
 	return out, nil
 }
 
+// SearchPoints 搜索知识点，匹配 topic、outline_ref 或 keywords。
 func (s *MemoryKnowledgeStore) SearchPoints(_ context.Context, keyword string) ([]domain.KnowledgePoint, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -99,6 +101,7 @@ func (s *MemoryKnowledgeStore) ListBySubject(_ context.Context, subject string) 
 	return result, nil
 }
 
+// DeletePoint 删除知识点，用最后一个元素覆盖被删除位置。
 func (s *MemoryKnowledgeStore) DeletePoint(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

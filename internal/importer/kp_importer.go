@@ -9,17 +9,17 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
-// KPRow 知识点 xlsx 的一行原始数据。
+// KPRow 对应知识点 xlsx 中的一行原始数据。
 type KPRow struct {
-	ID       string
-	Subject  string
-	System   string
-	Name     string
-	Keywords string
+	ID       string // 知识点 ID
+	Subject  string // 科目
+	System   string // 所属系统（如"呼吸内科"）
+	Name     string // 知识点名称
+	Keywords string // 关键词（顿号分隔）
 }
 
-// ReadKnowledgePoints 从 xlsx 读取知识点。
-// 表头：知识点ID | 科目 | 系统 | 知识点名称 | 关键词
+// ReadKnowledgePoints 从知识点 xlsx 文件读取数据。
+// 表头格式：知识点ID | 科目 | 系统 | 知识点名称 | 关键词
 func ReadKnowledgePoints(path string) ([]KPRow, error) {
 	f, err := excelize.OpenFile(path)
 	if err != nil {
@@ -58,13 +58,15 @@ func ReadKnowledgePoints(path string) ([]KPRow, error) {
 	return result, nil
 }
 
-// ConvertToKnowledgePoints 将原始行转为 KnowledgePoint。
+// ConvertToKnowledgePoints 将原始行数据转换为 KnowledgePoint 切片。
+// 跳过 ID 或名称为空，以及名称为"待归类"的行。
 func ConvertToKnowledgePoints(rows []KPRow) []domain.KnowledgePoint {
 	var points []domain.KnowledgePoint
 	for _, row := range rows {
 		if row.ID == "" || row.Name == "" || row.Name == "待归类" {
 			continue
 		}
+		// 解析关键词（顿号分隔）
 		var keywords []string
 		if row.Keywords != "" {
 			for _, kw := range strings.Split(row.Keywords, "、") {

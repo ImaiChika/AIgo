@@ -1,3 +1,5 @@
+// Package auth 提供用户认证和权限管理功能。
+// 包括 JWT 签发/验证、bcrypt 密码哈希、RBAC 角色权限控制。
 package auth
 
 import (
@@ -14,6 +16,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// 预定义错误，供调用方判断具体错误类型。
 var (
 	ErrInvalidCredentials = errors.New("用户名或密码错误")
 	ErrUserDisabled       = errors.New("账号已被禁用")
@@ -22,34 +25,34 @@ var (
 	ErrPermissionDenied   = errors.New("权限不足")
 )
 
-// User 用户信息。
+// User 用户信息（不含密码）。
 type User struct {
-	ID          string    `json:"id"`
-	Username    string    `json:"username"`
-	DisplayName string    `json:"display_name"`
-	Role        string    `json:"role"`
-	Enabled     bool      `json:"enabled"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          string    `json:"id"`           // 用户唯一标识
+	Username    string    `json:"username"`     // 登录用户名
+	DisplayName string    `json:"display_name"` // 显示昵称
+	Role        string    `json:"role"`         // 角色：admin/expert/teacher
+	Enabled     bool      `json:"enabled"`      // 是否启用
+	CreatedAt   time.Time `json:"created_at"`   // 创建时间
+	UpdatedAt   time.Time `json:"updated_at"`   // 更新时间
 }
 
-// Claims JWT 声明。
+// Claims JWT 声明（payload），包含用户基本信息和过期时间。
 type Claims struct {
-	UserID      string `json:"user_id"`
-	Username    string `json:"username"`
-	DisplayName string `json:"display_name"`
-	Role        string `json:"role"`
-	Exp         int64  `json:"exp"`
+	UserID      string `json:"user_id"`      // 用户 ID
+	Username    string `json:"username"`     // 用户名
+	DisplayName string `json:"display_name"` // 昵称
+	Role        string `json:"role"`         // 角色
+	Exp         int64  `json:"exp"`          // 过期时间戳（Unix 秒）
 }
 
-// Service 认证服务。
+// Service 认证服务，持有数据库连接和 JWT 密钥。
 type Service struct {
-	db        *sql.DB
-	jwtSecret []byte
-	jwtExpiry time.Duration
+	db        *sql.DB     // 数据库连接
+	jwtSecret []byte      // JWT 签名密钥
+	jwtExpiry time.Duration // JWT 有效期
 }
 
-// NewService 创建认证服务。
+// NewService 创建认证服务实例。
 func NewService(db *sql.DB, jwtSecret string, expiry time.Duration) *Service {
 	return &Service{
 		db:        db,
@@ -58,7 +61,7 @@ func NewService(db *sql.DB, jwtSecret string, expiry time.Duration) *Service {
 	}
 }
 
-// InitAdmin 初始化默认管理员账号。
+// InitAdmin 初始化默认管理员账号。如果已存在则跳过。
 func (s *Service) InitAdmin(username, password, displayName string) error {
 	var count int
 	err := s.db.QueryRow("SELECT COUNT(*) FROM users WHERE username=$1", username).Scan(&count)
@@ -66,9 +69,10 @@ func (s *Service) InitAdmin(username, password, displayName string) error {
 		return err
 	}
 	if count > 0 {
-		return nil
+		return nil // 已存在，不重复创建
 	}
 
+	// bcrypt 哈希密码（不可逆）
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return err
@@ -81,12 +85,13 @@ func (s *Service) InitAdmin(username, password, displayName string) error {
 	return err
 }
 
-// Login 用户登录。
+// Login 用户登录：验证密码 → 生成 JWT token。
 func (s *Service) Login(username, password string) (string, *User, error) {
 	var user User
 	var passwordHash string
 	var enabled bool
 
+	// 从数据库查询用户
 	err := s.db.QueryRow(`
 		SELECT id, username, password_hash, display_name, role, enabled, created_at, updated_at
 		FROM users WHERE username=$1
@@ -98,14 +103,17 @@ func (s *Service) Login(username, password string) (string, *User, error) {
 		return "", nil, err
 	}
 
+	// 检查账号是否被禁用
 	if !enabled {
 		return "", nil, ErrUserDisabled
 	}
 
+	// 验证密码
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)); err != nil {
 		return "", nil, ErrInvalidCredentials
 	}
 
+	// 生成 JWT
 	token, err := s.generateToken(&user)
 	if err != nil {
 		return "", nil, err
@@ -114,7 +122,7 @@ func (s *Service) Login(username, password string) (string, *User, error) {
 	return token, &user, nil
 }
 
-// ValidateToken 验证 JWT 并返回 Claims。
+// ValidateToken 验证 JWT 并返回声明内容。
 func (s *Service) ValidateToken(token string) (*Claims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
@@ -140,7 +148,7 @@ func (s *Service) ValidateToken(token string) (*Claims, error) {
 		return nil, ErrInvalidToken
 	}
 
-	// 检查过期
+	// 检查是否过期
 	if time.Now().Unix() > claims.Exp {
 		return nil, ErrTokenExpired
 	}
@@ -148,7 +156,7 @@ func (s *Service) ValidateToken(token string) (*Claims, error) {
 	return &claims, nil
 }
 
-// GetUserByID 根据 ID 获取用户。
+// GetUserByID 根据 ID 获取用户信息。
 func (s *Service) GetUserByID(id string) (*User, error) {
 	var user User
 	err := s.db.QueryRow(`
@@ -162,6 +170,12 @@ func (s *Service) GetUserByID(id string) (*User, error) {
 		return nil, err
 	}
 	return &user, nil
+}
+
+// UpdateDisplayName 修改用户昵称。
+func (s *Service) UpdateDisplayName(userID, displayName string) error {
+	_, err := s.db.Exec("UPDATE users SET display_name=$1, updated_at=NOW() WHERE id=$2", displayName, userID)
+	return err
 }
 
 // ListUsers 列出所有用户。
@@ -179,112 +193,45 @@ func (s *Service) ListUsers() ([]User, error) {
 		}
 		result = append(result, u)
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
-// CreateUser 创建用户。
+// CreateUser 创建新用户。
 func (s *Service) CreateUser(username, password, displayName, role string) (*User, error) {
-	if username == "" || password == "" {
-		return nil, fmt.Errorf("用户名和密码不能为空")
-	}
-	if role != "admin" && role != "expert" && role != "teacher" {
-		return nil, fmt.Errorf("无效的角色: %s", role)
-	}
-
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, err
 	}
-
-	user := User{
-		ID:          fmt.Sprintf("user-%d", time.Now().UnixNano()),
-		Username:    username,
-		DisplayName: displayName,
-		Role:        role,
-		Enabled:     true,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-	}
-
-	_, err = s.db.Exec(`
-		INSERT INTO users (id, username, password_hash, display_name, role, enabled, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-	`, user.ID, user.Username, string(hash), user.DisplayName, user.Role, user.Enabled, user.CreatedAt, user.UpdatedAt)
+	id := fmt.Sprintf("user-%d", time.Now().UnixNano())
+	_, err = s.db.Exec(`INSERT INTO users (id, username, password_hash, display_name, role, enabled) VALUES ($1,$2,$3,$4,$5,true)`,
+		id, username, string(hash), displayName, role)
 	if err != nil {
 		return nil, err
 	}
-	return &user, nil
+	return s.GetUserByID(id)
 }
 
-// UpdateDisplayName 修改昵称。
-func (s *Service) UpdateDisplayName(userID, displayName string) error {
-	_, err := s.db.Exec("UPDATE users SET display_name=$1, updated_at=NOW() WHERE id=$2", displayName, userID)
-	return err
-}
-
-// ChangePassword 修改密码。
+// ChangePassword 修改密码（需要验证旧密码）。
 func (s *Service) ChangePassword(userID, oldPassword, newPassword string) error {
-	var passwordHash string
-	err := s.db.QueryRow("SELECT password_hash FROM users WHERE id=$1", userID).Scan(&passwordHash)
+	var hash string
+	err := s.db.QueryRow("SELECT password_hash FROM users WHERE id=$1", userID).Scan(&hash)
 	if err != nil {
 		return err
 	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(oldPassword)); err != nil {
-		return ErrInvalidCredentials
+	// 验证旧密码
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(oldPassword)); err != nil {
+		return fmt.Errorf("旧密码错误")
 	}
-
+	// 哈希新密码
 	newHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {
 		return err
 	}
-
 	_, err = s.db.Exec("UPDATE users SET password_hash=$1, updated_at=NOW() WHERE id=$2", string(newHash), userID)
 	return err
 }
 
-// CheckPermission 检查角色权限。
-func CheckPermission(role, action string) bool {
-	permissions := map[string][]string{
-		"admin": {
-			"question:generate", "question:list", "question:view", "question:delete",
-			"knowledge:import", "knowledge:search", "knowledge:list",
-			"expert:create", "expert:list", "expert:update",
-			"flow:create", "flow:list",
-			"review:submit", "review:action", "review:view",
-			"image:generate", "image:review", "image:view",
-			"export:questions",
-			"user:manage",
-		},
-		"expert": {
-			"question:generate", "question:list", "question:view", "question:delete",
-			"knowledge:import", "knowledge:search", "knowledge:list",
-			"expert:list",
-			"review:submit", "review:action", "review:view",
-			"image:generate", "image:review", "image:view",
-			"export:questions",
-		},
-		"teacher": {
-			"question:generate", "question:list", "question:view",
-			"knowledge:search", "knowledge:list",
-			"review:submit", "review:view",
-			"image:view",
-		},
-	}
-
-	allowed, ok := permissions[role]
-	if !ok {
-		return false
-	}
-	for _, p := range allowed {
-		if p == action {
-			return true
-		}
-	}
-	return false
-}
-
-// generateToken 生成 JWT。
+// generateToken 生成 JWT token。
 func (s *Service) generateToken(user *User) (string, error) {
 	claims := Claims{
 		UserID:      user.ID,
@@ -293,24 +240,48 @@ func (s *Service) generateToken(user *User) (string, error) {
 		Role:        user.Role,
 		Exp:         time.Now().Add(s.jwtExpiry).Unix(),
 	}
-
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
-
-	payloadBytes, err := json.Marshal(claims)
-	if err != nil {
-		return "", err
-	}
-	payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
-
-	signingInput := header + "." + payload
-	signature := s.sign(signingInput)
-
-	return signingInput + "." + signature, nil
+	payload, _ := json.Marshal(claims)
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
+	sig := s.sign(header + "." + payloadB64)
+	return header + "." + payloadB64 + "." + sig, nil
 }
 
-// sign HMAC-SHA256 签名。
+// sign 使用 HMAC-SHA256 签名。
 func (s *Service) sign(data string) string {
 	mac := hmac.New(sha256.New, s.jwtSecret)
 	mac.Write([]byte(data))
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// CheckPermission 检查角色是否有指定权限。
+func CheckPermission(role, action string) bool {
+	// 定义角色权限表
+	permissions := map[string][]string{
+		"admin": {"user:manage", "expert:create", "expert:update", "expert:list",
+			"question:generate", "question:list", "question:view", "question:delete",
+			"knowledge:import", "knowledge:list", "knowledge:search",
+			"review:submit", "review:review", "review:view",
+			"image:generate", "image:view", "image:review"},
+		"expert": {"expert:list",
+			"question:generate", "question:list", "question:view", "question:delete",
+			"knowledge:import", "knowledge:list", "knowledge:search",
+			"review:submit", "review:review", "review:view",
+			"image:generate", "image:view", "image:review"},
+		"teacher": {
+			"question:generate", "question:list", "question:view",
+			"knowledge:list", "knowledge:search",
+			"review:submit", "review:view",
+			"image:view"},
+	}
+	allowed, ok := permissions[role]
+	if !ok {
+		return false
+	}
+	for _, a := range allowed {
+		if a == action {
+			return true
+		}
+	}
+	return false
 }

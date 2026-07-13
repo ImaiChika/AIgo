@@ -7,7 +7,7 @@ import (
 	"aigo/internal/domain"
 )
 
-// ExpertStore 专家存储。
+// ExpertStore 专家存储接口。
 type ExpertStore interface {
 	SaveExpert(ctx context.Context, expert domain.Expert) error
 	GetExpert(ctx context.Context, id string) (*domain.Expert, error)
@@ -16,20 +16,24 @@ type ExpertStore interface {
 	DeleteExpert(ctx context.Context, id string) error
 }
 
-// ReviewStore 审核相关存储。
+// ReviewStore 审核相关存储接口，包括流程配置、任务、记录和版本。
 type ReviewStore interface {
+	// 审核流程配置
 	SaveFlowConfig(ctx context.Context, flow domain.ReviewFlowConfig) error
 	GetFlowConfig(ctx context.Context, id string) (*domain.ReviewFlowConfig, error)
 	ListFlowConfigs(ctx context.Context) ([]domain.ReviewFlowConfig, error)
 
+	// 审核任务
 	SaveTask(ctx context.Context, task domain.ReviewTask) error
 	GetTask(ctx context.Context, id string) (*domain.ReviewTask, error)
 	GetTaskByQuestionID(ctx context.Context, questionID string) (*domain.ReviewTask, error)
 	UpdateTask(ctx context.Context, task domain.ReviewTask) error
 
+	// 审核记录
 	SaveRecord(ctx context.Context, record domain.ReviewRecord) error
 	ListRecordsByTaskID(ctx context.Context, taskID string) ([]domain.ReviewRecord, error)
 
+	// 题目版本
 	SaveVersion(ctx context.Context, version domain.QuestionVersion) error
 	ListVersionsByQuestionID(ctx context.Context, questionID string) ([]domain.QuestionVersion, error)
 }
@@ -88,10 +92,10 @@ func (s *MemoryExpertStore) DeleteExpert(_ context.Context, id string) error {
 // MemoryReviewStore 内存审核存储。
 type MemoryReviewStore struct {
 	mu       sync.Mutex
-	flows    map[string]domain.ReviewFlowConfig
-	tasks    map[string]domain.ReviewTask
-	records  map[string][]domain.ReviewRecord   // taskID → records
-	versions map[string][]domain.QuestionVersion // questionID → versions
+	flows    map[string]domain.ReviewFlowConfig         // 流程配置
+	tasks    map[string]domain.ReviewTask                // 审核任务
+	records  map[string][]domain.ReviewRecord            // 审核记录（按任务ID分组）
+	versions map[string][]domain.QuestionVersion         // 题目版本（按题目ID分组）
 }
 
 func NewMemoryReviewStore() *MemoryReviewStore {
