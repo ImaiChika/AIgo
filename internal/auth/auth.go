@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
@@ -12,6 +13,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"aigo/internal/domain"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -172,6 +175,34 @@ func (s *Service) GetUserByID(id string) (*User, error) {
 	return &user, nil
 }
 
+// SyncExpertUsers 同步专家角色用户到专家库。
+// 检查所有 role=expert 的用户，如果专家库没有对应记录，自动创建。
+func (s *Service) SyncExpertUsers(ctx context.Context, expertStore ExpertSyncStore) error {
+	users, err := s.ListUsers()
+	if err != nil {
+		return err
+	}
+	for _, u := range users {
+		if u.Role == "expert" {
+			existing, _ := expertStore.GetExpert(ctx, u.ID)
+			if existing == nil {
+				expertStore.SaveExpert(ctx, domain.Expert{
+					ID:      u.ID,
+					Name:    u.DisplayName,
+					Enabled: true,
+				})
+			}
+		}
+	}
+	return nil
+}
+
+// ExpertSyncStore 同步所需的最小专家存储接口。
+type ExpertSyncStore interface {
+	GetExpert(ctx context.Context, id string) (*domain.Expert, error)
+	SaveExpert(ctx context.Context, expert domain.Expert) error
+}
+
 // UpdateDisplayName 修改用户昵称。
 func (s *Service) UpdateDisplayName(userID, displayName string) error {
 	_, err := s.db.Exec("UPDATE users SET display_name=$1, updated_at=NOW() WHERE id=$2", displayName, userID)
@@ -261,12 +292,12 @@ func CheckPermission(role, action string) bool {
 		"admin": {"user:manage", "expert:create", "expert:update", "expert:list",
 			"question:generate", "question:list", "question:view", "question:delete",
 			"knowledge:import", "knowledge:list", "knowledge:search",
-			"review:submit", "review:review", "review:view",
+			"review:submit", "review:action", "review:view",
 			"image:generate", "image:view", "image:review"},
 		"expert": {"expert:list",
 			"question:generate", "question:list", "question:view", "question:delete",
 			"knowledge:import", "knowledge:list", "knowledge:search",
-			"review:submit", "review:review", "review:view",
+			"review:submit", "review:action", "review:view",
 			"image:generate", "image:view", "image:review"},
 		"teacher": {
 			"question:generate", "question:list", "question:view",

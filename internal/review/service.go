@@ -107,6 +107,11 @@ func (s *Service) ListFlows(ctx context.Context) ([]domain.ReviewFlowConfig, err
 	return s.reviewStore.ListFlowConfigs(ctx)
 }
 
+// DeleteFlow 删除审核流程。
+func (s *Service) DeleteFlow(ctx context.Context, id string) error {
+	return s.reviewStore.DeleteFlowConfig(ctx, id)
+}
+
 // ===== 审核操作 =====
 
 // SubmitQuestion 将题目提交到审核流程，创建审核任务。
@@ -129,20 +134,24 @@ func (s *Service) SubmitQuestion(ctx context.Context, questionID string, flowID 
 
 	existing, _ := s.reviewStore.GetTaskByQuestionID(ctx, questionID)
 	if existing != nil {
+		// 如果是"需修改"状态，允许重新提交（重置任务）
+		if existing.Status == domain.StatusRevisionRequired {
+			existing.Status = domain.StatusReviewing
+			existing.CurrentRound = 1
+			existing.AssignedTo = flow.Rounds[0].ExpertIDs
+			existing.RoundResults = make([]domain.RoundResult, len(flow.Rounds))
+			for i := range existing.RoundResults {
+				existing.RoundResults[i].RoundNumber = i + 1
+			}
+			existing.UpdatedAt = time.Now()
+			if err := s.reviewStore.UpdateTask(ctx, *existing); err != nil {
+				return nil, err
+			}
+			s.updateQuestionStatus(ctx, questionID, domain.StatusReviewing)
+			return existing, nil
+		}
 		return nil, fmt.Errorf("题目 %s 已有审核任务 %s，状态为 %s", questionID, existing.ID, existing.Status)
 	}
-
-	// 保存初始版本
-	snapshot, _ := json.Marshal(q)
-	s.reviewStore.SaveVersion(ctx, domain.QuestionVersion{
-		ID:         fmt.Sprintf("ver-%s-1", questionID),
-		QuestionID: questionID,
-		Version:    1,
-		Snapshot:   string(snapshot),
-		ChangeNote: "AI生成初始版本",
-		ChangedBy:  "ai",
-		CreatedAt:  time.Now(),
-	})
 
 	// 更新题目状态
 	q.Status = domain.StatusReviewing
@@ -274,8 +283,12 @@ func (s *Service) Review(ctx context.Context, req ReviewRequest) error {
 	}
 
 	if req.Action == domain.StatusRevisionRequired {
-		// 需要修改
+		// 需要修改：重置本轮审核记录，允许修改后重新审核
 		task.Status = domain.StatusRevisionRequired
+		task.RoundResults[roundIdx].Reviews = nil
+		task.RoundResults[roundIdx].ApprovedCount = 0
+		task.RoundResults[roundIdx].RejectedCount = 0
+		task.RoundResults[roundIdx].Passed = false
 		task.UpdatedAt = now
 		s.reviewStore.UpdateTask(ctx, *task)
 		s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusRevisionRequired)
@@ -295,7 +308,7 @@ func (s *Service) Review(ctx context.Context, req ReviewRequest) error {
 			task.AssignedTo = nextRound.ExpertIDs
 			task.Status = domain.StatusReviewing
 		} else {
-			// 所有轮次通过
+			// 所有轮次通过，等待管理员发布
 			task.Status = domain.StatusApproved
 			s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusApproved)
 		}
@@ -319,11 +332,6 @@ func (s *Service) GetTaskByQuestionID(ctx context.Context, questionID string) (*
 // ListRecords 列出某审核任务的所有记录。
 func (s *Service) ListRecords(ctx context.Context, taskID string) ([]domain.ReviewRecord, error) {
 	return s.reviewStore.ListRecordsByTaskID(ctx, taskID)
-}
-
-// ListVersions 列出某题目的所有版本。
-func (s *Service) ListVersions(ctx context.Context, questionID string) ([]domain.QuestionVersion, error) {
-	return s.reviewStore.ListVersionsByQuestionID(ctx, questionID)
 }
 
 // PublishQuestion 将审核通过的题目发布到正式题库。

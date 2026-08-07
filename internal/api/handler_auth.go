@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"aigo/internal/auth"
+	"aigo/internal/domain"
 )
 
 // handleLogin 用户登录。
@@ -121,5 +122,19 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err.Error())
 		return
 	}
-	writeJSON(w, 201, user) // 201 Created
+
+	// 如果角色是专家，自动在专家库创建记录
+	if req.Role == "expert" {
+		expert := domain.Expert{
+			ID:          user.ID,
+			Name:        user.DisplayName,
+			Department:  "",
+			Title:       "",
+			Specialties: nil,
+			Enabled:     true,
+		}
+		s.reviewSvc.CreateExpert(r.Context(), expert)
+	}
+
+	writeJSON(w, 201, user)
 }

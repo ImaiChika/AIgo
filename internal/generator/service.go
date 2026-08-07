@@ -12,6 +12,7 @@ import (
 // Service 题目生成服务，负责调用 LLM 生成 A2 型试题。
 type Service struct {
 	client llm.Client // LLM 客户端（千问）
+	Brief  bool       // 精简模式：限制解析长度以节省 token
 }
 
 // NewService 创建生成服务实例。
@@ -29,14 +30,16 @@ func (s *Service) Generate(ctx context.Context, req domain.GenerationRequest) ([
 		return nil, fmt.Errorf("至少需要一个知识点")
 	}
 
-	// 构建提示词
-	prompt := buildPrompt(req.Subject, string(req.Difficulty), req.KnowledgePoints[0].Topic, req.Count)
+	kp := req.KnowledgePoints[0]
+
+	// 构建提示词（包含完整知识点信息）
+	prompt := buildPrompt(kp, req.Count, s.Brief)
 
 	// 调用千问 API
 	raw, err := s.client.Complete(ctx, []llm.Message{
-		{Role: llm.RoleSystem, Content: systemPrompt},
+		{Role: llm.RoleSystem, Content: getSystemPrompt(s.Brief)},
 		{Role: llm.RoleUser, Content: prompt},
-	}, llm.GenerateOptions{Temperature: 0.4, MaxTokens: 1800})
+	}, llm.GenerateOptions{Temperature: 0.4, MaxTokens: 2000})
 	if err != nil {
 		return nil, err
 	}
@@ -47,18 +50,23 @@ func (s *Service) Generate(ctx context.Context, req domain.GenerationRequest) ([
 		return nil, fmt.Errorf("生成内容解析失败: %w", err)
 	}
 
-	// 转换为领域对象
+	// 转换为领域对象，自动从知识点填充元数据
 	var questions []domain.A2Question
 	for _, item := range items {
 		q := domain.A2Question{
-			ID:              fmt.Sprintf("draft-%d", time.Now().UnixNano()),
-			Difficulty:      req.Difficulty,
-			KnowledgePoints: req.KnowledgePoints,
-			Status:          domain.StatusAIDraft, // 初始状态：AI草稿
+			ID:              fmt.Sprintf("q-%s-%d", kp.OutlineCode, time.Now().UnixNano()),
+			OutlineCode:     kp.OutlineCode,  // 大纲代码
+			Profession:      kp.Subject,       // 专业
+			System:          kp.Category,      // 系统（基础医学/临床综合）
+			Difficulty:      req.Difficulty,    // 默认使用请求的难度
+			KnowledgePoints: []domain.KnowledgePoint{kp},
+			Status:          domain.StatusAIDraft,
 			Version:         1,
 			CreatedAt:       time.Now(),
 			UpdatedAt:       time.Now(),
 		}
+
+		// 从 LLM 返回解析字段
 		if v, ok := item["clinical_stem"].(string); ok {
 			q.ClinicalStem = v
 		}
@@ -71,17 +79,29 @@ func (s *Service) Generate(ctx context.Context, req domain.GenerationRequest) ([
 		if v, ok := item["difficulty"].(string); ok {
 			q.Difficulty = domain.Difficulty(v)
 		}
+		if v, ok := item["cognitive_level"].(string); ok {
+			q.CognitiveLevel = v
+		}
+		if v, ok := item["exam_points"].(string); ok {
+			q.ExamPoints = v
+		}
+
 		// 解析选项数组
 		if opts, ok := item["options"].([]interface{}); ok {
 			for _, o := range opts {
 				if m, ok := o.(map[string]interface{}); ok {
-					q.Options = append(q.Options, domain.Option{
-						Label: m["label"].(string),
-						Text:  m["text"].(string),
-					})
+					label, _ := m["label"].(string)
+					text, _ := m["text"].(string)
+					if label != "" && text != "" {
+						q.Options = append(q.Options, domain.Option{
+							Label: label,
+							Text:  text,
+						})
+					}
 				}
 			}
 		}
+
 		questions = append(questions, q)
 	}
 	return questions, nil

@@ -1,12 +1,15 @@
 -- AIgo 数据库 Schema
 
--- 知识点
+-- 知识点（2024考试大纲）
 CREATE TABLE IF NOT EXISTS knowledge_points (
-    id TEXT PRIMARY KEY,
-    subject TEXT NOT NULL DEFAULT '',
-    system TEXT NOT NULL DEFAULT '',
-    topic TEXT NOT NULL DEFAULT '',
-    outline_ref TEXT NOT NULL DEFAULT '',
+    id TEXT PRIMARY KEY,           -- 大纲代码，如 110.2.6.2.1.1
+    category TEXT NOT NULL DEFAULT '',  -- 分类：基础医学/临床综合
+    subject TEXT NOT NULL DEFAULT '',   -- 专业/系统，如"病理"、"呼吸系统"
+    unit TEXT NOT NULL DEFAULT '',      -- 单元，如"二、局部血液循环障碍"
+    sub_item TEXT NOT NULL DEFAULT '',  -- 细目，如"1．充血和淤血"
+    topic TEXT NOT NULL DEFAULT '',     -- 要点，如"（1）充血的概念和类型"
+    outline_code TEXT NOT NULL DEFAULT '', -- 大纲代码（同 id）
+    outline_ref TEXT NOT NULL DEFAULT '',  -- 兼容旧字段
     keywords TEXT[] DEFAULT '{}',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -22,6 +25,11 @@ CREATE TABLE IF NOT EXISTS questions (
     knowledge_points JSONB DEFAULT '[]',
     media_refs JSONB DEFAULT '[]',
     difficulty TEXT NOT NULL DEFAULT 'medium',
+    cognitive_level TEXT NOT NULL DEFAULT '',   -- 认知层次：记忆/理解/简单应用/综合应用
+    exam_points TEXT NOT NULL DEFAULT '',        -- 考核要点
+    outline_code TEXT NOT NULL DEFAULT '',       -- 大纲代码
+    profession TEXT NOT NULL DEFAULT '',         -- 专业
+    system_name TEXT NOT NULL DEFAULT '',        -- 系统
     status TEXT NOT NULL DEFAULT 'ai_draft',
     version INT NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -73,19 +81,16 @@ CREATE TABLE IF NOT EXISTS review_records (
     expert_id TEXT NOT NULL,
     conclusion TEXT NOT NULL,
     opinion TEXT NOT NULL DEFAULT '',
-    before_snapshot TEXT NOT NULL DEFAULT '',
-    after_snapshot TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 题目版本
-CREATE TABLE IF NOT EXISTS question_versions (
+-- 操作日志（审计）
+CREATE TABLE IF NOT EXISTS audit_logs (
     id TEXT PRIMARY KEY,
-    question_id TEXT NOT NULL REFERENCES questions(id),
-    version INT NOT NULL,
-    snapshot TEXT NOT NULL,
-    change_note TEXT NOT NULL DEFAULT '',
-    changed_by TEXT NOT NULL DEFAULT '',
+    question_id TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -139,6 +144,20 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- 批量任务记录
+CREATE TABLE IF NOT EXISTS batch_jobs (
+    id TEXT PRIMARY KEY,              -- DashScope job_id
+    job_name TEXT NOT NULL DEFAULT '', -- 自定义任务名称
+    status TEXT NOT NULL DEFAULT 'pending', -- 状态
+    total_count INT NOT NULL DEFAULT 0,
+    completed INT NOT NULL DEFAULT 0,
+    failed INT NOT NULL DEFAULT 0,
+    output_file_id TEXT NOT NULL DEFAULT '',
+    points_json TEXT NOT NULL DEFAULT '[]', -- 关联的知识点列表JSON
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
@@ -148,5 +167,9 @@ CREATE INDEX IF NOT EXISTS idx_kp_system ON knowledge_points(system);
 CREATE INDEX IF NOT EXISTS idx_kp_topic ON knowledge_points USING gin(to_tsvector('simple', topic));
 CREATE INDEX IF NOT EXISTS idx_review_tasks_question ON review_tasks(question_id);
 CREATE INDEX IF NOT EXISTS idx_review_records_task ON review_records(task_id);
+CREATE INDEX IF NOT EXISTS idx_audit_question ON audit_logs(question_id);
+CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_logs(actor);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action);
+CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_image_prompts_question ON image_prompts(question_id);
 CREATE INDEX IF NOT EXISTS idx_generated_images_question ON generated_images(question_id);

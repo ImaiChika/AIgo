@@ -28,7 +28,6 @@ type ImagePrompt struct {
 }
 
 // GeneratedImage AI 生成的候选图。
-// 当前为 Mock 实现，后续接入真实生图模型后会存储真实图片路径。
 type GeneratedImage struct {
 	ID           string      `json:"id"`            // 候选图唯一标识
 	PromptID     string      `json:"prompt_id"`     // 关联的提示词 ID

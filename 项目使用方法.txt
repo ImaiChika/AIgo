@@ -2,174 +2,146 @@ AIgo 项目使用方法
 =================
 
 说明：
-本项目当前包含 Go 后端框架和 Vue 3 + Vite 前端原型。
-当前前端仍是可交互原型，尚未接入真实后端 API、真实千问出题接口和真实生图模型。
+本项目包含 Go 后端 + Vue 3 前端 + PostgreSQL 数据库。
+默认管理员：admin / admin
 
 
-一、进入项目目录
-----------------
+一、环境要求
+------------
 
-项目根目录：
-
-/Users/imaichika/Documents/AIgo
-
-进入项目：
-
-cd /Users/imaichika/Documents/AIgo
+- Go 1.26+
+- Node.js 18+
+- PostgreSQL 16+
+- 阿里云百炼 API Key
 
 
-二、必须先阅读的文件
---------------------
+二、首次启动
+------------
 
-后续开发前建议先阅读：
+1. 启动 PostgreSQL：
 
-1. 功能需求文档.txt
-2. CLAUDE.md
-3. 当前还缺的功能提示.txt
+   brew services start postgresql@16
 
-其中：
-- 功能需求文档.txt 是当前产品需求基准。
-- CLAUDE.md 是给 Claude Code 或后续开发模型看的开发约束。
-- 当前还缺的功能提示.txt 记录目前还没完成的关键功能。
+2. 创建数据库：
 
+   createdb aigo
 
-三、Go 后端检查
----------------
+3. 配置环境变量：
 
-当前 Go 后端主要是框架、领域模型、知识点导入、审核流程、图片候选等模块。
+   cp configs/example.env .env
+   # 编辑 .env，填入：
+   # DASHSCOPE_API_KEY=你的API Key
+   # QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+   # QWEN_MODEL=qwen3.6-flash
+   # DB_DSN=postgres://localhost:5432/aigo?sslmode=disable
 
-运行测试：
+4. 启动后端：
 
-go test ./...
+   go run ./cmd/aigo serve
 
-运行 CLI 自检：
+   首次启动会自动建表和创建默认管理员。
 
-go run ./cmd/aigo doctor
+5. 启动前端（另一个终端）：
 
-运行示例评估：
+   cd web
+   npm install
+   npm run dev -- --port 5174
 
-go run ./cmd/aigo evaluate
+6. 浏览器访问：
 
+   http://127.0.0.1:5174
 
-四、千问 API 环境变量
---------------------
-
-调用真实千问接口前，需要设置环境变量：
-
-export DASHSCOPE_API_KEY="你的阿里云百炼 API Key"
-export QWEN_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
-export QWEN_MODEL="qwen-plus"
-
-注意：
-- 不要把真实 API Key 写进代码。
-- 不要把真实 API Key 提交到仓库。
+   登录：admin / admin
 
 
-五、Vue 3 + Vite 前端原型
-------------------------
+三、导入数据
+------------
 
-前端目录：
+导入知识点：
 
-web/
+  go run ./cmd/aigo kp-import 知识点表.xlsx
 
-进入前端目录：
+导入题目：
 
-cd /Users/imaichika/Documents/AIgo/web
+  go run ./cmd/aigo import 2025执医A2.xlsx
 
-首次运行前安装依赖：
-
-npm install
-
-启动开发服务器：
-
-npm run dev -- --port 5174
-
-浏览器访问：
-
-http://127.0.0.1:5174
-
-构建前端：
-
-npm run build
+或通过前端页面上传。
 
 
-六、当前前端已包含的内容
-----------------------
+四、关闭服务
+------------
 
-前端原型已经包含：
+  # 停止后端（Ctrl+C 或）
+  pkill -f "aigo serve"
 
-- 左侧后台导航。
-- AI 出题工作台。
-- 知识点标签。
-- 题干编辑。
-- 选项编辑。
-- AI 配图候选。
-- 结构化生图提示词。
-- 右侧 AI 出题配置。
-- 实时预览。
-- 审核流状态。
-- 保存草稿、提交审核等模拟交互。
+  # 停止前端（Ctrl+C 或）
+  pkill -f "vite"
+
+  # 停止 PostgreSQL
+  brew services stop postgresql@16
 
 
-七、当前还没有接入的内容
-----------------------
+五、CLI 命令
+------------
 
-当前还没有完成：
-
-- Go 后端 HTTP API。
-- 前端调用后端 API。
-- 真实千问出题。
-- 真实 AI 生图模型。
-- Excel 知识点上传页面与接口。
-- 数据库落库。
-- 专家库完整页面。
-- 多轮审核完整页面。
-- 图片审核页面。
-- 题库查询和导出页面。
-- 登录和权限控制。
+  go run ./cmd/aigo doctor              检查框架状态
+  go run ./cmd/aigo serve               启动 HTTP 服务（默认 8080 端口）
+  go run ./cmd/aigo serve 3000          指定端口启动
+  go run ./cmd/aigo import <file.xlsx>  导入题目
+  go run ./cmd/aigo kp-import <file.xlsx> 导入知识点
+  go run ./cmd/aigo kp-list             列出知识点
+  go run ./cmd/aigo kp-search <关键词>  搜索知识点
+  go run ./cmd/aigo list                列出题目
+  go run ./cmd/aigo generate            调 API 生成新题（需 Key）
 
 
-八、当前不要优先做的内容
-----------------------
+六、前端页面
+------------
 
-根据最新需求，当前不要优先做：
-
-- 知识图谱。
-- Neo4j。
-- 混淆网络。
-- IRT 或深度 IRT。
-- Bloom 分类。
-- 强化学习优化。
-- 医学模型微调。
-- 复杂来源资料管理。
-- 历史真题强依赖。
-- 把解析或试题来源做成必填。
+  /login          登录页
+  /generate       AI出题（选知识点 → 生成 → 编辑 → 保存 → 配图）
+  /knowledge      知识点管理（搜索、添加、删除、Excel导入）
+  /review         多轮审核（选题 → 提交审核 → 审核 → 记录）
+  /bank           题库（搜索、筛选、详情、编辑、删除、发布、导出）
+  /experts        专家库（增删改查，仅管理员）
+  /review-flows   审核流程配置（仅管理员）
+  /audit          操作日志（仅管理员）
+  /users          用户管理（仅管理员）
 
 
-九、关闭前端开发服务器
-----------------------
+七、API 接口
+------------
 
-如果前端服务器正在运行，在对应终端按：
+  POST   /api/auth/login              登录
+  GET    /api/auth/me                 当前用户
+  GET    /api/stats                   统计
 
-Ctrl + C
+  POST   /api/questions/generate      生成题目
+  GET    /api/questions               题目列表
+  GET    /api/questions/search?q=     搜索题目
+  GET    /api/questions/{id}          题目详情
+  PUT    /api/questions/{id}          修改题目
+  DELETE /api/questions/{id}          删除题目
+  POST   /api/questions/{id}/publish  发布题目
 
-如果端口被占用，可查看进程：
+  GET    /api/knowledge-points        知识点列表
+  GET    /api/knowledge-points/search 搜索知识点
+  POST   /api/knowledge-points        创建知识点
+  POST   /api/knowledge-points/import Excel导入
+  DELETE /api/knowledge-points/{id}   删除知识点
 
-lsof -nP -iTCP:5174 -sTCP:LISTEN
+  GET    /api/experts                 专家列表
+  POST   /api/experts                 创建专家
+  PUT    /api/experts/{id}            修改专家
+  DELETE /api/experts/{id}            删除专家
 
-然后结束对应进程。
+  GET    /api/review/flows            审核流程列表
+  POST   /api/review/flows            创建审核流程
+  POST   /api/review/submit           提交审核
+  POST   /api/review/action           审核操作
+  GET    /api/review/task/{id}        审核任务
+  GET    /api/review/records/{id}     审核记录
 
-
-十、建议开发顺序
-----------------
-
-1. 做 Go HTTP 服务。
-2. 做知识点 Excel 上传和搜索 API。
-3. 接前端知识点真实数据。
-4. 接千问真实出题 API。
-5. 做题目保存和查询。
-6. 接 AI 生图候选图流程。
-7. 做专家库。
-8. 做多轮审核流程。
-9. 做图片审核。
-10. 做题库导出。
+  GET    /api/audit-logs              操作日志
+  GET    /api/users                   用户列表
+  POST   /api/users                   创建用户

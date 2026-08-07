@@ -31,13 +31,13 @@ func (s *Service) DeletePoint(ctx context.Context, id string) error {
 	return s.store.DeletePoint(ctx, id)
 }
 
-// ImportFromXlsx 从 xlsx 文件批量导入知识点。
+// ImportFromXlsx 从考试大纲 xlsx 文件批量导入知识点。
+// 支持新大纲格式（2024年临床医师考试大纲），自动读取所有 Sheet。
 func (s *Service) ImportFromXlsx(ctx context.Context, path string) (int, error) {
-	rows, err := importer.ReadKnowledgePoints(path)
+	points, err := importer.ReadExamOutline(path)
 	if err != nil {
-		return 0, fmt.Errorf("读取知识点文件失败: %w", err)
+		return 0, fmt.Errorf("读取考试大纲文件失败: %w", err)
 	}
-	points := importer.ConvertToKnowledgePoints(rows)
 	if len(points) == 0 {
 		return 0, fmt.Errorf("未找到有效知识点")
 	}
@@ -58,15 +58,15 @@ func (s *Service) ListAll(ctx context.Context) ([]domain.KnowledgePoint, error) 
 	return s.store.ListPoints(ctx)
 }
 
-// ListBySystem 按系统筛选知识点。
-func (s *Service) ListBySystem(ctx context.Context, system string) ([]domain.KnowledgePoint, error) {
+// ListBySubject 按专业/系统筛选知识点。
+func (s *Service) ListBySubject(ctx context.Context, subject string) ([]domain.KnowledgePoint, error) {
 	all, err := s.store.ListPoints(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var result []domain.KnowledgePoint
 	for _, p := range all {
-		if p.System == system {
+		if p.Subject == subject {
 			result = append(result, p)
 		}
 	}
@@ -83,19 +83,19 @@ func (s *Service) Count(ctx context.Context) (int, error) {
 	return s.store.KPCount(ctx)
 }
 
-// ListSystems 列出所有系统分类及各分类数量。
-func (s *Service) ListSystems(ctx context.Context) (map[string]int, error) {
+// ListCategories 列出所有分类及各分类数量。
+func (s *Service) ListCategories(ctx context.Context) (map[string]int, error) {
 	all, err := s.store.ListPoints(ctx)
 	if err != nil {
 		return nil, err
 	}
 	counts := make(map[string]int)
 	for _, p := range all {
-		sys := p.System
-		if sys == "" {
-			sys = "未分类"
+		cat := p.Category
+		if cat == "" {
+			cat = "未分类"
 		}
-		counts[sys]++
+		counts[cat]++
 	}
 	return counts, nil
 }

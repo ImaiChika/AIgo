@@ -56,6 +56,11 @@ export const api = {
   // 统计
   stats: () => request("/stats"),
 
+  // 操作日志
+  auditLogs: (limit = 100) => request(`/audit-logs?limit=${limit}`),
+  auditLogsByQuestion: (id) => request(`/audit-logs/question/${id}`),
+  auditLogsByActor: (actor) => request(`/audit-logs/actor/${actor}`),
+
   // 题目
   listQuestions: () => request("/questions"),
   getQuestion: (id) => request(`/questions/${id}`),
@@ -65,6 +70,8 @@ export const api = {
       body: JSON.stringify(data),
     }),
   deleteQuestion: (id) => request(`/questions/${id}`, { method: "DELETE" }),
+  publishQuestion: (id) =>
+    request(`/questions/${id}/publish`, { method: "POST" }),
   searchQuestions: (q, status = "") => {
     const params = new URLSearchParams();
     if (q) params.set("q", q);
@@ -116,6 +123,37 @@ export const api = {
       body: JSON.stringify(params),
     }),
 
+  // 导出
+  exportXlsx: (params) =>
+    request("/export/xlsx", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  exportDocx: (params) =>
+    request("/export/docx", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  downloadExport: (filename) =>
+    request(`/export/download/${filename}`),
+
+  // 批量推理
+  batchSubmit: (params) =>
+    request("/batch/submit", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  batchList: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/batch/list?${qs}`);
+  },
+  batchStatus: (jobId) =>
+    request(`/batch/status/${jobId}`),
+  batchDownload: (jobId) =>
+    request(`/batch/download/${jobId}`, {
+      method: "POST",
+    }),
+
   // 专家
   listExperts: () => request("/experts"),
   createExpert: (data) =>
@@ -145,4 +183,10 @@ export const api = {
   getTaskByQuestion: (questionId) => request(`/review/task-by-question/${questionId}`),
   reviewRecords: (taskId) => request(`/review/records/${taskId}`),
   listFlows: () => request("/review/flows"),
+  createFlow: (data) =>
+    request("/review/flows", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  deleteFlow: (id) => request(`/review/flows/${id}`, { method: "DELETE" }),
 };

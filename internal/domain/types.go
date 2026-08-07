@@ -15,12 +15,14 @@ const (
 
 // KnowledgePoint 知识点，对应考试大纲中的一个考点。
 type KnowledgePoint struct {
-	ID         string   `json:"id"`          // 知识点唯一标识
-	Subject    string   `json:"subject"`     // 科目，如"临床医学"
-	System     string   `json:"system"`      // 所属系统，如"呼吸内科"、"心内科"
-	Topic      string   `json:"topic"`       // 知识点名称，如"社区获得性肺炎"
-	OutlineRef string   `json:"outline_ref"` // 考试大纲编号
-	Keywords   []string `json:"keywords"`    // 关键词列表，用于搜索
+	ID          string   `json:"id"`           // 知识点唯一标识（大纲代码）
+	Category    string   `json:"category"`     // 分类：基础医学 / 临床综合
+	Subject     string   `json:"subject"`      // 专业/系统，如"病理"、"呼吸系统"
+	Unit        string   `json:"unit"`         // 单元，如"二、局部血液循环障碍"
+	SubItem     string   `json:"sub_item"`     // 细目，如"1．充血和淤血"
+	Topic       string   `json:"topic"`        // 要点，如"（1）充血的概念和类型"
+	OutlineCode string   `json:"outline_code"` // 大纲代码，如"110.2.6.2.1.1"
+	Keywords    []string `json:"keywords"`     // 关键词列表，用于搜索（兼容旧字段）
 }
 
 // A2Question A2 型单选题（临床情境题）。
@@ -30,11 +32,16 @@ type A2Question struct {
 	ClinicalStem    string           `json:"clinical_stem"`    // 临床情境题干
 	Options         []Option         `json:"options"`          // 选项列表（A-E）
 	Answer          string           `json:"answer"`           // 正确答案标签（A/B/C/D/E）
-	Explanation     string           `json:"explanation"`      // 答案解析（可选）
+	Explanation     string           `json:"explanation"`      // 答案解析
 	SourceRefs      []SourceRef      `json:"source_refs"`      // 解析来源引用（可选）
 	KnowledgePoints []KnowledgePoint `json:"knowledge_points"` // 关联的知识点
 	MediaRefs       []MediaRef       `json:"media_refs"`       // 关联的多模态素材（图片、影像等）
-	Difficulty      Difficulty       `json:"difficulty"`       // 难度等级
+	Difficulty      Difficulty       `json:"difficulty"`       // 难度等级（0-1，如"0.65"）
+	CognitiveLevel  string           `json:"cognitive_level"`  // 认知层次：记忆/理解/简单应用/综合应用
+	ExamPoints      string           `json:"exam_points"`      // 考核要点，如"诊断与鉴别诊断，临床表现"
+	OutlineCode     string           `json:"outline_code"`     // 大纲代码（标到最后一级）
+	Profession      string           `json:"profession"`       // 专业，如"消化"、"生理，消化"
+	System          string           `json:"system"`           // 系统，如"消化系统"
 	Status          QuestionStatus   `json:"status"`           // 审核状态
 	Version         int              `json:"version"`          // 版本号，每次修改递增
 	CreatedAt       time.Time        `json:"created_at"`       // 创建时间

@@ -7,7 +7,9 @@ import (
 	"context"
 	"net/http"
 
+	"aigo/internal/audit"
 	"aigo/internal/auth"
+	"aigo/internal/batch"
 	"aigo/internal/image"
 	"aigo/internal/knowledge"
 	"aigo/internal/pipeline"
@@ -21,8 +23,10 @@ type Server struct {
 	kpSvc         *knowledge.Service    // 知识点服务
 	imgSvc        *image.Service        // 图片服务
 	reviewSvc     *review.Service       // 审核服务
+	auditSvc      *audit.Service        // 审计日志服务
 	questionStore storage.QuestionStore  // 题目存储
 	authSvc       *auth.Service         // 认证服务
+	batchSvc      *batch.Service        // 批量推理服务
 }
 
 // NewServer 创建 API 服务实例，注入所有依赖。
@@ -31,16 +35,20 @@ func NewServer(
 	kpSvc *knowledge.Service,
 	imgSvc *image.Service,
 	reviewSvc *review.Service,
+	auditSvc *audit.Service,
 	questionStore storage.QuestionStore,
 	authSvc *auth.Service,
+	batchSvc *batch.Service,
 ) *Server {
 	return &Server{
 		pipe:          pipe,
 		kpSvc:         kpSvc,
 		imgSvc:        imgSvc,
 		reviewSvc:     reviewSvc,
+		auditSvc:      auditSvc,
 		questionStore: questionStore,
 		authSvc:       authSvc,
+		batchSvc:      batchSvc,
 	}
 }
 
@@ -64,6 +72,14 @@ func (s *Server) Handler() http.Handler {
 	// === 统计（公开） ===
 	mux.HandleFunc("GET /api/stats", s.handleStats)
 
+	// === 静态文件（图片） ===
+	mux.Handle("GET /images/", http.StripPrefix("/images/", http.FileServer(http.Dir("output/images"))))
+
+	// === 操作日志（仅管理员） ===
+	mux.HandleFunc("GET /api/audit-logs", s.requireAuth("user:manage", s.handleListAuditLogs))
+	mux.HandleFunc("GET /api/audit-logs/question/{id}", s.requireAuth("user:manage", s.handleAuditLogsByQuestion))
+	mux.HandleFunc("GET /api/audit-logs/actor/{actor}", s.requireAuth("user:manage", s.handleAuditLogsByActor))
+
 	// === 题目 CRUD ===
 	mux.HandleFunc("POST /api/questions/generate", s.requireAuth("question:generate", s.handleGenerate))
 	mux.HandleFunc("GET /api/questions", s.requireAuth("question:list", s.handleListQuestions))
@@ -71,6 +87,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/questions/{id}", s.requireAuth("question:view", s.handleGetQuestion))
 	mux.HandleFunc("PUT /api/questions/{id}", s.requireAuth("question:generate", s.handleUpdateQuestion))
 	mux.HandleFunc("DELETE /api/questions/{id}", s.requireAuth("question:delete", s.handleDeleteQuestion))
+	mux.HandleFunc("POST /api/questions/{id}/publish", s.requireAuth("expert:create", s.handlePublishQuestion))
 
 	// === 知识点 CRUD ===
 	mux.HandleFunc("GET /api/knowledge-points", s.requireAuth("knowledge:list", s.handleListKP))
@@ -91,6 +108,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/images/{questionId}", s.requireAuth("image:view", s.handleListImages))
 	mux.HandleFunc("POST /api/images/review", s.requireAuth("image:review", s.handleImageReview))
 
+	// === 导出 ===
+	mux.HandleFunc("POST /api/export/xlsx", s.requireAuth("question:list", s.handleExportXlsx))
+	mux.HandleFunc("POST /api/export/docx", s.requireAuth("question:list", s.handleExportDocx))
+	mux.HandleFunc("GET /api/export/download/{filename}", s.handleDownloadExport) // 下载不需要认证
+
+	// === 批量推理（DashScope 批量 API）===
+	mux.HandleFunc("POST /api/batch/submit", s.requireAuth("question:generate", s.handleBatchSubmit))
+	mux.HandleFunc("GET /api/batch/list", s.requireAuth("question:generate", s.handleBatchList))
+	mux.HandleFunc("GET /api/batch/status/{jobId}", s.requireAuth("question:generate", s.handleBatchStatus))
+	mux.HandleFunc("POST /api/batch/download/{jobId}", s.requireAuth("question:generate", s.handleBatchDownload))
+
 	// === 审核流程 ===
 	mux.HandleFunc("POST /api/review/submit", s.requireAuth("review:submit", s.handleSubmitReview))
 	mux.HandleFunc("POST /api/review/action", s.requireAuth("review:action", s.handleReviewAction))
@@ -98,22 +126,24 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/review/task-by-question/{questionId}", s.requireAuth("review:view", s.handleGetTaskByQuestion))
 	mux.HandleFunc("GET /api/review/records/{taskId}", s.requireAuth("review:view", s.handleReviewRecords))
 	mux.HandleFunc("GET /api/review/flows", s.requireAuth("review:view", s.handleListFlows))
+	mux.HandleFunc("POST /api/review/flows", s.requireAuth("expert:create", s.handleCreateFlow))
+	mux.HandleFunc("DELETE /api/review/flows/{id}", s.requireAuth("expert:create", s.handleDeleteFlow))
 
 	// 包装中间件：CORS 跨域 + JSON Content-Type
 	return withCORS(withJSON(mux))
 }
 
-// handleStats 返回系统统计信息：题目数、知识点数、各系统分布。
+// handleStats 返回系统统计信息：题目数、知识点数、各分类分布。
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	questionCount, _ := s.questionStore.Count(ctx)
 	kpCount, _ := s.kpSvc.Count(ctx)
-	systems, _ := s.kpSvc.ListSystems(ctx)
+	categories, _ := s.kpSvc.ListCategories(ctx)
 
 	writeJSON(w, 200, map[string]any{
-		"question_count":    questionCount,
-		"knowledge_count":   kpCount,
-		"knowledge_systems": systems,
+		"question_count":      questionCount,
+		"knowledge_count":     kpCount,
+		"knowledge_categories": categories,
 	})
 }
 

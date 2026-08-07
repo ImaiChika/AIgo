@@ -8,6 +8,7 @@ import (
 
 	"aigo/internal/domain"
 	"aigo/internal/evaluator"
+	"aigo/internal/exporter"
 	"aigo/internal/generator"
 	"aigo/internal/image"
 	"aigo/internal/importer"
@@ -343,7 +344,7 @@ func (p *Pipeline) SearchKnowledgePoints(ctx context.Context, keyword string) er
 		if len(pt.Keywords) > 0 {
 			kw = pt.Keywords[0]
 		}
-		fmt.Printf("  %s | %s | %s | %s\n", pt.ID, pt.System, pt.Topic, kw)
+		fmt.Printf("  %s | %s | %s | %s\n", pt.ID, pt.Subject, pt.Topic, kw)
 	}
 	return nil
 }
@@ -353,7 +354,7 @@ func (p *Pipeline) ListKnowledgePoints(ctx context.Context, system string) error
 	var points []domain.KnowledgePoint
 	var err error
 	if system != "" {
-		points, err = p.kpSvc.ListBySystem(ctx, system)
+		points, err = p.kpSvc.ListBySubject(ctx, system)
 	} else {
 		points, err = p.kpSvc.ListAll(ctx)
 	}
@@ -374,22 +375,22 @@ func (p *Pipeline) ListKnowledgePoints(ctx context.Context, system string) error
 		if len(pt.Keywords) > 0 {
 			kw = pt.Keywords[0]
 		}
-		fmt.Printf("  %s | %s | %s | %s\n", pt.ID, pt.System, pt.Topic, kw)
+		fmt.Printf("  %s | %s | %s | %s\n", pt.ID, pt.Subject, pt.Topic, kw)
 	}
 	return nil
 }
 
 // KnowledgePointStats 知识点统计。
 func (p *Pipeline) KnowledgePointStats(ctx context.Context) error {
-	systems, err := p.kpSvc.ListSystems(ctx)
+	categories, err := p.kpSvc.ListCategories(ctx)
 	if err != nil {
 		return err
 	}
 	total, _ := p.kpSvc.Count(ctx)
 	fmt.Printf("知识点总量: %d\n", total)
-	fmt.Printf("\n各系统分布:\n")
-	for sys, count := range systems {
-		fmt.Printf("  %s: %d\n", sys, count)
+	fmt.Printf("\n各分类分布:\n")
+	for cat, count := range categories {
+		fmt.Printf("  %s: %d\n", cat, count)
 	}
 	return nil
 }
@@ -449,6 +450,129 @@ func (p *Pipeline) GetImagePrompt(ctx context.Context, questionID string) error 
 		return nil
 	}
 	return printJSON(prompt)
+}
+
+// ===== 批量生成 =====
+
+// GenerateAll 遍历所有知识点，逐个调用千问生成题目。
+// 生成过程中会打印进度信息。返回生成的题目总数。
+func (p *Pipeline) GenerateAll(ctx context.Context, countPerPoint int) (int, error) {
+	// 获取所有知识点
+	points, err := p.kpSvc.ListAll(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("获取知识点列表失败: %w", err)
+	}
+	if len(points) == 0 {
+		return 0, fmt.Errorf("知识点库为空，请先导入考试大纲")
+	}
+
+	fmt.Printf("共 %d 个知识点，每个生成 %d 道题\n", len(points), countPerPoint)
+
+	total := 0
+	failed := 0
+	for i, kp := range points {
+		// 打印进度
+		if (i+1)%50 == 0 || i == 0 {
+			fmt.Printf("[%d/%d] 正在为 %s 生成题目...\n", i+1, len(points), kp.Topic)
+		}
+
+		req := domain.GenerationRequest{
+			Subject:         kp.Subject,
+			Difficulty:      domain.Difficulty("0.65"),
+			KnowledgePoints: []domain.KnowledgePoint{kp},
+			Count:           countPerPoint,
+		}
+
+		questions, err := p.generator.Generate(ctx, req)
+		if err != nil {
+			failed++
+			if failed <= 10 {
+				fmt.Printf("  ⚠ 生成失败 (%s): %v\n", kp.OutlineCode, err)
+			}
+			continue
+		}
+
+		// 保存到数据库
+		for _, q := range questions {
+			if err := p.store.SaveQuestion(ctx, q); err != nil {
+				fmt.Printf("  ⚠ 保存失败: %v\n", err)
+				continue
+			}
+			total++
+		}
+
+		// 避免 API 限流，每 10 个请求暂停 1 秒
+		if (i+1)%10 == 0 {
+			time.Sleep(1 * time.Second)
+		}
+	}
+
+	fmt.Printf("\n生成完成！成功 %d 道，失败 %d 个知识点\n", total, failed)
+	return total, nil
+}
+
+// ExportXlsx 将题库中所有题目导出为 xlsx 文件。
+func (p *Pipeline) ExportXlsx(ctx context.Context, path string) error {
+	questions, err := p.store.ListQuestions(ctx)
+	if err != nil {
+		return fmt.Errorf("获取题目列表失败: %w", err)
+	}
+	if len(questions) == 0 {
+		return fmt.Errorf("题库为空")
+	}
+
+	if err := importer.ExportToXlsx(questions, path); err != nil {
+		return fmt.Errorf("导出 xlsx 失败: %w", err)
+	}
+	fmt.Printf("已导出 %d 道题目到 %s\n", len(questions), path)
+	return nil
+}
+
+// ExportDocx 将题库中所有题目导出为 Word 文档。
+func (p *Pipeline) ExportDocx(ctx context.Context, path string) error {
+	questions, err := p.store.ListQuestions(ctx)
+	if err != nil {
+		return fmt.Errorf("获取题目列表失败: %w", err)
+	}
+	if len(questions) == 0 {
+		return fmt.Errorf("题库为空")
+	}
+
+	if err := exporter.ExportToDocx(questions, path); err != nil {
+		return fmt.Errorf("导出 docx 失败: %w", err)
+	}
+	fmt.Printf("已导出 %d 道题目到 %s\n", len(questions), path)
+	return nil
+}
+
+// ClearQuestions 清空题库中所有题目。
+func (p *Pipeline) ClearQuestions(ctx context.Context) error {
+	questions, err := p.store.ListQuestions(ctx)
+	if err != nil {
+		return err
+	}
+	for _, q := range questions {
+		if err := p.store.DeleteQuestion(ctx, q.ID); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("已清空 %d 道题目\n", len(questions))
+	return nil
+}
+
+// ClearKnowledgePoints 清空所有知识点。
+func (p *Pipeline) ClearKnowledgePoints(ctx context.Context) error {
+	points, err := p.kpSvc.ListAll(ctx)
+	if err != nil {
+		return err
+	}
+	for _, p2 := range points {
+		if err := p.kpSvc.DeletePoint(ctx, p2.ID); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("已清空 %d 个知识点\n", len(points))
+	return nil
 }
 
 func printJSON(value any) error {

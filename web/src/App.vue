@@ -38,9 +38,12 @@ const navItems = computed(() => {
     { key: "knowledge", icon: "⌁", label: "知识点", path: "/knowledge" },
     { key: "review", icon: "✓", label: "多轮审核", path: "/review" },
     { key: "bank", icon: "□", label: "题库", path: "/bank" },
+    { key: "batch", icon: "⚡", label: "批量推理", path: "/batch" },
   ];
   if (isAdmin.value) {
     items.push({ key: "experts", icon: "👤", label: "专家库", path: "/experts" });
+    items.push({ key: "review-flows", icon: "⚙", label: "审核流程配置", path: "/review-flows" });
+    items.push({ key: "audit", icon: "📋", label: "操作日志", path: "/audit" });
     items.push({ key: "users", icon: "⚙", label: "用户管理", path: "/users" });
   }
   return items;

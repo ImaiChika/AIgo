@@ -18,8 +18,7 @@ type Config struct {
 
 // DBConfig 数据库配置。
 type DBConfig struct {
-	Driver string // 驱动类型："memory"（内存）或 "postgres"（PostgreSQL）
-	DSN    string // 数据库连接字符串
+	DSN string // PostgreSQL 连接字符串
 }
 
 // FromEnv 从环境变量加载配置。优先读取 .env 文件。
@@ -27,19 +26,15 @@ func FromEnv() Config {
 	// 尝试加载 .env 文件中的环境变量（不覆盖已有的）
 	loadDotEnv(".env")
 
-	dbDriver := firstNonEmpty(os.Getenv("DB_DRIVER"), "memory")
-	dbDSN := firstNonEmpty(os.Getenv("DB_DSN"), "postgres://localhost:5432/aigo?sslmode=disable")
-
 	return Config{
 		Qwen: llm.QwenConfig{
 			APIKey:      firstNonEmpty(os.Getenv("DASHSCOPE_API_KEY"), os.Getenv("QWEN_API_KEY")),
 			BaseURL:     firstNonEmpty(os.Getenv("QWEN_BASE_URL"), "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-			Model:       firstNonEmpty(os.Getenv("QWEN_MODEL"), "qwen3.6-flash"),
-			HTTPTimeout: 60 * time.Second,
+			Model:       firstNonEmpty(os.Getenv("QWEN_MODEL"), "qwen3.5-flash"),
+			HTTPTimeout: 300 * time.Second,
 		},
 		DB: DBConfig{
-			Driver: dbDriver,
-			DSN:    dbDSN,
+			DSN: firstNonEmpty(os.Getenv("DB_DSN"), "postgres://localhost:5432/aigo?sslmode=disable"),
 		},
 	}
 }

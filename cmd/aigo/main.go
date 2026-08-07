@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"aigo/internal/api"
+	"aigo/internal/audit"
 	"aigo/internal/auth"
+	"aigo/internal/batch"
 	"aigo/internal/config"
 	"aigo/internal/domain"
 	"aigo/internal/evaluator"
@@ -19,7 +22,6 @@ import (
 	"aigo/internal/llm"
 	"aigo/internal/pipeline"
 	"aigo/internal/review"
-	"aigo/internal/storage"
 	"aigo/internal/storage/postgres"
 
 	_ "github.com/lib/pq"
@@ -41,61 +43,52 @@ func run(ctx context.Context, args []string) error {
 	cfg := config.FromEnv()
 	client := llm.NewQwenClient(cfg.Qwen)
 
-	// 初始化存储
-	var questionStore storage.QuestionStore
-	var expertStore storage.ExpertStore
-	var reviewStore storage.ReviewStore
-	var imageStore storage.ImageStore
-	var kpStore storage.KnowledgeStore
-	var pgStore *postgres.Store
-
-	if cfg.DB.Driver == "postgres" {
-		var err error
-		pgStore, err = postgres.New(cfg.DB.DSN)
-		if err != nil {
-			return fmt.Errorf("连接 PostgreSQL 失败: %w", err)
-		}
-		defer pgStore.Close()
-
-		// 初始化表结构
-		schemaBytes, err := os.ReadFile("internal/storage/postgres/schema.sql")
-		if err != nil {
-			return fmt.Errorf("读取 schema 文件失败: %w", err)
-		}
-		if err := pgStore.InitSchema(string(schemaBytes)); err != nil {
-			return fmt.Errorf("初始化数据库表失败: %w", err)
-		}
-
-		questionStore = pgStore
-		expertStore = pgStore
-		reviewStore = pgStore
-		imageStore = pgStore
-		kpStore = pgStore
-		fmt.Println("数据库: PostgreSQL")
-	} else {
-		questionStore = storage.NewMemoryStore()
-		expertStore = storage.NewMemoryExpertStore()
-		reviewStore = storage.NewMemoryReviewStore()
-		imageStore = storage.NewMemoryImageStore()
-		kpStore = storage.NewMemoryKnowledgeStore()
-		fmt.Println("数据库: 内存存储（重启丢失）")
+	// 初始化 PostgreSQL 存储
+	pgStore, err := postgres.New(cfg.DB.DSN)
+	if err != nil {
+		return fmt.Errorf("连接 PostgreSQL 失败: %w", err)
 	}
+	defer pgStore.Close()
 
-	reviewSvc := review.NewService(expertStore, reviewStore, questionStore)
-	mockImgGen := image.NewMockImageGenerator("output/images")
-	imageSvc := image.NewService(questionStore, imageStore, client, mockImgGen)
-	kpSvc := knowledge.NewService(kpStore)
-	pipe := pipeline.New(generator.NewService(client), evaluator.NewService(), reviewSvc, imageSvc, kpSvc, questionStore)
+	// 初始化表结构
+	schemaBytes, err := os.ReadFile("internal/storage/postgres/schema.sql")
+	if err != nil {
+		return fmt.Errorf("读取 schema 文件失败: %w", err)
+	}
+	if err := pgStore.InitSchema(string(schemaBytes)); err != nil {
+		return fmt.Errorf("初始化数据库表失败: %w", err)
+	}
+	fmt.Println("数据库: PostgreSQL")
+
+	reviewSvc := review.NewService(pgStore, pgStore, pgStore)
+
+	// 生图服务：始终用真实生图器，无 API Key 时调用会报错
+	zimgGen := image.NewZImageGenerator(image.ZImageConfig{
+		APIKey:    cfg.Qwen.APIKey,
+		OutputDir: "output/images",
+	})
+	imageSvc := image.NewService(pgStore, pgStore, client, zimgGen)
+	fmt.Println("生图: z-image-turbo")
+	fmt.Printf("LLM: %s @ %s\n", cfg.Qwen.Model, cfg.Qwen.BaseURL)
+
+	kpSvc := knowledge.NewService(pgStore)
+	auditSvc := audit.NewService(pgStore)
+
+	// 创建生成服务（完整模式）
+	genSvc := generator.NewService(client)
+	// genSvc.Brief = true  // 精简模式：解析限制200字，节省token
+
+	// 创建批量推理服务（DashScope 批量 API，云端执行）
+	batchSvc := batch.NewService(cfg.Qwen.APIKey, cfg.Qwen.BaseURL, pgStore, pgStore)
+
+	pipe := pipeline.New(genSvc, evaluator.NewService(), reviewSvc, imageSvc, kpSvc, pgStore)
 
 	// 初始化认证服务
-	var authSvc *auth.Service
-	if pgStore != nil {
-		authSvc = auth.NewService(pgStore.DB(), "aigo-jwt-secret-2025", 24*time.Hour)
-		if err := authSvc.InitAdmin("admin", "admin", "系统管理员"); err != nil {
-			fmt.Printf("初始化管理员账号失败: %v\n", err)
-		} else {
-			fmt.Println("默认管理员: admin / admin")
-		}
+	authSvc := auth.NewService(pgStore.DB(), "aigo-jwt-secret-2025", 24*time.Hour)
+	if err := authSvc.InitAdmin("admin", "admin", "系统管理员"); err != nil {
+		fmt.Printf("初始化管理员账号失败: %v\n", err)
+	} else {
+		fmt.Println("默认管理员: admin / admin")
 	}
 
 	// 自动加载审核流程配置
@@ -107,16 +100,54 @@ func run(ctx context.Context, args []string) error {
 		}
 	}
 
+	// 同步专家角色用户到专家库
+	if err := authSvc.SyncExpertUsers(ctx, pgStore); err != nil {
+		fmt.Printf("同步专家用户失败: %v\n", err)
+	}
+
 	switch args[1] {
 	case "doctor":
 		return pipe.Doctor(ctx)
+
+	// ===== 批量生成和导出 =====
+	case "generate-all":
+		countPerPoint := 1
+		if len(args) > 2 {
+			fmt.Sscanf(args[2], "%d", &countPerPoint)
+		}
+		total, err := pipe.GenerateAll(ctx, countPerPoint)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("成功生成 %d 道题目\n", total)
+		return nil
+
+	case "export-xlsx":
+		path := "output/题目.xlsx"
+		if len(args) > 2 {
+			path = args[2]
+		}
+		return pipe.ExportXlsx(ctx, path)
+
+	case "export-docx":
+		path := "output/题目.docx"
+		if len(args) > 2 {
+			path = args[2]
+		}
+		return pipe.ExportDocx(ctx, path)
+
+	case "clear-questions":
+		return pipe.ClearQuestions(ctx)
+
+	case "clear-kp":
+		return pipe.ClearKnowledgePoints(ctx)
 
 	case "serve":
 		port := "8080"
 		if len(args) > 2 {
 			port = args[2]
 		}
-		server := api.NewServer(pipe, kpSvc, imageSvc, reviewSvc, questionStore, authSvc)
+		server := api.NewServer(pipe, kpSvc, imageSvc, reviewSvc, auditSvc, pgStore, authSvc, batchSvc)
 		addr := "127.0.0.1:" + port
 		fmt.Printf("AIgo HTTP 服务启动: http://%s\n", addr)
 		fmt.Println("API 文档:")
@@ -273,6 +304,190 @@ func run(ctx context.Context, args []string) error {
 		}
 		return pipe.PublishQuestion(ctx, args[2])
 
+	// ===== 批量推理（DashScope 批量 API，云端执行）=====
+	case "batch-run":
+		// 提交批量任务到 DashScope 云端
+		// 用法: aigo batch-run [选项]
+		//   --limit N          只处理前 N 个知识点
+		//   --skip-existing    跳过已有题目的知识点
+		//   --ids id1,id2      只处理指定知识点
+		//   --count N          每个知识点生成几道题（默认1）
+		//   --from CODE        起始大纲代码（含）
+		//   --to CODE          结束大纲代码（含）
+		limit := 0
+		skipExisting := true
+		ids := ""
+		countPerPoint := 1
+		fromCode := ""
+		toCode := ""
+
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--limit":
+				if i+1 < len(args) { fmt.Sscanf(args[i+1], "%d", &limit); i++ }
+			case "--no-skip":
+				skipExisting = false
+			case "--ids":
+				if i+1 < len(args) { ids = args[i+1]; i++ }
+			case "--count":
+				if i+1 < len(args) { fmt.Sscanf(args[i+1], "%d", &countPerPoint); i++ }
+			case "--from":
+				if i+1 < len(args) { fromCode = args[i+1]; i++ }
+			case "--to":
+				if i+1 < len(args) { toCode = args[i+1]; i++ }
+			}
+		}
+
+		// 获取知识点
+		var points []domain.KnowledgePoint
+		if ids != "" {
+			for _, id := range strings.Split(ids, ",") {
+				id = strings.TrimSpace(id)
+				if p, err := kpSvc.GetByID(ctx, id); err == nil && p != nil {
+					points = append(points, *p)
+				}
+			}
+		} else {
+			all, err := kpSvc.ListAll(ctx)
+			if err != nil {
+				return err
+			}
+			points = all
+		}
+
+		// 跳过已有题目
+		if skipExisting {
+			questions, _ := pgStore.ListQuestions(ctx)
+			existing := make(map[string]bool)
+			for _, q := range questions {
+				if q.OutlineCode != "" {
+					existing[q.OutlineCode] = true
+				}
+			}
+			var filtered []domain.KnowledgePoint
+			for _, p := range points {
+				if !existing[p.OutlineCode] {
+					filtered = append(filtered, p)
+				}
+			}
+			fmt.Printf("跳过已有题目: %d → %d 个知识点\n", len(points), len(filtered))
+			points = filtered
+		}
+
+		// 按范围筛选
+		if fromCode != "" || toCode != "" {
+			var filtered []domain.KnowledgePoint
+			for _, kp := range points {
+				if fromCode != "" && kp.OutlineCode < fromCode {
+					continue
+				}
+				if toCode != "" && kp.OutlineCode > toCode {
+					continue
+				}
+				filtered = append(filtered, kp)
+			}
+			points = filtered
+		}
+
+		// 限制数量
+		if limit > 0 && limit < len(points) {
+			points = points[:limit]
+		}
+
+		if len(points) == 0 {
+			return fmt.Errorf("没有符合条件的知识点")
+		}
+
+		fmt.Printf("DashScope 批量 API: %s\n", batchSvc.GetBaseURLs())
+		fmt.Printf("知识点: %d 个, 每点 %d 题\n", len(points), countPerPoint)
+		fmt.Println("正在提交任务...")
+
+		// 提交任务
+		jobID, count, err := batchSvc.GenerateAndSubmit(ctx, points, countPerPoint, "")
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("\n任务已提交！\n")
+		fmt.Printf("job_id: %s\n", jobID)
+		fmt.Printf("请求数: %d\n", count)
+		fmt.Println("\n任务在 DashScope 云端执行，关闭电脑不影响。")
+		fmt.Println("使用以下命令查看状态和下载结果：")
+		fmt.Printf("  go run ./cmd/aigo batch-status %s\n", jobID)
+		fmt.Printf("  go run ./cmd/aigo batch-download %s\n", jobID)
+		return nil
+
+	case "batch-status":
+		// 查询批量任务状态
+		// 用法: aigo batch-status <job_id>
+		if len(args) < 3 {
+			return fmt.Errorf("用法: aigo batch-status <job_id>")
+		}
+		job, err := batchSvc.GetJobStatus(ctx, args[2])
+		if err != nil {
+			return err
+		}
+		fmt.Printf("任务ID: %s\n", job.JobID)
+		fmt.Printf("状态: %s\n", job.Status)
+		fmt.Printf("总数: %d, 成功: %d, 失败: %d\n", job.TotalCount, job.Completed, job.Failed)
+		if job.OutputFileID != "" {
+			fmt.Printf("结果文件ID: %s\n", job.OutputFileID)
+		}
+		if job.Error != "" {
+			fmt.Printf("错误: %s\n", job.Error)
+		}
+		return nil
+
+	case "batch-download":
+		// 下载批量任务结果并导入题库
+		// 用法: aigo batch-download <job_id 或 output_file_id>
+		if len(args) < 3 {
+			return fmt.Errorf("用法: aigo batch-download <job_id 或 output_file_id>")
+		}
+
+		// 判断是 job_id 还是 output_file_id
+		id := args[2]
+		var outputFileID string
+
+		// 先尝试作为 job_id 查询
+		job, err := batchSvc.GetJobStatus(ctx, id)
+		if err == nil && job.OutputFileID != "" {
+			outputFileID = job.OutputFileID
+			fmt.Printf("任务状态: %s\n", job.Status)
+			if job.Status != "succeeded" {
+				return fmt.Errorf("任务尚未完成，当前状态: %s", job.Status)
+			}
+		} else {
+			// 直接作为 output_file_id 使用
+			outputFileID = id
+		}
+
+		// 获取知识点列表
+		allKPs, err := kpSvc.ListAll(ctx)
+		if err != nil {
+			return err
+		}
+
+		saved, err := batchSvc.DownloadAndImport(ctx, outputFileID, allKPs)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("已导入 %d 道题目\n", saved)
+		return nil
+
+	// ===== 旧版批量推理（已废弃，请使用 batch-run）=====
+	case "batch":
+		fmt.Println("提示：旧版 batch 命令已废弃，请使用 batch-run 命令：")
+		fmt.Println("  go run ./cmd/aigo batch-run [选项]")
+		fmt.Println("")
+		fmt.Println("batch-run 使用 DashScope 批量 API，云端执行，不会超时。")
+		fmt.Println("详见：go run ./cmd/aigo help")
+		return nil
+
+	case "batch-urls":
+		fmt.Printf("DashScope 批量 API: %s\n", batchSvc.GetBaseURLs())
+		return nil
+
 	// ===== 图片配图 =====
 	case "img-prompt":
 		if len(args) < 3 {
@@ -317,7 +532,7 @@ func run(ctx context.Context, args []string) error {
 		if len(args) < 3 {
 			return fmt.Errorf("用法: aigo show <题目ID>")
 		}
-		q, err := questionStore.GetQuestion(ctx, args[2])
+		q, err := pgStore.GetQuestion(ctx, args[2])
 		if err != nil {
 			return err
 		}
@@ -346,11 +561,37 @@ func printUsage() {
   go run ./cmd/aigo evaluate                      评估最后一道题
   go run ./cmd/aigo eval-id <题目ID>              评估指定题目
 
+批量生成与导出:
+  go run ./cmd/aigo generate-all [每知识点题数]    遍历所有知识点生成题目(默认1)
+  go run ./cmd/aigo export-xlsx [路径]            导出题库为 xlsx (默认 output/题目.xlsx)
+  go run ./cmd/aigo export-docx [路径]            导出题库为 docx (默认 output/题目.docx)
+  go run ./cmd/aigo clear-questions               清空题库
+  go run ./cmd/aigo clear-kp                      清空知识点
+
 知识点管理:
-  go run ./cmd/aigo kp-import <file.xlsx>         导入知识点
+  go run ./cmd/aigo kp-import <file.xlsx>         导入考试大纲知识点
   go run ./cmd/aigo kp-list [系统名]              列出知识点(可选按系统筛选)
   go run ./cmd/aigo kp-search <关键词>            搜索知识点
   go run ./cmd/aigo kp-stats                      知识点统计
+
+批量推理（batch.dashscope 域名，5折优惠，同步等待）:
+  go run ./cmd/aigo batch [选项]                  批量生成题目
+    --limit N          只处理前 N 个知识点
+    --skip-existing    跳过已有题目的知识点
+    --ids id1,id2      只处理指定知识点
+    --count N          每个知识点生成几道题（默认1）
+  go run ./cmd/aigo batch-urls                    显示批量推理 URL
+
+批量推理（DashScope 批量 API，云端执行，5折优惠）:
+  go run ./cmd/aigo batch-run [选项]              提交批量任务到云端
+    --limit N          只处理前 N 个知识点
+    --skip-existing    跳过已有题目的知识点（默认开启）
+    --ids id1,id2      只处理指定知识点
+    --count N          每个知识点生成几道题（默认1）
+    --from CODE        起始大纲代码（含）
+    --to CODE          结束大纲代码（含）
+  go run ./cmd/aigo batch-status <job_id>         查询任务状态
+  go run ./cmd/aigo batch-download <job_id>       下载结果并导入题库
 
 专家管理:
   go run ./cmd/aigo expert-add <ID> <姓名> [科室] [职称]  添加专家
@@ -377,7 +618,7 @@ func printUsage() {
 
 Environment:
   DASHSCOPE_API_KEY   阿里云百炼/千问 API Key
-  QWEN_BASE_URL       OpenAI兼容接口Base URL
-  QWEN_MODEL          默认 qwen-plus
+  QWEN_BASE_URL       DashScope API 地址 (默认 https://dashscope.aliyuncs.com/api/v1)
+  QWEN_MODEL          模型名称 (默认 qwen3.5-flash)
 `)
 }

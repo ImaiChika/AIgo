@@ -1,48 +1,47 @@
 package image
 
 import (
-	"context"
 	"testing"
 
 	"aigo/internal/domain"
 )
 
-func TestMockImageGenerator(t *testing.T) {
-	gen := NewMockImageGenerator("/tmp/test_images")
+func TestBuildImagePrompt(t *testing.T) {
 	prompt := domain.ImagePrompt{
-		ID:         "test-prompt-1",
-		QuestionID: "test-q-1",
-		Purpose:    "执业医师考试A2型题配图",
-		ImageType:  "医学教学示意图",
-		Subject:    "右下肺炎症影",
-		MustInclude: []string{"右下肺区域", "炎症阴影"},
-		MustExclude: []string{"真实患者信息"},
+		Subject:     "化脓性关节炎",
 		Style:       "医学教材示意图",
-		ReviewFocus: "病变位置是否正确",
+		MustInclude: []string{"关节腔积液", "滑膜肿胀"},
+		MustExclude: []string{"真实患者", "医院标识"},
 	}
 
-	images, err := gen.Generate(context.Background(), prompt)
-	if err != nil {
-		t.Fatalf("Generate failed: %v", err)
-	}
+	text := buildImagePrompt(prompt)
 
-	if len(images) != 1 {
-		t.Fatalf("expected 1 image, got %d", len(images))
+	if text == "" {
+		t.Fatal("buildImagePrompt returned empty string")
 	}
+	t.Logf("生成的提示词: %s", text)
 
-	img := images[0]
-	if img.ID == "" {
-		t.Error("image ID is empty")
+	// 检查包含关键内容
+	if !contains(text, "化脓性关节炎") {
+		t.Error("提示词应包含主题")
 	}
-	if img.ImagePath == "" {
-		t.Error("image path is empty")
+	if !contains(text, "关节腔积液") {
+		t.Error("提示词应包含必须出现的要素")
 	}
-	if img.ModelName != "mock-image-generator" {
-		t.Errorf("unexpected model name: %s", img.ModelName)
+	if !contains(text, "真实患者") {
+		t.Error("提示词应包含不能出现的要素")
 	}
-	if img.Status != domain.ImageStatusPending {
-		t.Errorf("unexpected status: %s", img.Status)
-	}
+}
 
-	t.Logf("Generated: ID=%s, Path=%s", img.ID, img.ImagePath)
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
+}
+
+func containsStr(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

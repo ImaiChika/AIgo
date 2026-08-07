@@ -58,6 +58,13 @@ func (s *Server) handleReviewAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "审核失败: "+err.Error())
 		return
 	}
+
+	// 记录审核日志（从任务中获取题目ID）
+	task, _ := s.reviewSvc.GetTask(r.Context(), req.TaskID)
+	if task != nil {
+		s.auditSvc.LogReview(r.Context(), task.QuestionID, req.ExpertID, req.Action, req.Opinion)
+	}
+
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
@@ -100,6 +107,30 @@ func (s *Server) handleListFlows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"flows": flows, "total": len(flows)})
+}
+
+// handleCreateFlow 创建审核流程。
+func (s *Server) handleCreateFlow(w http.ResponseWriter, r *http.Request) {
+	var flow domain.ReviewFlowConfig
+	if err := readJSON(r, &flow); err != nil {
+		writeError(w, 400, "请求格式错误: "+err.Error())
+		return
+	}
+	if err := s.reviewSvc.CreateFlow(r.Context(), flow); err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 201, flow)
+}
+
+// handleDeleteFlow 删除审核流程。
+func (s *Server) handleDeleteFlow(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.reviewSvc.DeleteFlow(r.Context(), id); err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "ok", "id": id})
 }
 
 // handleReviewRecords 获取某审核任务的所有审核记录。

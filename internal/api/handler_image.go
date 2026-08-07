@@ -27,7 +27,6 @@ func (s *Server) handleImagePrompt(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleImageGenerate 根据提示词生成候选图。
-// 当前使用 Mock 实现（生成占位文件），后续接入真实生图模型。
 // 请求：{"question_id": "xxx", "count": 4}
 func (s *Server) handleImageGenerate(w http.ResponseWriter, r *http.Request) {
 	var req struct {

@@ -1,13 +1,11 @@
 // Package image 提供图片相关的业务服务。
-// 包括结构化生图提示词生成、候选图生成（当前为 Mock）和图片审核。
+// 包括结构化生图提示词生成、候选图生成和图片审核。
 package image
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"aigo/internal/domain"
@@ -16,7 +14,6 @@ import (
 )
 
 // ImageGenerator 外部生图模型接口。
-// 当前为 Mock 实现，后续可接入真实生图 API。
 type ImageGenerator interface {
 	Generate(ctx context.Context, prompt domain.ImagePrompt) ([]domain.GeneratedImage, error)
 }
@@ -127,7 +124,6 @@ func (s *Service) GeneratePrompt(ctx context.Context, questionID string) (*domai
 }
 
 // GenerateImages 为题目生成候选图。
-// 当前使用 Mock 实现，后续替换为真实生图模型。
 func (s *Service) GenerateImages(ctx context.Context, questionID string, count int) ([]domain.GeneratedImage, error) {
 	prompt, err := s.imageStore.GetPromptByQuestionID(ctx, questionID)
 	if err != nil {
@@ -137,11 +133,11 @@ func (s *Service) GenerateImages(ctx context.Context, questionID string, count i
 		return nil, fmt.Errorf("题目 %s 尚未生成提示词，请先运行 img-prompt", questionID)
 	}
 
-	if count < 3 {
-		count = 3 // 至少 3 张
+	if count < 1 {
+		count = 1
 	}
 	if count > 5 {
-		count = 5 // 最多 5 张
+		count = 5
 	}
 
 	// 调用生图模型
@@ -205,51 +201,4 @@ func (s *Service) ReviewImage(ctx context.Context, imageID string, expertID stri
 // GetPrompt 获取题目的生图提示词。
 func (s *Service) GetPrompt(ctx context.Context, questionID string) (*domain.ImagePrompt, error) {
 	return s.imageStore.GetPromptByQuestionID(ctx, questionID)
-}
-
-// ===== Mock 生图实现 =====
-
-// MockImageGenerator Mock 生图器，生成占位文件。
-// 用于开发测试，后续替换为真实生图 API。
-type MockImageGenerator struct {
-	OutputDir string // 输出目录
-}
-
-// NewMockImageGenerator 创建 Mock 生图器。
-func NewMockImageGenerator(outputDir string) *MockImageGenerator {
-	return &MockImageGenerator{OutputDir: outputDir}
-}
-
-// Generate 生成一个占位文件作为"候选图"。
-func (m *MockImageGenerator) Generate(ctx context.Context, prompt domain.ImagePrompt) ([]domain.GeneratedImage, error) {
-	os.MkdirAll(m.OutputDir, 0755)
-
-	imgID := fmt.Sprintf("img-%s-%d", prompt.QuestionID, time.Now().UnixNano())
-	filename := fmt.Sprintf("%s.png", imgID)
-	path := filepath.Join(m.OutputDir, filename)
-
-	// 生成占位文本文件（真实场景会是图片）
-	placeholder := fmt.Sprintf(`[占位图 - Mock]
-题目: %s
-主题: %s
-类型: %s
-必须出现: %v
-不能出现: %v
-风格: %s
-审核重点: %s
-生成时间: %s
-`, prompt.QuestionID, prompt.Subject, prompt.ImageType,
-		prompt.MustInclude, prompt.MustExclude, prompt.Style,
-		prompt.ReviewFocus, time.Now().Format("2006-01-02 15:04:05"))
-
-	os.WriteFile(path, []byte(placeholder), 0644)
-
-	return []domain.GeneratedImage{{
-		ID:           imgID,
-		ImagePath:    path,
-		ModelName:    "mock-image-generator",
-		ModelVersion: "v0.1",
-		Status:       domain.ImageStatusPending,
-		CreatedAt:    time.Now(),
-	}}, nil
 }

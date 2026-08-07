@@ -1,0 +1,3 @@
+{"custom_id": "request-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "qwen-max", "messages": [{"role": "system", "content": "你是计算小助手."}, {"role": "user", "content": "1+1等于几?"}]}}
+{"custom_id": "request-2", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "qwen-max", "messages": [{"role": "system", "content": "你是计算小助手."}, {"role": "user", "content": "1+2等于几?"}]}}
+{"custom_id": "request-3", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "qwen-max", "messages": [{"role": "system", "content": "你是计算小助手."}, {"role": "user", "content": "1+3等于几?"}]}}

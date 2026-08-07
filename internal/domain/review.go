@@ -88,26 +88,22 @@ type FlowsConfigFile struct {
 
 // ReviewRecord 审核记录，每轮审核留痕，不可修改。
 type ReviewRecord struct {
-	ID             string         `json:"id"`                       // 记录唯一标识
-	TaskID         string         `json:"task_id"`                  // 关联的审核任务 ID
-	QuestionID     string         `json:"question_id"`              // 关联的题目 ID
-	RoundNumber    int            `json:"round_number"`             // 第几轮
-	ExpertID       string         `json:"expert_id"`                // 审核人 ID
-	Conclusion     QuestionStatus `json:"review_status"`            // 审核结论
-	Opinion        string         `json:"opinion"`                  // 审核意见
-	BeforeSnapshot string         `json:"before_snapshot,omitempty"` // 修改前快照
-	AfterSnapshot  string         `json:"after_snapshot,omitempty"`  // 修改后快照
-	CreatedAt      time.Time      `json:"created_at"`               // 审核时间
+	ID          string         `json:"id"`           // 记录唯一标识
+	TaskID      string         `json:"task_id"`      // 关联的审核任务 ID
+	QuestionID  string         `json:"question_id"`  // 关联的题目 ID
+	RoundNumber int            `json:"round_number"` // 第几轮
+	ExpertID    string         `json:"expert_id"`    // 审核人 ID
+	Conclusion  QuestionStatus `json:"review_status"` // 审核结论
+	Opinion     string         `json:"opinion"`      // 审核意见
+	CreatedAt   time.Time      `json:"created_at"`   // 审核时间
 }
 
-// QuestionVersion 题目版本记录。
-// 每次题目内容变更都保存一个快照，用于追溯修改历史。
-type QuestionVersion struct {
-	ID         string    `json:"id"`          // 版本记录 ID
-	QuestionID string    `json:"question_id"` // 题目 ID
-	Version    int       `json:"version"`     // 版本号
-	Snapshot   string    `json:"snapshot"`    // 题目 JSON 快照
-	ChangeNote string    `json:"change_note"` // 变更说明
-	ChangedBy  string    `json:"changed_by"`  // 修改人（"ai" 或专家 ID）
-	CreatedAt  time.Time `json:"created_at"`  // 创建时间
+// AuditLog 操作日志，记录所有对题库的变更操作。
+type AuditLog struct {
+	ID         string    `json:"id"`          // 日志 ID
+	QuestionID string    `json:"question_id"` // 关联题目 ID（可为空，如批量导入）
+	Action     string    `json:"action"`      // 操作类型：create/update/delete/review/publish
+	Actor      string    `json:"actor"`       // 操作人（用户名或 "ai"）
+	Detail     string    `json:"detail"`      // 操作详情（JSON 或文字描述）
+	CreatedAt  time.Time `json:"created_at"`  // 操作时间
 }

@@ -8,13 +8,6 @@ const total = ref(0);
 const page = ref(1);
 const searchQuery = ref("");
 const loading = ref(false);
-const showCreate = ref(false);
-
-const newKP = ref({
-  topic: "",
-  system: "",
-  keywords: "",
-});
 
 function showToast(msg) {
   toast.value = msg;
@@ -50,31 +43,6 @@ async function search() {
     showToast("搜索失败: " + e.message);
   } finally {
     loading.value = false;
-  }
-}
-
-async function createKP() {
-  if (!newKP.value.topic.trim()) {
-    showToast("知识点名称不能为空");
-    return;
-  }
-  try {
-    const keywords = newKP.value.keywords
-      .split(/[,，、\s]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    await api.createKP({
-      topic: newKP.value.topic.trim(),
-      system: newKP.value.system.trim(),
-      keywords,
-    });
-    showToast("添加成功");
-    newKP.value = { topic: "", system: "", keywords: "" };
-    showCreate.value = false;
-    page.value = 1;
-    loadPoints();
-  } catch (e) {
-    showToast("添加失败: " + e.message);
   }
 }
 
@@ -136,8 +104,8 @@ onMounted(loadPoints);
     <section class="panel">
       <div class="section-heading">
         <span class="dot blue"></span>
-        <h2>知识点管理</h2>
-        <small>共 {{ total }} 个知识点</small>
+        <h2>考试大纲知识点</h2>
+        <small>共 {{ total }} 个考点</small>
       </div>
 
       <!-- 操作栏 -->
@@ -145,40 +113,18 @@ onMounted(loadPoints);
         <div class="search-row">
           <input
             v-model="searchQuery"
-            placeholder="搜索知识点名称或关键词..."
+            placeholder="搜索知识点、大纲代码、专业..."
             @keyup.enter="doSearch"
           />
           <button class="primary-button" type="button" @click="doSearch">搜索</button>
           <button class="ghost-button" type="button" @click="clearSearch">重置</button>
         </div>
         <div class="action-btns">
-          <button class="primary-button" type="button" @click="showCreate = !showCreate">
-            {{ showCreate ? "取消" : "+ 添加知识点" }}
-          </button>
           <label class="ghost-button import-btn">
-            导入 Excel
+            导入考试大纲
             <input type="file" accept=".xlsx,.xls" hidden @change="handleImport" />
           </label>
         </div>
-      </div>
-
-      <!-- 新建表单 -->
-      <div v-if="showCreate" class="create-form">
-        <div class="form-row">
-          <div class="field">
-            <label>知识点名称 *</label>
-            <input v-model="newKP.topic" placeholder="如：社区获得性肺炎" />
-          </div>
-          <div class="field">
-            <label>所属系统</label>
-            <input v-model="newKP.system" placeholder="如：呼吸内科" />
-          </div>
-          <div class="field">
-            <label>关键词（逗号分隔）</label>
-            <input v-model="newKP.keywords" placeholder="如：肺炎,发热,咳嗽" />
-          </div>
-        </div>
-        <button class="primary-button" type="button" @click="createKP">确认添加</button>
       </div>
 
       <!-- 列表 -->
@@ -186,25 +132,29 @@ onMounted(loadPoints);
       <table v-else class="kp-table">
         <thead>
           <tr>
-            <th>ID</th>
-            <th>系统</th>
-            <th>知识点名称</th>
-            <th>关键词</th>
+            <th>大纲代码</th>
+            <th>分类</th>
+            <th>专业/系统</th>
+            <th>单元</th>
+            <th>细目</th>
+            <th>要点</th>
             <th>操作</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="p in points" :key="p.id">
-            <td class="id-cell">{{ p.id }}</td>
-            <td><span class="system-tag">{{ p.system || "未分类" }}</span></td>
+            <td class="code-cell">{{ p.outline_code }}</td>
+            <td><span class="category-tag" :class="p.category === '基础医学' ? 'basic' : 'clinical'">{{ p.category }}</span></td>
+            <td>{{ p.subject }}</td>
+            <td class="unit-cell">{{ p.unit }}</td>
+            <td>{{ p.sub_item }}</td>
             <td>{{ p.topic }}</td>
-            <td class="kw-cell">{{ (p.keywords || []).slice(0, 3).join("、") }}</td>
             <td>
               <button class="delete-btn" type="button" @click="deleteKP(p)" title="删除">×</button>
             </td>
           </tr>
           <tr v-if="!points.length">
-            <td colspan="5" class="empty">暂无数据</td>
+            <td colspan="7" class="empty">暂无数据，请导入考试大纲</td>
           </tr>
         </tbody>
       </table>
@@ -217,6 +167,8 @@ onMounted(loadPoints);
       </div>
     </section>
   </div>
+
+  <div class="toast" :class="{ show: toast }" role="status" aria-live="polite">{{ toast }}</div>
 </template>
 
 <style scoped>
@@ -258,42 +210,10 @@ onMounted(loadPoints);
   align-items: center;
 }
 
-.create-form {
-  padding: 16px;
-  background: #f8fbff;
-  border: 1px solid #dce8f7;
-  border-radius: 8px;
-  margin-bottom: 16px;
-}
-
-.form-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.field label {
-  display: block;
-  font-size: 12px;
-  font-weight: 600;
-  color: #6e7b8f;
-  margin-bottom: 4px;
-}
-
-.field input {
-  width: 100%;
-  height: 36px;
-  border: 1px solid #e5ebf3;
-  border-radius: 6px;
-  padding: 0 10px;
-  font-size: 13px;
-}
-
 .kp-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .kp-table th {
@@ -306,7 +226,7 @@ onMounted(loadPoints);
 }
 
 .kp-table td {
-  padding: 10px 12px;
+  padding: 8px 12px;
   border-bottom: 1px solid #f0f3f7;
 }
 
@@ -314,25 +234,31 @@ onMounted(loadPoints);
   background: #f8fbff;
 }
 
-.id-cell {
+.code-cell {
   color: #6e7b8f;
-  font-size: 12px;
+  font-size: 11px;
   font-family: monospace;
 }
 
-.system-tag {
+.category-tag {
   display: inline-block;
   padding: 2px 8px;
-  background: #eff8ff;
-  color: #0571dc;
   border-radius: 4px;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
 }
 
-.kw-cell {
-  color: #6e7b8f;
-  font-size: 12px;
+.category-tag.basic {
+  background: #fff3e0;
+  color: #e65100;
+}
+
+.category-tag.clinical {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.unit-cell {
   max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;

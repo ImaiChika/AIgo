@@ -1,62 +1,27 @@
 {
   "flows": [
     {
-      "id": "flow-a2-2round",
-      "name": "执医A2试题双轮审核",
-      "description": "适用于常规A2型题目，2轮审核",
+      "id": "flow-2round",
+      "name": "双轮审核",
+      "description": "适用于常规题目，2轮审核",
       "subject": "临床医学",
       "rounds": [
         {
           "round_number": 1,
-          "name": "命题教师初审",
-          "expert_ids": ["E001", "E004"],
+          "name": "专家初审",
+          "expert_ids": ["user-1783588118145188000", "user-1784048905516098000"],
           "required_count": 1,
           "can_modify": true,
-          "pass_condition": "任意1位专家通过即可进入下一轮",
+          "pass_condition": "任意1位专家通过即可",
           "is_required": true
         },
         {
           "round_number": 2,
-          "name": "题库管理员终审",
-          "expert_ids": ["E003"],
+          "name": "终审确认",
+          "expert_ids": ["user-1783588118145188000"],
           "required_count": 1,
           "can_modify": false,
-          "pass_condition": "管理员确认格式和标签",
-          "is_required": true
-        }
-      ]
-    },
-    {
-      "id": "flow-a2-3round",
-      "name": "执医A2试题三轮审核",
-      "description": "适用于高难度或高风险题目，3轮审核",
-      "subject": "临床医学",
-      "rounds": [
-        {
-          "round_number": 1,
-          "name": "命题教师初审",
-          "expert_ids": ["E001"],
-          "required_count": 1,
-          "can_modify": true,
-          "pass_condition": "检查题干、答案、解析",
-          "is_required": true
-        },
-        {
-          "round_number": 2,
-          "name": "专业专家复审",
-          "expert_ids": ["E002", "E005", "E006"],
-          "required_count": 2,
-          "can_modify": false,
-          "pass_condition": "3位专家中至少2位通过",
-          "is_required": true
-        },
-        {
-          "round_number": 3,
-          "name": "题库管理员终审",
-          "expert_ids": ["E003"],
-          "required_count": 1,
-          "can_modify": false,
-          "pass_condition": "检查格式、标签、知识点",
+          "pass_condition": "确认入库",
           "is_required": true
         }
       ]

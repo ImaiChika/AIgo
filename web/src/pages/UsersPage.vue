@@ -127,6 +127,8 @@ onMounted(loadUsers);
       </table>
     </section>
   </div>
+
+  <div class="toast" :class="{ show: toast }" role="status" aria-live="polite">{{ toast }}</div>
 </template>
 
 <style scoped>

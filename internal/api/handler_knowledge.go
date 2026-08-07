@@ -9,17 +9,17 @@ import (
 	"aigo/internal/domain"
 )
 
-// handleListKP 列出知识点（支持分页和按系统筛选）。
-// 查询参数：system=系统名，page=页码，page_size=每页数量。
+// handleListKP 列出知识点（支持分页和按专业筛选）。
+// 查询参数：subject=专业名，page=页码，page_size=每页数量。
 func (s *Server) handleListKP(w http.ResponseWriter, r *http.Request) {
-	system := r.URL.Query().Get("system")
+	subject := r.URL.Query().Get("subject")
 	ctx := r.Context()
 
-	// 按系统筛选或列出全部
+	// 按专业筛选或列出全部
 	var points []domain.KnowledgePoint
 	var err error
-	if system != "" {
-		points, err = s.kpSvc.ListBySystem(ctx, system)
+	if subject != "" {
+		points, err = s.kpSvc.ListBySubject(ctx, subject)
 	} else {
 		points, err = s.kpSvc.ListAll(ctx)
 	}
@@ -74,14 +74,17 @@ func (s *Server) handleSearchKP(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCreateKP 创建单个知识点。
-// 请求：{"topic": "肺炎", "system": "呼吸内科", "keywords": ["发热","咳嗽"]}
+// 请求：{"topic": "充血的概念和类型", "subject": "病理", "unit": "二、局部血液循环障碍", "keywords": ["充血","淤血"]}
 func (s *Server) handleCreateKP(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID       string   `json:"id"`       // 可选，不填自动生成
-		Subject  string   `json:"subject"`  // 科目，默认"临床医学"
-		System   string   `json:"system"`   // 所属系统
-		Topic    string   `json:"topic"`    // 知识点名称（必填）
-		Keywords []string `json:"keywords"` // 关键词列表
+		ID          string   `json:"id"`           // 可选，不填自动生成
+		Category    string   `json:"category"`     // 分类：基础医学/临床综合
+		Subject     string   `json:"subject"`      // 专业/系统
+		Unit        string   `json:"unit"`         // 单元
+		SubItem     string   `json:"sub_item"`     // 细目
+		Topic       string   `json:"topic"`        // 要点（必填）
+		OutlineCode string   `json:"outline_code"` // 大纲代码
+		Keywords    []string `json:"keywords"`     // 关键词列表
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, 400, "请求格式错误")
@@ -94,16 +97,16 @@ func (s *Server) handleCreateKP(w http.ResponseWriter, r *http.Request) {
 	if req.ID == "" {
 		req.ID = fmt.Sprintf("kp-custom-%d", time.Now().UnixNano())
 	}
-	if req.Subject == "" {
-		req.Subject = "临床医学"
-	}
 
 	kp := domain.KnowledgePoint{
-		ID:       req.ID,
-		Subject:  req.Subject,
-		System:   req.System,
-		Topic:    req.Topic,
-		Keywords: req.Keywords,
+		ID:          req.ID,
+		Category:    req.Category,
+		Subject:     req.Subject,
+		Unit:        req.Unit,
+		SubItem:     req.SubItem,
+		Topic:       req.Topic,
+		OutlineCode: req.OutlineCode,
+		Keywords:    req.Keywords,
 	}
 	if _, err := s.kpSvc.SavePoints(r.Context(), []domain.KnowledgePoint{kp}); err != nil {
 		writeError(w, 500, "保存失败: "+err.Error())

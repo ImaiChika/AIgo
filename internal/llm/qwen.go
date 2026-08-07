@@ -15,11 +15,11 @@ import (
 type QwenConfig struct {
 	APIKey      string        // API 密钥
 	BaseURL     string        // 接口地址（OpenAI 兼容格式）
-	Model       string        // 模型名称，如 qwen3.6-flash
+	Model       string        // 模型名称，如 qwen3.5-flash
 	HTTPTimeout time.Duration // HTTP 超时时间
 }
 
-// QwenClient 千问 API 客户端，使用标准库 net/http 调用 OpenAI 兼容接口。
+// QwenClient 千问 API 客户端，使用 OpenAI 兼容接口。
 type QwenClient struct {
 	cfg        QwenConfig
 	httpClient *http.Client
@@ -39,7 +39,7 @@ func NewQwenClient(cfg QwenConfig) *QwenClient {
 	}
 }
 
-// Complete 调用千问 Chat Completions API。
+// Complete 调用千问 Chat Completions API（OpenAI 兼容格式）。
 func (c *QwenClient) Complete(ctx context.Context, messages []Message, opts GenerateOptions) (string, error) {
 	if c.cfg.APIKey == "" {
 		return "", errors.New("缺少 DASHSCOPE_API_KEY 或 QWEN_API_KEY")
@@ -48,9 +48,9 @@ func (c *QwenClient) Complete(ctx context.Context, messages []Message, opts Gene
 		return "", errors.New("messages cannot be empty")
 	}
 
-	// 构建请求体
+	// 构建 OpenAI 兼容请求体
 	requestBody := chatRequest{
-		Model:    firstNonEmpty(c.cfg.Model, "qwen-plus"),
+		Model:    firstNonEmpty(c.cfg.Model, "qwen3.5-flash"),
 		Messages: messages,
 	}
 	if opts.Temperature > 0 {
@@ -84,7 +84,7 @@ func (c *QwenClient) Complete(ctx context.Context, messages []Message, opts Gene
 	// 解析响应
 	var decoded chatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		return "", err
+		return "", fmt.Errorf("解析响应失败: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("qwen api status %d: %s", resp.StatusCode, decoded.Error.Message)
@@ -95,7 +95,7 @@ func (c *QwenClient) Complete(ctx context.Context, messages []Message, opts Gene
 	return decoded.Choices[0].Message.Content, nil
 }
 
-// chatRequest 千问 API 请求体。
+// chatRequest OpenAI 兼容请求体。
 type chatRequest struct {
 	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
@@ -103,7 +103,7 @@ type chatRequest struct {
 	MaxTokens   int       `json:"max_tokens,omitempty"`
 }
 
-// chatResponse 千问 API 响应体。
+// chatResponse OpenAI 兼容响应体。
 type chatResponse struct {
 	Choices []struct {
 		Message Message `json:"message"`

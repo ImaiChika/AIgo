@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"aigo/internal/domain"
+	"aigo/internal/storage"
 
 	_ "github.com/lib/pq"
 )
@@ -59,10 +60,11 @@ func (s *Store) SavePoints(ctx context.Context, points []domain.KnowledgePoint) 
 	defer tx.Rollback()
 
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO knowledge_points (id, subject, system, topic, outline_ref, keywords)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO knowledge_points (id, category, subject, unit, sub_item, topic, outline_code, outline_ref, keywords)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (id) DO UPDATE SET
-			subject=EXCLUDED.subject, system=EXCLUDED.system, topic=EXCLUDED.topic,
+			category=EXCLUDED.category, subject=EXCLUDED.subject, unit=EXCLUDED.unit,
+			sub_item=EXCLUDED.sub_item, topic=EXCLUDED.topic, outline_code=EXCLUDED.outline_code,
 			outline_ref=EXCLUDED.outline_ref, keywords=EXCLUDED.keywords
 	`)
 	if err != nil {
@@ -72,7 +74,7 @@ func (s *Store) SavePoints(ctx context.Context, points []domain.KnowledgePoint) 
 
 	count := 0
 	for _, p := range points {
-		_, err := stmt.ExecContext(ctx, p.ID, p.Subject, p.System, p.Topic, p.OutlineRef, pqArray(p.Keywords))
+		_, err := stmt.ExecContext(ctx, p.ID, p.Category, p.Subject, p.Unit, p.SubItem, p.Topic, p.OutlineCode, p.OutlineCode, pqArray(p.Keywords))
 		if err != nil {
 			return count, err
 		}
@@ -82,12 +84,12 @@ func (s *Store) SavePoints(ctx context.Context, points []domain.KnowledgePoint) 
 }
 
 func (s *Store) GetPoint(ctx context.Context, id string) (*domain.KnowledgePoint, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, subject, system, topic, outline_ref, keywords FROM knowledge_points WHERE id=$1`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, category, subject, unit, sub_item, topic, outline_code, keywords FROM knowledge_points WHERE id=$1`, id)
 	return scanPoint(row)
 }
 
 func (s *Store) ListPoints(ctx context.Context) ([]domain.KnowledgePoint, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, subject, system, topic, outline_ref, keywords FROM knowledge_points ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, category, subject, unit, sub_item, topic, outline_code, keywords FROM knowledge_points ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -98,11 +100,11 @@ func (s *Store) ListPoints(ctx context.Context) ([]domain.KnowledgePoint, error)
 func (s *Store) SearchPoints(ctx context.Context, keyword string) ([]domain.KnowledgePoint, error) {
 	kw := "%" + strings.ToLower(keyword) + "%"
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, subject, system, topic, outline_ref, keywords
+		SELECT id, category, subject, unit, sub_item, topic, outline_code, keywords
 		FROM knowledge_points
-		WHERE LOWER(topic) LIKE $1 OR LOWER(outline_ref) LIKE $1 OR EXISTS (
-			SELECT 1 FROM unnest(keywords) k WHERE LOWER(k) LIKE $1
-		) ORDER BY id
+		WHERE LOWER(topic) LIKE $1 OR LOWER(unit) LIKE $1 OR LOWER(sub_item) LIKE $1
+		   OR LOWER(outline_code) LIKE $1 OR LOWER(subject) LIKE $1
+		ORDER BY id
 	`, kw)
 	if err != nil {
 		return nil, err
@@ -112,7 +114,7 @@ func (s *Store) SearchPoints(ctx context.Context, keyword string) ([]domain.Know
 }
 
 func (s *Store) ListBySubject(ctx context.Context, subject string) ([]domain.KnowledgePoint, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, subject, system, topic, outline_ref, keywords FROM knowledge_points WHERE subject=$1 ORDER BY id`, subject)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, category, subject, unit, sub_item, topic, outline_code, keywords FROM knowledge_points WHERE subject=$1 ORDER BY id`, subject)
 	if err != nil {
 		return nil, err
 	}
@@ -147,16 +149,19 @@ func (s *Store) SaveQuestion(ctx context.Context, q domain.A2Question) error {
 	media, _ := json.Marshal(q.MediaRefs)
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO questions (id, clinical_stem, options, answer, explanation, source_refs, knowledge_points, media_refs, difficulty, status, version, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		INSERT INTO questions (id, clinical_stem, options, answer, explanation, source_refs, knowledge_points, media_refs, difficulty, cognitive_level, exam_points, outline_code, profession, system_name, status, version, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		ON CONFLICT (id) DO UPDATE SET
 			clinical_stem=EXCLUDED.clinical_stem, options=EXCLUDED.options, answer=EXCLUDED.answer,
 			explanation=EXCLUDED.explanation, source_refs=EXCLUDED.source_refs,
 			knowledge_points=EXCLUDED.knowledge_points, media_refs=EXCLUDED.media_refs,
-			difficulty=EXCLUDED.difficulty, status=EXCLUDED.status, version=EXCLUDED.version,
-			updated_at=EXCLUDED.updated_at
+			difficulty=EXCLUDED.difficulty, cognitive_level=EXCLUDED.cognitive_level,
+			exam_points=EXCLUDED.exam_points, outline_code=EXCLUDED.outline_code,
+			profession=EXCLUDED.profession, system_name=EXCLUDED.system_name,
+			status=EXCLUDED.status, version=EXCLUDED.version, updated_at=EXCLUDED.updated_at
 	`, q.ID, q.ClinicalStem, opts, q.Answer, q.Explanation, refs, kps, media,
-		q.Difficulty, q.Status, q.Version, q.CreatedAt, q.UpdatedAt)
+		q.Difficulty, q.CognitiveLevel, q.ExamPoints, q.OutlineCode, q.Profession, q.System,
+		q.Status, q.Version, q.CreatedAt, q.UpdatedAt)
 	return err
 }
 
@@ -175,13 +180,14 @@ func (s *Store) SaveQuestions(ctx context.Context, questions []domain.A2Question
 		media, _ := json.Marshal(q.MediaRefs)
 
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO questions (id, clinical_stem, options, answer, explanation, source_refs, knowledge_points, media_refs, difficulty, status, version, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+			INSERT INTO questions (id, clinical_stem, options, answer, explanation, source_refs, knowledge_points, media_refs, difficulty, cognitive_level, exam_points, outline_code, profession, system_name, status, version, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 			ON CONFLICT (id) DO UPDATE SET
 				clinical_stem=EXCLUDED.clinical_stem, options=EXCLUDED.options, answer=EXCLUDED.answer,
 				explanation=EXCLUDED.explanation, status=EXCLUDED.status, updated_at=EXCLUDED.updated_at
 		`, q.ID, q.ClinicalStem, opts, q.Answer, q.Explanation, refs, kps, media,
-			q.Difficulty, q.Status, q.Version, q.CreatedAt, q.UpdatedAt)
+			q.Difficulty, q.CognitiveLevel, q.ExamPoints, q.OutlineCode, q.Profession, q.System,
+			q.Status, q.Version, q.CreatedAt, q.UpdatedAt)
 		if err != nil {
 			return count, err
 		}
@@ -192,7 +198,7 @@ func (s *Store) SaveQuestions(ctx context.Context, questions []domain.A2Question
 
 func (s *Store) GetQuestion(ctx context.Context, id string) (*domain.A2Question, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, clinical_stem, options, answer, explanation, source_refs, knowledge_points, media_refs, difficulty, status, version, created_at, updated_at
+		SELECT id, clinical_stem, options, answer, explanation, source_refs, knowledge_points, media_refs, difficulty, cognitive_level, exam_points, outline_code, profession, system_name, status, version, created_at, updated_at
 		FROM questions WHERE id=$1
 	`, id)
 	return scanQuestion(row)
@@ -205,7 +211,7 @@ func (s *Store) DeleteQuestion(ctx context.Context, id string) error {
 
 func (s *Store) ListQuestions(ctx context.Context) ([]domain.A2Question, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, clinical_stem, options, answer, explanation, source_refs, knowledge_points, media_refs, difficulty, status, version, created_at, updated_at
+		SELECT id, clinical_stem, options, answer, explanation, source_refs, knowledge_points, media_refs, difficulty, cognitive_level, exam_points, outline_code, profession, system_name, status, version, created_at, updated_at
 		FROM questions ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -307,6 +313,11 @@ func (s *Store) ListFlowConfigs(ctx context.Context) ([]domain.ReviewFlowConfig,
 	return result, rows.Err()
 }
 
+func (s *Store) DeleteFlowConfig(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM review_flows WHERE id=$1`, id)
+	return err
+}
+
 // ===== 审核任务 =====
 
 func (s *Store) SaveTask(ctx context.Context, t domain.ReviewTask) error {
@@ -339,14 +350,14 @@ func (s *Store) UpdateTask(ctx context.Context, t domain.ReviewTask) error {
 
 func (s *Store) SaveRecord(ctx context.Context, r domain.ReviewRecord) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO review_records (id, task_id, question_id, round_number, expert_id, conclusion, opinion, before_snapshot, after_snapshot, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-	`, r.ID, r.TaskID, r.QuestionID, r.RoundNumber, r.ExpertID, r.Conclusion, r.Opinion, r.BeforeSnapshot, r.AfterSnapshot, r.CreatedAt)
+		INSERT INTO review_records (id, task_id, question_id, round_number, expert_id, conclusion, opinion, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+	`, r.ID, r.TaskID, r.QuestionID, r.RoundNumber, r.ExpertID, r.Conclusion, r.Opinion, r.CreatedAt)
 	return err
 }
 
 func (s *Store) ListRecordsByTaskID(ctx context.Context, taskID string) ([]domain.ReviewRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, question_id, round_number, expert_id, conclusion, opinion, before_snapshot, after_snapshot, created_at FROM review_records WHERE task_id=$1 ORDER BY created_at`, taskID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, question_id, round_number, expert_id, conclusion, opinion, created_at FROM review_records WHERE task_id=$1 ORDER BY created_at`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -354,7 +365,7 @@ func (s *Store) ListRecordsByTaskID(ctx context.Context, taskID string) ([]domai
 	var result []domain.ReviewRecord
 	for rows.Next() {
 		var r domain.ReviewRecord
-		if err := rows.Scan(&r.ID, &r.TaskID, &r.QuestionID, &r.RoundNumber, &r.ExpertID, &r.Conclusion, &r.Opinion, &r.BeforeSnapshot, &r.AfterSnapshot, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.TaskID, &r.QuestionID, &r.RoundNumber, &r.ExpertID, &r.Conclusion, &r.Opinion, &r.CreatedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, r)
@@ -362,29 +373,54 @@ func (s *Store) ListRecordsByTaskID(ctx context.Context, taskID string) ([]domai
 	return result, rows.Err()
 }
 
-// ===== 题目版本 =====
+// ===== 操作日志 =====
 
-func (s *Store) SaveVersion(ctx context.Context, v domain.QuestionVersion) error {
+func (s *Store) SaveLog(ctx context.Context, log domain.AuditLog) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO question_versions (id, question_id, version, snapshot, change_note, changed_by, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
-	`, v.ID, v.QuestionID, v.Version, v.Snapshot, v.ChangeNote, v.ChangedBy, v.CreatedAt)
+		INSERT INTO audit_logs (id, question_id, action, actor, detail, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6)
+	`, log.ID, log.QuestionID, log.Action, log.Actor, log.Detail, log.CreatedAt)
 	return err
 }
 
-func (s *Store) ListVersionsByQuestionID(ctx context.Context, questionID string) ([]domain.QuestionVersion, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, question_id, version, snapshot, change_note, changed_by, created_at FROM question_versions WHERE question_id=$1 ORDER BY version`, questionID)
+func (s *Store) ListLogs(ctx context.Context, limit int) ([]domain.AuditLog, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, question_id, action, actor, detail, created_at FROM audit_logs ORDER BY created_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var result []domain.QuestionVersion
+	return scanAuditLogs(rows)
+}
+
+func (s *Store) ListLogsByQuestion(ctx context.Context, questionID string) ([]domain.AuditLog, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, question_id, action, actor, detail, created_at FROM audit_logs WHERE question_id=$1 ORDER BY created_at DESC`, questionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAuditLogs(rows)
+}
+
+func (s *Store) ListLogsByActor(ctx context.Context, actor string) ([]domain.AuditLog, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, question_id, action, actor, detail, created_at FROM audit_logs WHERE actor=$1 ORDER BY created_at DESC`, actor)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAuditLogs(rows)
+}
+
+func scanAuditLogs(rows *sql.Rows) ([]domain.AuditLog, error) {
+	var result []domain.AuditLog
 	for rows.Next() {
-		var v domain.QuestionVersion
-		if err := rows.Scan(&v.ID, &v.QuestionID, &v.Version, &v.Snapshot, &v.ChangeNote, &v.ChangedBy, &v.CreatedAt); err != nil {
+		var l domain.AuditLog
+		if err := rows.Scan(&l.ID, &l.QuestionID, &l.Action, &l.Actor, &l.Detail, &l.CreatedAt); err != nil {
 			return nil, err
 		}
-		result = append(result, v)
+		result = append(result, l)
 	}
 	return result, rows.Err()
 }
@@ -535,7 +571,7 @@ func (s *arrayScanner) Scan(src interface{}) error {
 func scanPoint(row *sql.Row) (*domain.KnowledgePoint, error) {
 	var p domain.KnowledgePoint
 	var keywords []string
-	err := row.Scan(&p.ID, &p.Subject, &p.System, &p.Topic, &p.OutlineRef, pqArrayScanner(&keywords))
+	err := row.Scan(&p.ID, &p.Category, &p.Subject, &p.Unit, &p.SubItem, &p.Topic, &p.OutlineCode, pqArrayScanner(&keywords))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -551,7 +587,7 @@ func scanPoints(rows *sql.Rows) ([]domain.KnowledgePoint, error) {
 	for rows.Next() {
 		var p domain.KnowledgePoint
 		var keywords []string
-		if err := rows.Scan(&p.ID, &p.Subject, &p.System, &p.Topic, &p.OutlineRef, pqArrayScanner(&keywords)); err != nil {
+		if err := rows.Scan(&p.ID, &p.Category, &p.Subject, &p.Unit, &p.SubItem, &p.Topic, &p.OutlineCode, pqArrayScanner(&keywords)); err != nil {
 			return nil, err
 		}
 		p.Keywords = keywords
@@ -563,7 +599,9 @@ func scanPoints(rows *sql.Rows) ([]domain.KnowledgePoint, error) {
 func scanQuestion(row *sql.Row) (*domain.A2Question, error) {
 	var q domain.A2Question
 	var optsJSON, refsJSON, kpsJSON, mediaJSON []byte
-	err := row.Scan(&q.ID, &q.ClinicalStem, &optsJSON, &q.Answer, &q.Explanation, &refsJSON, &kpsJSON, &mediaJSON, &q.Difficulty, &q.Status, &q.Version, &q.CreatedAt, &q.UpdatedAt)
+	err := row.Scan(&q.ID, &q.ClinicalStem, &optsJSON, &q.Answer, &q.Explanation, &refsJSON, &kpsJSON, &mediaJSON,
+		&q.Difficulty, &q.CognitiveLevel, &q.ExamPoints, &q.OutlineCode, &q.Profession, &q.System,
+		&q.Status, &q.Version, &q.CreatedAt, &q.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -582,7 +620,9 @@ func scanQuestions(rows *sql.Rows) ([]domain.A2Question, error) {
 	for rows.Next() {
 		var q domain.A2Question
 		var optsJSON, refsJSON, kpsJSON, mediaJSON []byte
-		if err := rows.Scan(&q.ID, &q.ClinicalStem, &optsJSON, &q.Answer, &q.Explanation, &refsJSON, &kpsJSON, &mediaJSON, &q.Difficulty, &q.Status, &q.Version, &q.CreatedAt, &q.UpdatedAt); err != nil {
+		if err := rows.Scan(&q.ID, &q.ClinicalStem, &optsJSON, &q.Answer, &q.Explanation, &refsJSON, &kpsJSON, &mediaJSON,
+			&q.Difficulty, &q.CognitiveLevel, &q.ExamPoints, &q.OutlineCode, &q.Profession, &q.System,
+			&q.Status, &q.Version, &q.CreatedAt, &q.UpdatedAt); err != nil {
 			return nil, err
 		}
 		json.Unmarshal(optsJSON, &q.Options)
@@ -669,6 +709,82 @@ func scanImages(rows *sql.Rows) ([]domain.GeneratedImage, error) {
 			return nil, err
 		}
 		result = append(result, img)
+	}
+	return result, rows.Err()
+}
+
+// ===== 批量任务 =====
+
+func (s *Store) SaveBatchJob(ctx context.Context, job storage.BatchJobRecord) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO batch_jobs (id, job_name, status, total_count, completed, failed, output_file_id, points_json, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
+		ON CONFLICT (id) DO UPDATE SET
+			job_name=EXCLUDED.job_name, status=EXCLUDED.status,
+			total_count=EXCLUDED.total_count, completed=EXCLUDED.completed, failed=EXCLUDED.failed,
+			output_file_id=EXCLUDED.output_file_id, updated_at=NOW()
+	`, job.ID, job.JobName, job.Status, job.TotalCount, job.Completed, job.Failed, job.OutputFileID, job.PointsJSON)
+	return err
+}
+
+func (s *Store) UpdateBatchJob(ctx context.Context, job storage.BatchJobRecord) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE batch_jobs SET status=$1, total_count=$2, completed=$3, failed=$4, output_file_id=$5, updated_at=NOW()
+		WHERE id=$6
+	`, job.Status, job.TotalCount, job.Completed, job.Failed, job.OutputFileID, job.ID)
+	return err
+}
+
+func (s *Store) GetBatchJob(ctx context.Context, id string) (*storage.BatchJobRecord, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, job_name, status, total_count, completed, failed, output_file_id, points_json, created_at, updated_at FROM batch_jobs WHERE id=$1`, id)
+	var j storage.BatchJobRecord
+	err := row.Scan(&j.ID, &j.JobName, &j.Status, &j.TotalCount, &j.Completed, &j.Failed, &j.OutputFileID, &j.PointsJSON, &j.CreatedAt, &j.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &j, nil
+}
+
+func (s *Store) ListBatchJobs(ctx context.Context, limit int) ([]storage.BatchJobRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, job_name, status, total_count, completed, failed, output_file_id, points_json, created_at, updated_at FROM batch_jobs ORDER BY created_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []storage.BatchJobRecord
+	for rows.Next() {
+		var j storage.BatchJobRecord
+		if err := rows.Scan(&j.ID, &j.JobName, &j.Status, &j.TotalCount, &j.Completed, &j.Failed, &j.OutputFileID, &j.PointsJSON, &j.CreatedAt, &j.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, j)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) SearchBatchJobs(ctx context.Context, name string, limit int) ([]storage.BatchJobRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	kw := "%" + strings.ToLower(name) + "%"
+	rows, err := s.db.QueryContext(ctx, `SELECT id, job_name, status, total_count, completed, failed, output_file_id, points_json, created_at, updated_at FROM batch_jobs WHERE LOWER(job_name) LIKE $1 ORDER BY created_at DESC LIMIT $2`, kw, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []storage.BatchJobRecord
+	for rows.Next() {
+		var j storage.BatchJobRecord
+		if err := rows.Scan(&j.ID, &j.JobName, &j.Status, &j.TotalCount, &j.Completed, &j.Failed, &j.OutputFileID, &j.PointsJSON, &j.CreatedAt, &j.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, j)
 	}
 	return result, rows.Err()
 }

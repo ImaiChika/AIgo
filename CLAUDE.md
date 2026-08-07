@@ -152,18 +152,38 @@ Claude Code 当前模型如果不具备多模态能力，不要声称自己看�
 
 ## 7. 当前工程骨架
 
-已有 Go 文件包括：
+### 后端 Go
 
-- `cmd/aigo/main.go`：CLI 入口。
-- `internal/config/config.go`：环境变量配置。
-- `internal/llm/client.go`：文本 LLM 接口。
-- `internal/llm/qwen.go`：千问 OpenAI 兼容文本调用客户端。
-- `internal/domain/types.go`：题目、知识点、多模态素材、评估报告等领域类型。
-- `internal/multimodal/interfaces.go`：OCR、图像特征、医学图片生成接口预留。
-- `internal/generator/service.go`：题目生成服务。
-- `internal/evaluator/service.go`：规则评估占位。
-- `internal/storage/memory.go`：内存存储占位。
-- `internal/pipeline/pipeline.go`：生成、评估、存储流程编排。
+- `cmd/aigo/main.go`：CLI 入口，支持 serve/import/generate 等命令。
+- `internal/config/config.go`：从 .env 文件和环境变量加载配置。
+- `internal/llm/`：千问 OpenAI 兼容客户端。
+- `internal/domain/`：题目、知识点、审核、图片等领域类型。
+- `internal/generator/`：千问出题服务（prompt 构建 + JSON 解析）。
+- `internal/evaluator/`：规则评估（选项数、答案、解析）。
+- `internal/knowledge/`：知识点服务（导入、搜索、筛选）。
+- `internal/importer/`：xlsx 导入器（题目 + 知识点）。
+- `internal/review/`：审核服务（多轮流程、状态流转）。
+- `internal/image/`：图片服务（提示词生成、Mock 生图、审核）。
+- `internal/audit/`：审计日志服务。
+- `internal/auth/`：JWT 认证 + RBAC 权限。
+- `internal/api/`：HTTP REST API（handler 按资源拆分）。
+- `internal/pipeline/`：业务编排层，串联各服务。
+- `internal/storage/interfaces.go`：所有存储接口定义。
+- `internal/storage/postgres/`：PostgreSQL 实现（schema.sql + store.go）。
+- `internal/storage/testutil/`：内存实现（仅供测试）。
+
+### 前端 Vue 3
+
+- `web/src/App.vue`：根组件（侧边栏、用户信息、昵称编辑）。
+- `web/src/api.js`：API 服务层（封装所有后端接口）。
+- `web/src/auth.js`：认证状态管理（token、用户信息）。
+- `web/src/router.js`：路由配置 + 登录守卫。
+- `web/src/pages/`：8 个页面组件。
+
+### 配置文件
+
+- `.env`：环境变量（API Key、数据库连接），不提交 git。
 - `configs/example.env`：环境变量示例。
+- `configs/review_flows.json`：审核流程配置。
 
 后续开发应围绕 `功能需求文档.txt` 的树状图继续，不要主动增加无关模块。

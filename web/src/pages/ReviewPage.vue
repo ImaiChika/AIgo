@@ -13,6 +13,9 @@ const reviewAction = ref("approved");
 const reviewOpinion = ref("");
 const loading = ref(false);
 const selectedFlowId = ref("");
+const selectedImages = ref([]);
+const lightboxImage = ref("");
+const experts = ref([]);
 
 function showToast(msg) {
   toast.value = msg;
@@ -46,6 +49,7 @@ async function selectQuestion(q) {
   reviewTask.value = null;
   reviewRecords.value = [];
   reviewOpinion.value = "";
+  selectedImages.value = [];
 
   // 用题目 ID 查审核任务
   try {
@@ -58,6 +62,28 @@ async function selectQuestion(q) {
   } catch (e) {
     // 没有审核任务是正常的
   }
+
+  // 加载配图
+  try {
+    const imgData = await api.listImages(q.id);
+    selectedImages.value = imgData.images || [];
+  } catch (e) {
+    selectedImages.value = [];
+  }
+}
+
+function imageSrc(path) {
+  if (!path) return "";
+  const filename = path.split("/").pop();
+  return `http://127.0.0.1:8080/images/${filename}`;
+}
+
+function openImage(src) {
+  lightboxImage.value = src;
+}
+
+function closeLightbox() {
+  lightboxImage.value = "";
 }
 
 async function submitToReview() {
@@ -87,7 +113,7 @@ async function doReview() {
   try {
     await api.reviewAction({
       task_id: reviewTask.value.id,
-      expert_id: currentUser.value?.username || "admin",
+      expert_id: currentUser.value?.id || "admin",
       action: reviewAction.value,
       opinion: reviewOpinion.value,
     });
@@ -138,9 +164,24 @@ function canReview(task) {
   return task && (task.status === "reviewing" || task.status === "revision_required");
 }
 
+async function loadExperts() {
+  try {
+    const data = await api.listExperts();
+    experts.value = data.experts || [];
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function expertName(id) {
+  const e = experts.value.find((x) => x.id === id);
+  return e ? e.name : id;
+}
+
 onMounted(() => {
   loadQuestions();
   loadFlows();
+  loadExperts();
 });
 </script>
 
@@ -198,6 +239,17 @@ onMounted(() => {
         <p>{{ selectedQuestion.explanation }}</p>
       </div>
 
+      <!-- 配图 -->
+      <div v-if="selectedImages.length" class="detail-section">
+        <h3>配图（{{ selectedImages.length }} 张）</h3>
+        <div class="image-grid">
+          <div v-for="(img, i) in selectedImages" :key="img.id" class="image-thumb">
+            <img :src="imageSrc(img.image_path)" :alt="`配图${i+1}`" @click="openImage(imageSrc(img.image_path))" />
+            <span class="image-status" :class="img.status">{{ img.status === "approved" ? "已通过" : img.status === "rejected" ? "已驳回" : "待审核" }}</span>
+          </div>
+        </div>
+      </div>
+
       <!-- 审核操作区 -->
       <div class="review-actions">
         <!-- 提交审核 -->
@@ -216,7 +268,7 @@ onMounted(() => {
         <!-- 审核任务信息 -->
         <div v-if="reviewTask" class="task-info">
           <h3>审核任务 <span class="task-status" :class="statusClass(reviewTask.status)">{{ statusText(reviewTask.status) }}</span></h3>
-          <p>当前轮次：第 {{ reviewTask.current_round }} 轮 | 审核人：{{ (reviewTask.assigned_to || []).join(", ") }}</p>
+          <p>当前轮次：第 {{ reviewTask.current_round }} 轮 | 审核人：{{ (reviewTask.assigned_to || []).map(id => expertName(id)).join(", ") }}</p>
         </div>
 
         <!-- 审核表单 -->
@@ -257,6 +309,13 @@ onMounted(() => {
     <section v-else class="panel empty-panel">
       <p>← 请从左侧选择一道题目</p>
     </section>
+  </div>
+
+  <div class="toast" :class="{ show: toast }" role="status" aria-live="polite">{{ toast }}</div>
+
+  <!-- 图片放大弹窗 -->
+  <div v-if="lightboxImage" class="lightbox" @click="closeLightbox">
+    <img :src="lightboxImage" @click.stop />
   </div>
 </template>
 
@@ -499,5 +558,67 @@ onMounted(() => {
   text-align: center;
   color: #6e7b8f;
   padding: 30px;
+}
+
+.image-grid {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.image-thumb {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+}
+
+.image-thumb img {
+  width: 150px;
+  height: 120px;
+  object-fit: cover;
+  border: 1px solid #e5ebf3;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.image-thumb img:hover {
+  border-color: #1385f8;
+}
+
+.image-status {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #f0f3f7;
+  color: #6e7b8f;
+}
+
+.image-status.approved {
+  background: #f0fff8;
+  color: #087c55;
+}
+
+.image-status.rejected {
+  background: #fff0f0;
+  color: #c54858;
+}
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: grid;
+  place-items: center;
+  z-index: 200;
+  cursor: pointer;
+}
+
+.lightbox img {
+  max-width: 90vw;
+  max-height: 90vh;
+  border-radius: 8px;
+  cursor: default;
 }
 </style>

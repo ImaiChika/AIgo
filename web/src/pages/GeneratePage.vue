@@ -2,30 +2,125 @@
 import { ref, computed, onMounted } from "vue";
 import { api } from "../api.js";
 
-const topics = ref([]);
-const selectedTopic = ref("");
+// 知识点选择
+const allTopics = ref([]);
+const topicSearch = ref("");
+const selectedKP = ref(null); // 选中的知识点对象
+const showDropdown = ref(false);
+const topicPage = ref(1);
+const topicTotal = ref(0);
+const topicLoading = ref(false);
+const searchInputRef = ref(null);
+const dropdownStyle = ref({});
+
+// 出题配置
 const selectedCount = ref(1);
-const selectedImage = ref(-1);
+const selectedDifficulty = ref("0.65");
+const needImages = ref(false);
+const imageCount = ref(3);
+
+// 状态
 const toast = ref("");
+const loading = ref(false);
+const progressMsg = ref("");
+const startTime = ref(0);
+const stats = ref({ question_count: 0, knowledge_count: 0 });
+
+// 生成结果
+const generatedQuestions = ref([]);
+const currentIndex = ref(0);
+const currentQuestionId = ref("");
 const stem = ref("");
 const options = ref([]);
 const answer = ref("");
 const explanation = ref("");
-const promptText = ref("");
-const loading = ref(false);
+let optionIdCounter = 0;
+
+// 配图
 const imageLoading = ref(false);
+const imageProgress = ref("");
 const generatedImages = ref([]);
-const currentQuestionId = ref("");
-const stats = ref({ question_count: 0, knowledge_count: 0 });
-const progressMsg = ref("");
-const startTime = ref(0);
-const generatedQuestions = ref([]);
-const currentIndex = ref(0);
+const selectedImage = ref(-1);
+const promptText = ref("");
 
 function showToast(message) {
   toast.value = message;
   window.clearTimeout(showToast.timer);
-  showToast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
+  toast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
+}
+
+// 加载知识点（分页）
+async function loadTopics(page = 1) {
+  topicLoading.value = true;
+  try {
+    const data = await api.listKP({ page, page_size: 100 });
+    if (page === 1) {
+      allTopics.value = data.points || [];
+    } else {
+      allTopics.value = [...allTopics.value, ...(data.points || [])];
+    }
+    topicTotal.value = data.total || 0;
+    topicPage.value = page;
+  } catch (e) {
+    showToast("加载知识点失败: " + e.message);
+  } finally {
+    topicLoading.value = false;
+  }
+}
+
+// 计算下拉框位置
+function updateDropdownPosition() {
+  if (searchInputRef.value) {
+    const rect = searchInputRef.value.getBoundingClientRect();
+    dropdownStyle.value = {
+      position: 'fixed',
+      top: rect.bottom + 4 + 'px',
+      left: rect.left + 'px',
+      width: rect.width + 'px',
+    };
+  }
+}
+
+// 搜索知识点
+async function searchTopics() {
+  if (!topicSearch.value.trim()) {
+    loadTopics(1);
+    return;
+  }
+  topicLoading.value = true;
+  try {
+    const data = await api.searchKP(topicSearch.value.trim());
+    allTopics.value = data.points || [];
+    topicTotal.value = data.total || 0;
+  } catch (e) {
+    showToast("搜索失败: " + e.message);
+  } finally {
+    topicLoading.value = false;
+  }
+}
+
+// 筛选后的知识点列表
+const filteredTopics = computed(() => {
+  return allTopics.value;
+});
+
+// 加载更多知识点
+function loadMoreTopics() {
+  if (allTopics.value.length < topicTotal.value) {
+    loadTopics(topicPage.value + 1);
+  }
+}
+
+// 选择知识点
+function selectTopic(kp) {
+  selectedKP.value = kp;
+  showDropdown.value = false;
+  topicSearch.value = "";
+}
+
+// 清除选择
+function clearSelection() {
+  selectedKP.value = null;
 }
 
 async function loadStats() {
@@ -36,20 +131,9 @@ async function loadStats() {
   }
 }
 
-async function loadTopics() {
-  try {
-    const data = await api.listKP({ page: 1, page_size: 50 });
-    topics.value = data.points || [];
-    if (topics.value.length > 0) {
-      selectedTopic.value = topics.value[0].topic;
-    }
-  } catch (e) {
-    showToast("加载知识点失败: " + e.message);
-  }
-}
-
+// 生成题目
 async function generateQuestion() {
-  if (!selectedTopic.value) {
+  if (!selectedKP.value) {
     showToast("请先选择知识点");
     return;
   }
@@ -57,28 +141,36 @@ async function generateQuestion() {
   progressMsg.value = "正在调用千问生成试题，请稍候...";
   startTime.value = Date.now();
 
-  // 进度计时器
   const timer = setInterval(() => {
     const elapsed = ((Date.now() - startTime.value) / 1000).toFixed(0);
     progressMsg.value = `千问生成中... 已等待 ${elapsed} 秒`;
   }, 1000);
 
   try {
-    const data = await api.generate({
-      subject: "临床医学",
-      difficulty: "medium",
-      topic: selectedTopic.value,
+    const genParams = {
+      subject: selectedKP.value.subject || "临床医学",
+      category: selectedKP.value.category || "",
+      difficulty: selectedDifficulty.value,
+      topic: selectedKP.value.topic,
+      outline_code: selectedKP.value.outline_code || selectedKP.value.id || "",
       count: selectedCount.value,
-    });
+    };
+    console.log("生成参数:", genParams, "选中知识点:", JSON.stringify(selectedKP.value));
+    const data = await api.generate(genParams);
     clearInterval(timer);
     const elapsed = ((Date.now() - startTime.value) / 1000).toFixed(1);
     if (data.questions && data.questions.length > 0) {
       generatedQuestions.value = data.questions;
+      generatedQuestions.value.forEach(q => { q.images = []; });
       currentIndex.value = 0;
       showQuestion(0);
       progressMsg.value = `✓ 已生成 ${data.count} 道题，耗时 ${elapsed} 秒`;
       showToast(`已生成 ${data.count} 道题，耗时 ${elapsed} 秒`);
       loadStats();
+
+      if (needImages.value) {
+        await generateImagesForAll();
+      }
     }
   } catch (e) {
     clearInterval(timer);
@@ -89,17 +181,43 @@ async function generateQuestion() {
   }
 }
 
+// 为所有题目生成配图
+async function generateImagesForAll() {
+  imageLoading.value = true;
+  const total = generatedQuestions.value.length;
+  let done = 0;
+
+  for (const q of generatedQuestions.value) {
+    if (!q.id) continue;
+    imageProgress.value = `正在为第 ${done + 1}/${total} 道题生成配图...`;
+    try {
+      await api.imagePrompt(q.id);
+      const imgData = await api.imageGenerate(q.id, imageCount.value);
+      q.images = imgData.images || [];
+    } catch (e) {
+      q.images = [];
+      q.imageError = e.message;
+    }
+    done++;
+    imageProgress.value = `配图进度: ${done}/${total}`;
+  }
+
+  imageProgress.value = `✓ 配图完成: ${done} 道题`;
+  imageLoading.value = false;
+  showQuestion(currentIndex.value);
+}
+
 function showQuestion(index) {
   if (index < 0 || index >= generatedQuestions.value.length) return;
   currentIndex.value = index;
   const q = generatedQuestions.value[index];
   stem.value = q.clinical_stem || "";
-  options.value = (q.options || []).map((o) => o.text);
+  options.value = (q.options || []).map((o) => ({ id: ++optionIdCounter, text: o.text }));
   answer.value = q.answer || "";
   explanation.value = q.explanation || "";
   currentQuestionId.value = q.id || "";
-  generatedImages.value = [];
-  selectedImage.value = -1;
+  generatedImages.value = q.images || [];
+  selectedImage.value = generatedImages.value.length > 0 ? 0 : -1;
   promptText.value = "";
 }
 
@@ -119,6 +237,18 @@ function removeOption(index) {
   options.value.splice(index, 1);
 }
 
+function addOption() {
+  if (options.value.length >= 5) {
+    showToast("A2 单选题最多保留 A-E 五个选项");
+    return;
+  }
+  options.value.push({ id: ++optionIdCounter, text: "新增选项" });
+}
+
+function optionLabel(index) {
+  return String.fromCharCode(65 + index);
+}
+
 async function saveQuestion() {
   if (!currentQuestionId.value) {
     showToast("没有可保存的题目");
@@ -127,15 +257,14 @@ async function saveQuestion() {
   try {
     const data = await api.updateQuestion(currentQuestionId.value, {
       clinical_stem: stem.value,
-      options: options.value.map((text, i) => ({ label: String.fromCharCode(65 + i), text })),
+      options: options.value.map((opt, i) => ({ label: String.fromCharCode(65 + i), text: opt.text })),
       answer: answer.value,
       explanation: explanation.value,
     });
-    // 同步更新本地数据
     if (generatedQuestions.value[currentIndex.value]) {
       generatedQuestions.value[currentIndex.value] = data;
     }
-    showToast("已保存到题库");
+    showToast("已保存修改");
   } catch (e) {
     showToast("保存失败: " + e.message);
   }
@@ -170,12 +299,25 @@ async function generateImages() {
     return;
   }
   imageLoading.value = true;
+  imageProgress.value = "正在调用生图模型，请稍候...";
+  const startTimeImg = Date.now();
+
+  const timer = setInterval(() => {
+    const elapsed = ((Date.now() - startTimeImg) / 1000).toFixed(0);
+    imageProgress.value = `生图中... 已等待 ${elapsed} 秒`;
+  }, 1000);
+
   try {
     const data = await api.imageGenerate(currentQuestionId.value, 4);
+    clearInterval(timer);
+    const elapsed = ((Date.now() - startTimeImg) / 1000).toFixed(1);
     generatedImages.value = data.images || [];
     selectedImage.value = 0;
+    imageProgress.value = `✓ 已生成 ${data.count} 张候选图，耗时 ${elapsed} 秒`;
     showToast(`已生成 ${data.count} 张候选图`);
   } catch (e) {
+    clearInterval(timer);
+    imageProgress.value = `✗ 生成失败: ${e.message}`;
     showToast("生成图片失败: " + e.message);
   } finally {
     imageLoading.value = false;
@@ -187,21 +329,15 @@ function selectImage(index) {
   showToast(`已选择候选图 ${index + 1}`);
 }
 
-function addOption() {
-  if (options.value.length >= 5) {
-    showToast("A2 单选题最多保留 A-E 五个选项");
-    return;
-  }
-  options.value.push("新增选项");
-}
-
-function optionLabel(index) {
-  return String.fromCharCode(65 + index);
+function imageSrc(path) {
+  if (!path) return "";
+  const filename = path.split("/").pop();
+  return `http://127.0.0.1:8080/images/${filename}`;
 }
 
 onMounted(() => {
   loadStats();
-  loadTopics();
+  loadTopics(1);
 });
 </script>
 
@@ -232,10 +368,10 @@ onMounted(() => {
           <small v-if="answer">正确答案：{{ answer }}</small>
         </div>
         <div class="options-list">
-          <div v-for="(_, index) in options" :key="index" class="option-row">
+          <div v-for="(opt, index) in options" :key="opt.id" class="option-row">
             <span class="option-label">{{ optionLabel(index) }}</span>
-            <input v-model="options[index]" />
-            <button class="remove-btn" type="button" @click="removeOption(index)" title="删除选项">×</button>
+            <input v-model="opt.text" />
+            <button class="remove-btn" type="button" @click="removeOption(index)" :disabled="options.length <= 4" title="删除选项">×</button>
           </div>
         </div>
         <button class="text-button" type="button" @click="addOption">+ 添加选项</button>
@@ -243,7 +379,7 @@ onMounted(() => {
         <div class="answer-row">
           <label>正确答案：</label>
           <select v-model="answer">
-            <option v-for="(_, i) in options" :key="i" :value="String.fromCharCode(65 + i)">
+            <option v-for="(opt, i) in options" :key="opt.id" :value="String.fromCharCode(65 + i)">
               {{ String.fromCharCode(65 + i) }}
             </option>
           </select>
@@ -259,12 +395,10 @@ onMounted(() => {
         <textarea v-model="explanation" class="explanation-input"></textarea>
       </section>
 
-      <!-- 保存按钮 -->
+      <!-- 已入库提示 -->
       <section v-if="currentQuestionId" class="panel save-section">
-        <button class="primary-button" type="button" @click="saveQuestion">
-          保存修改到题库
-        </button>
-        <span class="save-hint">修改题干、选项、答案或解析后点击保存</span>
+        <span class="save-hint">✓ 题目已自动入库，可在题库页面查看和编辑</span>
+        <button class="ghost-button" type="button" @click="saveQuestion">保存修改</button>
       </section>
 
       <!-- AI配图 -->
@@ -278,14 +412,20 @@ onMounted(() => {
           <label>结构化生图提示词</label>
           <textarea v-model="promptText" placeholder="点击「生成提示词」自动生成"></textarea>
           <div class="button-row">
-            <button class="outline-button" type="button" @click="generatePrompt" :disabled="!currentQuestionId">
-              生成提示词
-            </button>
+            <button class="outline-button" type="button" @click="generatePrompt" :disabled="!currentQuestionId">生成提示词</button>
             <button class="outline-button" type="button" @click="generateImages" :disabled="!currentQuestionId || imageLoading">
               {{ imageLoading ? "生成中..." : "生成4张候选图" }}
             </button>
           </div>
         </div>
+
+        <div v-if="imageProgress" class="progress-bar">
+          <div class="progress-inner" :class="{ done: imageProgress.startsWith('✓'), error: imageProgress.startsWith('✗') }">
+            <span v-if="imageLoading" class="spinner"></span>
+            {{ imageProgress }}
+          </div>
+        </div>
+
         <div v-if="generatedImages.length" class="candidate-grid">
           <button
             v-for="(img, index) in generatedImages"
@@ -295,7 +435,8 @@ onMounted(() => {
             type="button"
             @click="selectImage(index)"
           >
-            <div class="candidate-placeholder">
+            <img v-if="img.image_path" :src="imageSrc(img.image_path)" class="candidate-img" :alt="`候选图${index+1}`" />
+            <div v-else class="candidate-placeholder">
               <span>{{ index + 1 }}</span>
             </div>
             <div class="candidate-meta">
@@ -323,21 +464,40 @@ onMounted(() => {
           </div>
         </div>
 
-        <label class="field">
-          <span>知识点</span>
-          <select v-model="selectedTopic">
-            <option v-for="kp in topics" :key="kp.id" :value="kp.topic">
-              {{ kp.system }} - {{ kp.topic }}
-            </option>
-          </select>
-        </label>
+        <!-- 知识点选择器 -->
+        <div class="kp-selector">
+          <label class="field-label">选择知识点</label>
+
+          <!-- 已选知识点 -->
+          <div v-if="selectedKP" class="selected-kp">
+            <div class="kp-info">
+              <span class="kp-code">{{ selectedKP.outline_code }}</span>
+              <span class="kp-subject">{{ selectedKP.subject }}</span>
+              <span class="kp-topic">{{ selectedKP.topic }}</span>
+            </div>
+            <button class="clear-btn" type="button" @click="clearSelection" title="清除选择">×</button>
+          </div>
+
+          <!-- 搜索框 -->
+          <div v-else class="kp-search-box">
+            <input
+              ref="searchInputRef"
+              v-model="topicSearch"
+              placeholder="搜索知识点、大纲代码、专业..."
+              @input="searchTopics"
+              @focus="showDropdown = true; updateDropdownPosition()"
+              class="kp-search-input"
+            />
+          </div>
+        </div>
 
         <label class="field">
           <span>难度系数</span>
-          <select>
-            <option value="medium">中等</option>
-            <option value="easy">简单</option>
-            <option value="hard">困难</option>
+          <select v-model="selectedDifficulty">
+            <option value="0.55">简单 (0.55)</option>
+            <option value="0.65">中等 (0.65)</option>
+            <option value="0.75">偏难 (0.75)</option>
+            <option value="0.85">困难 (0.85)</option>
           </select>
         </label>
 
@@ -364,10 +524,28 @@ onMounted(() => {
           />
         </div>
 
+        <!-- 配图选项 -->
+        <div class="image-options">
+          <label class="checkbox-row">
+            <input type="checkbox" v-model="needImages" />
+            <span>需要配图</span>
+          </label>
+          <div v-if="needImages" class="image-count-row">
+            <label>每题图片数：</label>
+            <select v-model.number="imageCount">
+              <option :value="1">1张</option>
+              <option :value="2">2张</option>
+              <option :value="3">3张</option>
+              <option :value="4">4张</option>
+              <option :value="5">5张</option>
+            </select>
+          </div>
+        </div>
+
         <button
           class="primary-button full"
           type="button"
-          :disabled="loading"
+          :disabled="loading || !selectedKP"
           @click="generateQuestion"
         >
           {{ loading ? "生成中..." : "AI自动生成试题" }}
@@ -388,16 +566,222 @@ onMounted(() => {
           </div>
           <p>{{ stem.slice(0, 150) }}{{ stem.length > 150 ? "..." : "" }}</p>
           <ol type="A">
-            <li v-for="opt in options" :key="opt">{{ opt }}</li>
+            <li v-for="opt in options" :key="opt.id">{{ opt.text }}</li>
           </ol>
           <strong v-if="answer">答案：{{ answer }}</strong>
         </section>
       </section>
     </aside>
   </div>
+
+  <!-- 点击外部关闭下拉框 -->
+  <div v-if="showDropdown" class="dropdown-overlay" @click="showDropdown = false"></div>
+
+  <!-- 知识点下拉框（Teleport 到 body，避免被父容器裁剪） -->
+  <Teleport to="body">
+    <div v-if="showDropdown && !selectedKP" class="kp-dropdown" :style="dropdownStyle">
+      <div v-if="topicLoading" class="kp-loading">搜索中...</div>
+      <div v-else-if="filteredTopics.length === 0" class="kp-empty">未找到匹配的知识点</div>
+      <template v-else>
+        <div class="kp-list">
+          <button
+            v-for="kp in filteredTopics"
+            :key="kp.id"
+            class="kp-item"
+            type="button"
+            @click="selectTopic(kp)"
+          >
+            <span class="kp-item-code">{{ kp.outline_code }}</span>
+            <span class="kp-item-subject">{{ kp.subject }}</span>
+            <span class="kp-item-topic">{{ kp.topic }}</span>
+          </button>
+        </div>
+        <div v-if="allTopics.length < topicTotal" class="kp-load-more">
+          <button class="text-button" type="button" @click="loadMoreTopics" :disabled="topicLoading">
+            {{ topicLoading ? "加载中..." : `加载更多 (${allTopics.length}/${topicTotal})` }}
+          </button>
+        </div>
+      </template>
+    </div>
+  </Teleport>
+
+  <div class="toast" :class="{ show: toast }" role="status" aria-live="polite">{{ toast }}</div>
 </template>
 
 <style scoped>
+/* 知识点选择器 */
+.kp-selector {
+  margin-bottom: 16px;
+}
+
+.field-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: #6e7b8f;
+  margin-bottom: 6px;
+}
+
+.selected-kp {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #eff8ff;
+  border: 1px solid #b9ddff;
+  border-radius: 8px;
+}
+
+.kp-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.kp-code {
+  font-size: 11px;
+  font-family: monospace;
+  color: #0571dc;
+}
+
+.kp-subject {
+  font-size: 11px;
+  color: #6e7b8f;
+}
+
+.kp-topic {
+  font-size: 13px;
+  color: #172033;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clear-btn {
+  width: 24px;
+  height: 24px;
+  border: 1px solid #b9ddff;
+  border-radius: 50%;
+  background: #fff;
+  color: #0571dc;
+  font-size: 16px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.clear-btn:hover {
+  background: #0571dc;
+  color: #fff;
+}
+
+.kp-search-box {
+  position: relative;
+}
+
+.kp-search-input {
+  width: 100%;
+  height: 38px;
+  border: 1px solid #e5ebf3;
+  border-radius: 8px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.kp-search-input:focus {
+  border-color: #1385f8;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(19, 133, 248, 0.1);
+}
+
+.kp-dropdown {
+  position: fixed;
+  top: auto;
+  left: auto;
+  width: 300px;
+  margin-top: 4px;
+  background: #fff;
+  border: 1px solid #e5ebf3;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  z-index: 1000;
+  max-height: 400px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.kp-list {
+  overflow-y: auto;
+  max-height: 350px;
+}
+
+.kp-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font-size: 13px;
+  border-bottom: 1px solid #f0f3f7;
+}
+
+.kp-item:hover {
+  background: #f8fbff;
+}
+
+.kp-item-code {
+  font-size: 10px;
+  font-family: monospace;
+  color: #0571dc;
+  background: #eff8ff;
+  padding: 2px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.kp-item-subject {
+  font-size: 11px;
+  color: #6e7b8f;
+  flex-shrink: 0;
+}
+
+.kp-item-topic {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kp-loading, .kp-empty {
+  padding: 20px;
+  text-align: center;
+  color: #6e7b8f;
+  font-size: 13px;
+}
+
+.kp-load-more {
+  padding: 8px;
+  text-align: center;
+  border-top: 1px solid #f0f3f7;
+}
+
+.dropdown-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+}
+
+/* 其他样式 */
 .count-row {
   display: flex;
   align-items: center;
@@ -447,9 +831,14 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
-.remove-btn:hover {
+.remove-btn:hover:not(:disabled) {
   background: #fff0f0;
   border-color: #c54858;
+}
+
+.remove-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
 .answer-row {
@@ -498,16 +887,16 @@ onMounted(() => {
   color: #6e7b8f;
 }
 
-.explanation-text {
-  color: #435269;
-  font-size: 14px;
-  line-height: 1.7;
-  margin: 0;
-}
-
 .button-row {
   display: flex;
   gap: 10px;
+}
+
+.candidate-img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  display: block;
 }
 
 .candidate-placeholder {
@@ -557,5 +946,40 @@ onMounted(() => {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+.image-options {
+  margin-top: 10px;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  color: #172033;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
+.image-count-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: #6e7b8f;
+}
+
+.image-count-row select {
+  height: 30px;
+  border: 1px solid #e5ebf3;
+  border-radius: 6px;
+  padding: 0 8px;
+  font-size: 13px;
 }
 </style>
