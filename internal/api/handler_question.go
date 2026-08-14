@@ -165,6 +165,12 @@ func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 	if req.Explanation != "" {
 		existing.Explanation = req.Explanation
 	}
+
+	// 修改已审核/已发布的题目时，回退状态到 ai_draft，需重新走审核流程
+	if existing.Status == domain.StatusApproved || existing.Status == domain.StatusPublished || existing.Status == domain.StatusArchived {
+		existing.Status = domain.StatusAIDraft
+	}
+
 	existing.Version++              // 版本号递增
 	existing.UpdatedAt = time.Now() // 更新时间
 

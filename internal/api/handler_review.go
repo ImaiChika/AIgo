@@ -31,11 +31,12 @@ func (s *Server) handleSubmitReview(w http.ResponseWriter, r *http.Request) {
 
 // handleReviewAction 执行审核操作（通过/驳回/需修改）。
 // admin 角色可以审核任意轮次，其他角色只能审核分配给自己的轮次。
-// 请求：{"task_id": "xxx", "expert_id": "E001", "action": "approved", "opinion": "通过"}
+// expert_id 强制使用当前登录用户 ID（admin 除外，admin 可指定任意审核人）。
+// 请求：{"task_id": "xxx", "action": "approved", "opinion": "通过"}
 func (s *Server) handleReviewAction(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TaskID   string `json:"task_id"`   // 审核任务 ID
-		ExpertID string `json:"expert_id"` // 审核人 ID
+		ExpertID string `json:"expert_id"` // 审核人 ID（admin 可指定，其他角色忽略此字段）
 		Action   string `json:"action"`    // approved / rejected / revision_required
 		Opinion  string `json:"opinion"`   // 审核意见
 	}
@@ -44,12 +45,19 @@ func (s *Server) handleReviewAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 获取当前用户角色，admin 可审核任意轮次
+	// 获取当前用户信息
 	role := auth.GetRole(r.Context())
+	currentUserID := auth.GetUserID(r.Context())
+
+	// 非 admin 用户：强制使用当前登录用户的 ID，防止冒名
+	expertID := currentUserID
+	if role == "admin" && req.ExpertID != "" {
+		expertID = req.ExpertID // admin 可指定任意审核人
+	}
 
 	err := s.reviewSvc.Review(r.Context(), review.ReviewRequest{
 		TaskID:   req.TaskID,
-		ExpertID: req.ExpertID,
+		ExpertID: expertID,
 		Action:   domain.QuestionStatus(req.Action),
 		Opinion:  req.Opinion,
 		Role:     role,
@@ -62,7 +70,7 @@ func (s *Server) handleReviewAction(w http.ResponseWriter, r *http.Request) {
 	// 记录审核日志（从任务中获取题目ID）
 	task, _ := s.reviewSvc.GetTask(r.Context(), req.TaskID)
 	if task != nil {
-		s.auditSvc.LogReview(r.Context(), task.QuestionID, req.ExpertID, req.Action, req.Opinion)
+		s.auditSvc.LogReview(r.Context(), task.QuestionID, expertID, req.Action, req.Opinion)
 	}
 
 	writeJSON(w, 200, map[string]string{"status": "ok"})

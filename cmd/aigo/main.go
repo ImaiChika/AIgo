@@ -95,12 +95,15 @@ func run(ctx context.Context, args []string) error {
 		fmt.Println("默认管理员: admin / admin")
 	}
 
-	// 自动加载审核流程配置
-	if _, err := os.Stat("configs/review_flows.json"); err == nil {
-		if n, err := reviewSvc.LoadFlowsFromFile(ctx, "configs/review_flows.json"); err != nil {
-			fmt.Printf("加载审核流程失败: %v\n", err)
-		} else if n > 0 {
-			fmt.Printf("已加载 %d 个审核流程\n", n)
+	// 自动加载审核流程配置（仅在数据库为空时导入，避免覆盖管理员在 UI 上的修改）
+	existingFlows, _ := reviewSvc.ListFlows(ctx)
+	if len(existingFlows) == 0 {
+		if _, err := os.Stat("configs/review_flows.json"); err == nil {
+			if n, err := reviewSvc.LoadFlowsFromFile(ctx, "configs/review_flows.json"); err != nil {
+				fmt.Printf("加载审核流程失败: %v\n", err)
+			} else if n > 0 {
+				fmt.Printf("已加载 %d 个审核流程\n", n)
+			}
 		}
 	}
 

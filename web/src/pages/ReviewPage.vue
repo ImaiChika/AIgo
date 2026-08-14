@@ -158,7 +158,7 @@ function statusClass(status) {
 
 // 判断是否可以提交审核
 function canSubmit(q) {
-  return q && (q.status === "ai_draft" || q.status === "auto_checked" || q.status === "ai_reviewed" || q.status === "revision_required");
+  return q && (q.status === "ai_draft" || q.status === "auto_checked" || q.status === "ai_reviewed" || q.status === "revision_required" || q.status === "rejected");
 }
 
 // 判断是否可以执行审核

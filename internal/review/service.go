@@ -107,8 +107,15 @@ func (s *Service) ListFlows(ctx context.Context) ([]domain.ReviewFlowConfig, err
 	return s.reviewStore.ListFlowConfigs(ctx)
 }
 
-// DeleteFlow 删除审核流程。
+// DeleteFlow 删除审核流程。如果有进行中的任务引用该流程，拒绝删除。
 func (s *Service) DeleteFlow(ctx context.Context, id string) error {
+	count, err := s.reviewStore.CountActiveTasksByFlow(ctx, id)
+	if err != nil {
+		return fmt.Errorf("检查流程引用失败: %w", err)
+	}
+	if count > 0 {
+		return fmt.Errorf("流程 %s 有 %d 个进行中的审核任务，无法删除", id, count)
+	}
 	return s.reviewStore.DeleteFlowConfig(ctx, id)
 }
 
@@ -124,6 +131,18 @@ func (s *Service) SubmitQuestion(ctx context.Context, questionID string, flowID 
 		return nil, fmt.Errorf("题目 %s 不存在", questionID)
 	}
 
+	// 只允许特定状态的题目提交审核
+	allowedStatuses := map[domain.QuestionStatus]bool{
+		domain.StatusAIDraft:          true,
+		domain.StatusAutoChecked:      true,
+		domain.StatusAIReviewed:       true,
+		domain.StatusRevisionRequired: true,
+		domain.StatusRejected:         true,
+	}
+	if !allowedStatuses[q.Status] {
+		return nil, fmt.Errorf("题目 %s 当前状态为 %s，不允许提交审核", questionID, q.Status)
+	}
+
 	flow, err := s.reviewStore.GetFlowConfig(ctx, flowID)
 	if err != nil {
 		return nil, err
@@ -134,8 +153,8 @@ func (s *Service) SubmitQuestion(ctx context.Context, questionID string, flowID 
 
 	existing, _ := s.reviewStore.GetTaskByQuestionID(ctx, questionID)
 	if existing != nil {
-		// 如果是"需修改"状态，允许重新提交（重置任务）
-		if existing.Status == domain.StatusRevisionRequired {
+		// 如果是"已驳回"状态，允许重新提交（重置任务从头再来）
+		if existing.Status == domain.StatusRejected {
 			existing.Status = domain.StatusReviewing
 			existing.CurrentRound = 1
 			existing.AssignedTo = flow.Rounds[0].ExpertIDs
@@ -143,6 +162,16 @@ func (s *Service) SubmitQuestion(ctx context.Context, questionID string, flowID 
 			for i := range existing.RoundResults {
 				existing.RoundResults[i].RoundNumber = i + 1
 			}
+			existing.UpdatedAt = time.Now()
+			if err := s.reviewStore.UpdateTask(ctx, *existing); err != nil {
+				return nil, err
+			}
+			s.updateQuestionStatus(ctx, questionID, domain.StatusReviewing)
+			return existing, nil
+		}
+		// 如果是"需修改"状态，恢复为审核中（保持在原轮，不清投票，专家可继续审核）
+		if existing.Status == domain.StatusRevisionRequired {
+			existing.Status = domain.StatusReviewing
 			existing.UpdatedAt = time.Now()
 			if err := s.reviewStore.UpdateTask(ctx, *existing); err != nil {
 				return nil, err

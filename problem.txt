@@ -1,0 +1,43 @@
+一、流程配置环节
+P1. 没有"编辑流程"功能 只有创建（POST /api/review/flows）和删除。SaveFlowConfig 其实是 upsert（store.go:276 ON CONFLICT DO UPDATE），说明后端支持编辑，但前端 ReviewFlowPage.vue 只有新建表单，不能回填修改。配置错了只能删了重建，而删除会带来 P2 的问题。
+
+P2. 审核进行中删除流程 → 服务崩溃 DeleteFlowConfig（store.go:316）不检查是否有进行中的任务引用该流程。任务执行审核时 GetFlowConfig 返回 nil，Review() 里 flow.Rounds[roundIdx] 直接 panic。
+
+P3. 启动时 JSON 覆盖库内配置 main.go 每次 serve 启动都从 configs/review_flows.json upsert。该文件里的 expert_ids 是硬编码的机器特定用户 ID（如 user-1783588118145188000），换库/换环境就失效，且会覆盖管理员在 UI 上的修改。
+
+P4. 流程配置后端无校验 CreateFlow 只查 ID/Name/轮次非空。不校验：expert_ids 是否存在/重复、required_count 范围（0<required≤人数）、轮次号连续性。同一轮放两个相同专家 → 该专家只能审一次，required_count 永远凑不够。
+
+P5. 三个配置字段是死配置 CanModify（允许修改题目）、IsRequired（必审）、Subject（适用专业）在 UI 都能配，后端 Review() 全都不读。尤其"允许修改题目"配了没效果，专家在审核页没有改题入口。
+
+二、提交环节
+P6. 提交不校验题目状态 SubmitQuestion 对任何状态的题目都能创建任务（直接置 reviewing）。已 published 的题也能再提交审核，状态混乱。
+
+P7. 前端 expert_id 由登录用户硬填，可冒名 ReviewPage.vue:117 发送 expert_id: currentUser.id，但服务端只校验"该 ID 是否在当前轮名单里"，不校验 expert_id 与登录用户一致。任一 expert 可传别人的 ID 冒充审核。同时专家库双轨制（CLI 建 E001 vs 账号同步 user-xxx）依然是"审核人指定不清晰"的根因：流程里点了 CLI 建的专家，任何账号登录都对不上号。
+
+三、审核执行环节
+P8. revision_required 有两条互相冲突的重审路径
+
+路径 A：任务被打回后（task.Status=revision_required），Review() 不检查任务状态，专家可直接再投票原地继续，清空的本轮票重新投；
+路径 B：SubmitQuestion 的 revision 分支把任务重置回第 1 轮，之前的轮次全作废。 两条路并存：一个原地重审、一个重头再来，且都可用，行为完全看用户点了哪个按钮。
+P9. 打回时清空本轮全部票 Review() 的 revision 分支（service.go:294）把 RoundResults[roundIdx].Reviews = nil——其他专家已投的通过票也被抹掉。如果流程是"3 人通过算过"，第 3 人打回，前 2 人白投。
+
+P10. rejected 一票否决且无出路 任一专家驳回 → 任务终态 rejected；SubmitQuestion 只放行 revision_required，rejected 题目永远无法重提，前端 canSubmit 也不含 rejected。需求支持"驳回"，但驳回后应该能修改重提，现在是死胡同。
+
+P11. 并发审核竞态 两位专家同时审核同一任务，都是读-改-写整个 round_results JSON，后写覆盖先写 → 其中一票丢失，门槛永远达不到。无事务/无锁。
+
+四、修改与留痕环节
+P12. 修改题目不重置状态（最危险） handleUpdateQuestion 只递增版本号。approved/published 的题目被修改后状态不变 → 未重新审核就保持可发布/已发布状态，直接绕过审核流程。
+
+P13. 版本快照不存在 question_versions 表在 schema 里已经没了（当前 13 张表无此表），代码也无任何写快照的地方。需求要求"版本记录、修改记录留痕"，现在只有 version 数字递增，改了什么内容无处可查。
+
+五、发布环节
+P14. 发布不检查任务状态 PublishQuestion 只查 q.Status == approved，不核对任务存在性/最终轮次状态。若题目被手动改回 approved 状态（或状态被 updateQuestionStatus 写歪），可绕过任务直接发布。
+
+优先级建议
+P12 + P10：修改后状态重置（回 ai_draft）+ rejected 可重提——堵住绕过审核的洞
+P8 + P9：统一打回语义——打回后任务停在被打回那一轮、不清其他人的票，重提只重置该轮；删掉 SubmitQuestion 的重置分支
+P2 + P4：删除流程时检查在用任务；CreateFlow 加完整校验（专家存在性、去重、required_count 范围）
+P7：后端强制 expert_id = 当前登录用户（admin 除外），从根上解决冒名和双轨制混乱
+P13：补版本快照（改题时写 question_versions）
+P5：启用 CanModify（允许改题的轮次，审核页直接提供改题+提交，自动留痕）
+P3：review_flows.json 只作为首次初始化，或改成按 flow ID 幂等导入且不覆盖已有

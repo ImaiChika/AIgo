@@ -346,6 +346,14 @@ func (s *Store) UpdateTask(ctx context.Context, t domain.ReviewTask) error {
 	return s.SaveTask(ctx, t)
 }
 
+func (s *Store) CountActiveTasksByFlow(ctx context.Context, flowID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM review_tasks WHERE flow_id=$1 AND status IN ('reviewing', 'revision_required')
+	`, flowID).Scan(&count)
+	return count, err
+}
+
 // ===== 审核记录 =====
 
 func (s *Store) SaveRecord(ctx context.Context, r domain.ReviewRecord) error {
