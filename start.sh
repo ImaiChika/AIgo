@@ -29,10 +29,11 @@ for i in {1..10}; do
   sleep 0.5
 done
 
-# 确保 aigo 数据库存在
-psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='aigo'" | grep -q 1 || {
+# 确保 aigo 数据库存在（使用当前系统用户连接，默认连 postgres 库）
+PG_USER="$(whoami)"
+psql -U "$PG_USER" -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='aigo'" | grep -q 1 || {
   echo "  📦 创建 aigo 数据库..."
-  psql -U postgres -c "CREATE DATABASE aigo;"
+  psql -U "$PG_USER" -d postgres -c "CREATE DATABASE aigo;"
   echo "  ✅ 数据库 aigo 已创建"
 }
 
