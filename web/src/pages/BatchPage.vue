@@ -43,6 +43,7 @@ async function loadStats() {
     stats.value = await api.stats();
   } catch (e) {
     console.error(e);
+    showToast("加载统计信息失败: " + e.message);
   }
 }
 
@@ -72,6 +73,7 @@ async function loadJobsFromDB() {
     }
   } catch (e) {
     console.error("加载任务历史失败:", e);
+    showToast("加载任务历史失败，显示本地缓存");
     // 回退到 localStorage
     const jobs = JSON.parse(localStorage.getItem("batch_jobs") || "[]");
     jobHistory.value = jobs;

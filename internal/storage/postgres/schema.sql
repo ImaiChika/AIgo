@@ -158,12 +158,26 @@ CREATE TABLE IF NOT EXISTS batch_jobs (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- AI 检查结果
+CREATE TABLE IF NOT EXISTS ai_review_results (
+    id TEXT PRIMARY KEY,
+    question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+    verdict TEXT NOT NULL DEFAULT 'pass',       -- pass / issues_found / reject
+    scores JSONB NOT NULL DEFAULT '{}',         -- 各维度分数
+    issues JSONB NOT NULL DEFAULT '[]',         -- 问题列表
+    suggestion TEXT NOT NULL DEFAULT '',        -- AI 修改建议
+    model TEXT NOT NULL DEFAULT '',             -- 使用的模型
+    raw_response TEXT NOT NULL DEFAULT '',      -- 原始 LLM 响应
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_ai_review_question ON ai_review_results(question_id);
+
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_questions_status ON questions(status);
 CREATE INDEX IF NOT EXISTS idx_questions_difficulty ON questions(difficulty);
-CREATE INDEX IF NOT EXISTS idx_kp_system ON knowledge_points(system);
+CREATE INDEX IF NOT EXISTS idx_kp_subject ON knowledge_points(subject);
 CREATE INDEX IF NOT EXISTS idx_kp_topic ON knowledge_points USING gin(to_tsvector('simple', topic));
 CREATE INDEX IF NOT EXISTS idx_review_tasks_question ON review_tasks(question_id);
 CREATE INDEX IF NOT EXISTS idx_review_records_task ON review_records(task_id);

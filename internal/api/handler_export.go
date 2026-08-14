@@ -98,6 +98,12 @@ func (s *Server) handleDownloadExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 安全检查：拒绝路径穿越
+	if filename != filepath.Base(filename) {
+		writeError(w, 400, "非法文件名")
+		return
+	}
+
 	// 安全检查：只允许下载 output/exports 目录下的文件
 	path := filepath.Join("output/exports", filename)
 	if _, err := os.Stat(path); os.IsNotExist(err) {

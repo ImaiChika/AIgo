@@ -128,6 +128,7 @@ async function loadStats() {
     stats.value = await api.stats();
   } catch (e) {
     console.error(e);
+    showToast("加载统计信息失败: " + e.message);
   }
 }
 

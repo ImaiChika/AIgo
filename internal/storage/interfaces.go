@@ -101,3 +101,15 @@ type BatchJobStore interface {
 	ListBatchJobs(ctx context.Context, limit int) ([]BatchJobRecord, error)
 	SearchBatchJobs(ctx context.Context, name string, limit int) ([]BatchJobRecord, error)
 }
+
+// AIReviewStore AI 检查结果存储接口。
+type AIReviewStore interface {
+	// SaveReviewResult 保存一条 AI 检查结果
+	SaveReviewResult(ctx context.Context, result domain.AIReviewResult) error
+	// GetLatestByQuestionID 获取某题最新的 AI 检查结果
+	GetLatestByQuestionID(ctx context.Context, questionID string) (*domain.AIReviewResult, error)
+	// ListByQuestionIDs 批量获取多题的最新检查结果
+	ListByQuestionIDs(ctx context.Context, questionIDs []string) ([]domain.AIReviewResult, error)
+	// ListAll 列出所有检查结果（按时间倒序）
+	ListAll(ctx context.Context, limit int) ([]domain.AIReviewResult, error)
+}

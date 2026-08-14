@@ -154,6 +154,17 @@ export const api = {
       method: "POST",
     }),
 
+  // AI 检查
+  aiCheck: (questionIds) =>
+    request("/ai-check", {
+      method: "POST",
+      body: JSON.stringify({ question_ids: questionIds }),
+    }),
+  aiCheckResult: (questionId) =>
+    request(`/ai-check/result/${questionId}`),
+  aiCheckResults: () =>
+    request("/ai-check/results"),
+
   // 专家
   listExperts: () => request("/experts"),
   createExpert: (data) =>

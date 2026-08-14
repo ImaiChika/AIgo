@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -133,6 +134,11 @@ func (s *Server) handleBatchList(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	status := r.URL.Query().Get("status")
 	limit := 20
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
 
 	jobs, err := s.batchSvc.ListJobs(r.Context(), name, status, limit)
 	if err != nil {

@@ -3,6 +3,8 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -135,12 +137,14 @@ func (s *Server) handleImportKP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// 保存到临时文件
-	tmpPath := "/tmp/aigo_kp_import_" + header.Filename
+	// 保存到临时文件（防止路径穿越：只取文件名部分）
+	safeName := filepath.Base(header.Filename)
+	tmpPath := "/tmp/aigo_kp_import_" + safeName
 	if err := saveUploadedFile(tmpPath, file); err != nil {
 		writeError(w, 500, "保存临时文件失败: "+err.Error())
 		return
 	}
+	defer os.Remove(tmpPath) // 导入完成后清理临时文件
 
 	// 调用知识点服务解析并导入
 	count, err := s.kpSvc.ImportFromXlsx(r.Context(), tmpPath)

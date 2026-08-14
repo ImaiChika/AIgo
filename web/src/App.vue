@@ -36,6 +36,7 @@ const navItems = computed(() => {
   const items = [
     { key: "generate", icon: "✦", label: "AI出题", path: "/generate" },
     { key: "knowledge", icon: "⌁", label: "知识点", path: "/knowledge" },
+    { key: "ai-check", icon: "🔍", label: "AI检查", path: "/ai-check" },
     { key: "review", icon: "✓", label: "多轮审核", path: "/review" },
     { key: "bank", icon: "□", label: "题库", path: "/bank" },
     { key: "batch", icon: "⚡", label: "批量推理", path: "/batch" },

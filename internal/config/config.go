@@ -12,8 +12,9 @@ import (
 
 // Config 系统配置，包含千问 API 配置和数据库配置。
 type Config struct {
-	Qwen llm.QwenConfig // 千问大模型 API 配置
-	DB   DBConfig        // 数据库配置
+	Qwen     llm.QwenConfig // 千问大模型 API 配置
+	DB       DBConfig        // 数据库配置
+	JWTSecret string        // JWT 签名密钥
 }
 
 // DBConfig 数据库配置。
@@ -36,6 +37,7 @@ func FromEnv() Config {
 		DB: DBConfig{
 			DSN: firstNonEmpty(os.Getenv("DB_DSN"), "postgres://localhost:5432/aigo?sslmode=disable"),
 		},
+		JWTSecret: firstNonEmpty(os.Getenv("JWT_SECRET"), "aigo-jwt-secret-default"),
 	}
 }
 

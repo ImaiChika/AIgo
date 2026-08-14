@@ -218,15 +218,15 @@ function clearSearch() {
 
 function statusText(status) {
   const map = {
-    ai_draft: "AI草稿", auto_checked: "已初评", reviewing: "审核中",
-    approved: "已通过", rejected: "已驳回", revision_required: "需修改",
-    published: "已入库", archived: "已归档",
+    ai_draft: "AI草稿", auto_checked: "已初评", ai_reviewed: "AI已检查",
+    reviewing: "审核中", approved: "已通过", rejected: "已驳回",
+    revision_required: "需修改", published: "已入库", archived: "已归档",
   };
   return map[status] || status;
 }
 
 function statusClass(status) {
-  if (status === "approved" || status === "published") return "status-good";
+  if (status === "approved" || status === "published" || status === "ai_reviewed") return "status-good";
   if (status === "rejected") return "status-bad";
   if (status === "reviewing") return "status-active";
   return "";
@@ -251,6 +251,7 @@ onMounted(loadQuestions);
           <option value="">全部状态</option>
           <option value="ai_draft">AI草稿</option>
           <option value="auto_checked">已初评</option>
+          <option value="ai_reviewed">AI已检查</option>
           <option value="reviewing">审核中</option>
           <option value="approved">已通过</option>
           <option value="rejected">已驳回</option>

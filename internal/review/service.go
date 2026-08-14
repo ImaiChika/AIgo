@@ -157,7 +157,9 @@ func (s *Service) SubmitQuestion(ctx context.Context, questionID string, flowID 
 	q.Status = domain.StatusReviewing
 	q.Version = 1
 	q.UpdatedAt = time.Now()
-	s.questionStore.SaveQuestion(ctx, *q)
+	if err := s.questionStore.SaveQuestion(ctx, *q); err != nil {
+		return nil, fmt.Errorf("更新题目状态失败: %w", err)
+	}
 
 	// 创建审核任务
 	firstRound := flow.Rounds[0]
@@ -260,7 +262,9 @@ func (s *Service) Review(ctx context.Context, req ReviewRequest) error {
 		Opinion:     req.Opinion,
 		CreatedAt:   now,
 	}
-	s.reviewStore.SaveRecord(ctx, record)
+	if err := s.reviewStore.SaveRecord(ctx, record); err != nil {
+		return fmt.Errorf("保存审核记录失败: %w", err)
+	}
 
 	// 统计本轮结果
 	roundResult := &task.RoundResults[roundIdx]
@@ -277,7 +281,9 @@ func (s *Service) Review(ctx context.Context, req ReviewRequest) error {
 		roundResult.Passed = false
 		task.Status = domain.StatusRejected
 		task.UpdatedAt = now
-		s.reviewStore.UpdateTask(ctx, *task)
+		if err := s.reviewStore.UpdateTask(ctx, *task); err != nil {
+			return fmt.Errorf("更新审核任务失败: %w", err)
+		}
 		s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusRejected)
 		return nil
 	}
@@ -290,7 +296,9 @@ func (s *Service) Review(ctx context.Context, req ReviewRequest) error {
 		task.RoundResults[roundIdx].RejectedCount = 0
 		task.RoundResults[roundIdx].Passed = false
 		task.UpdatedAt = now
-		s.reviewStore.UpdateTask(ctx, *task)
+		if err := s.reviewStore.UpdateTask(ctx, *task); err != nil {
+			return fmt.Errorf("更新审核任务失败: %w", err)
+		}
 		s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusRevisionRequired)
 		return nil
 	}
@@ -352,10 +360,17 @@ func (s *Service) PublishQuestion(ctx context.Context, questionID string) error 
 }
 
 func (s *Service) updateQuestionStatus(ctx context.Context, questionID string, status domain.QuestionStatus) {
-	q, _ := s.questionStore.GetQuestion(ctx, questionID)
-	if q != nil {
-		q.Status = status
-		q.UpdatedAt = time.Now()
-		s.questionStore.SaveQuestion(ctx, *q)
+	q, err := s.questionStore.GetQuestion(ctx, questionID)
+	if err != nil {
+		fmt.Printf("⚠ 获取题目 %s 失败: %v\n", questionID, err)
+		return
+	}
+	if q == nil {
+		return
+	}
+	q.Status = status
+	q.UpdatedAt = time.Now()
+	if err := s.questionStore.SaveQuestion(ctx, *q); err != nil {
+		fmt.Printf("⚠ 更新题目 %s 状态为 %s 失败: %v\n", questionID, status, err)
 	}
 }

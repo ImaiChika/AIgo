@@ -12,6 +12,7 @@ const (
 	StatusRevisionRequired QuestionStatus = "revision_required"  // 需要修改
 	StatusRejected         QuestionStatus = "rejected"           // 驳回
 	StatusApproved         QuestionStatus = "approved"           // 审核通过
+	StatusAIReviewed       QuestionStatus = "ai_reviewed"        // AI 检查通过
 	StatusPublished        QuestionStatus = "published"          // 进入正式题库
 	StatusArchived         QuestionStatus = "archived"           // 归档
 )
@@ -106,4 +107,34 @@ type AuditLog struct {
 	Actor      string    `json:"actor"`       // 操作人（用户名或 "ai"）
 	Detail     string    `json:"detail"`      // 操作详情（JSON 或文字描述）
 	CreatedAt  time.Time `json:"created_at"`  // 操作时间
+}
+
+// ===== AI 检查相关类型 =====
+
+// AIReviewResult AI 检查结果。
+type AIReviewResult struct {
+	ID          string       `json:"id"`
+	QuestionID  string       `json:"question_id"`
+	Verdict     string       `json:"verdict"`      // "pass" / "issues_found" / "reject"
+	Scores      ReviewScores `json:"scores"`
+	Issues      []ReviewIssue `json:"issues"`
+	Suggestion  string       `json:"suggestion"`   // AI 的修改建议
+	Model       string       `json:"model"`        // 使用的模型
+	RawResponse string       `json:"raw_response"` // 原始 LLM 响应
+	CreatedAt   time.Time    `json:"created_at"`
+}
+
+// ReviewScores AI 检查各维度评分。
+type ReviewScores struct {
+	Scientific int `json:"scientific"` // 科学性 0-100
+	Logic      int `json:"logic"`      // 逻辑性 0-100
+	A2Fit      int `json:"a2_fit"`     // A2 适配度 0-100
+	Answer     int `json:"answer"`     // 答案准确性 0-100
+}
+
+// ReviewIssue AI 检查发现的问题。
+type ReviewIssue struct {
+	Field    string `json:"field"`    // "stem" / "options" / "answer" / "explanation"
+	Severity string `json:"severity"` // "error" / "warning" / "info"
+	Message  string `json:"message"`
 }

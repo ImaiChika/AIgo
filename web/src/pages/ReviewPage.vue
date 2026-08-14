@@ -41,6 +41,7 @@ async function loadFlows() {
     }
   } catch (e) {
     console.error(e);
+    showToast("加载审核流程失败: " + e.message);
   }
 }
 
@@ -138,6 +139,7 @@ function statusText(status) {
   const map = {
     ai_draft: "AI草稿",
     auto_checked: "已初评",
+    ai_reviewed: "AI已检查",
     reviewing: "审核中",
     approved: "已通过",
     rejected: "已驳回",
@@ -148,7 +150,7 @@ function statusText(status) {
 }
 
 function statusClass(status) {
-  if (status === "approved" || status === "published") return "status-good";
+  if (status === "approved" || status === "published" || status === "ai_reviewed") return "status-good";
   if (status === "rejected") return "status-bad";
   if (status === "reviewing") return "status-active";
   return "";
@@ -156,7 +158,7 @@ function statusClass(status) {
 
 // 判断是否可以提交审核
 function canSubmit(q) {
-  return q && (q.status === "ai_draft" || q.status === "auto_checked" || q.status === "revision_required");
+  return q && (q.status === "ai_draft" || q.status === "auto_checked" || q.status === "ai_reviewed" || q.status === "revision_required");
 }
 
 // 判断是否可以执行审核
@@ -170,6 +172,7 @@ async function loadExperts() {
     experts.value = data.experts || [];
   } catch (e) {
     console.error(e);
+    showToast("加载专家列表失败: " + e.message);
   }
 }
 

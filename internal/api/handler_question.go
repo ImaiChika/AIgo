@@ -72,7 +72,10 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	for i := range questions {
 		questions[i].Status = domain.StatusAutoChecked
 		questions[i].UpdatedAt = time.Now()
-		s.questionStore.SaveQuestion(r.Context(), questions[i])
+		if err := s.questionStore.SaveQuestion(r.Context(), questions[i]); err != nil {
+			writeError(w, 500, "保存题目失败: "+err.Error())
+			return
+		}
 	}
 
 	// 记录日志

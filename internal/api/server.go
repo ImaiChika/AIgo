@@ -5,8 +5,10 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
+	"aigo/internal/aicheck"
 	"aigo/internal/audit"
 	"aigo/internal/auth"
 	"aigo/internal/batch"
@@ -27,6 +29,7 @@ type Server struct {
 	questionStore storage.QuestionStore  // 题目存储
 	authSvc       *auth.Service         // 认证服务
 	batchSvc      *batch.Service        // 批量推理服务
+	aiCheckSvc    *aicheck.Service      // AI 检查服务
 }
 
 // NewServer 创建 API 服务实例，注入所有依赖。
@@ -39,6 +42,7 @@ func NewServer(
 	questionStore storage.QuestionStore,
 	authSvc *auth.Service,
 	batchSvc *batch.Service,
+	aiCheckSvc *aicheck.Service,
 ) *Server {
 	return &Server{
 		pipe:          pipe,
@@ -49,6 +53,7 @@ func NewServer(
 		questionStore: questionStore,
 		authSvc:       authSvc,
 		batchSvc:      batchSvc,
+		aiCheckSvc:    aiCheckSvc,
 	}
 }
 
@@ -119,6 +124,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/batch/status/{jobId}", s.requireAuth("question:generate", s.handleBatchStatus))
 	mux.HandleFunc("POST /api/batch/download/{jobId}", s.requireAuth("question:generate", s.handleBatchDownload))
 
+	// === AI 检查 ===
+	mux.HandleFunc("POST /api/ai-check", s.requireAuth("", s.handleAICheck))
+	mux.HandleFunc("GET /api/ai-check/result/{questionId}", s.requireAuth("", s.handleAICheckResult))
+	mux.HandleFunc("GET /api/ai-check/results", s.requireAuth("", s.handleAICheckResults))
+
 	// === 审核流程 ===
 	mux.HandleFunc("POST /api/review/submit", s.requireAuth("review:submit", s.handleSubmitReview))
 	mux.HandleFunc("POST /api/review/action", s.requireAuth("review:action", s.handleReviewAction))
@@ -136,13 +146,17 @@ func (s *Server) Handler() http.Handler {
 // handleStats 返回系统统计信息：题目数、知识点数、各分类分布。
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	questionCount, _ := s.questionStore.Count(ctx)
-	kpCount, _ := s.kpSvc.Count(ctx)
-	categories, _ := s.kpSvc.ListCategories(ctx)
+	questionCount, err1 := s.questionStore.Count(ctx)
+	kpCount, err2 := s.kpSvc.Count(ctx)
+	categories, err3 := s.kpSvc.ListCategories(ctx)
+
+	if err1 != nil || err2 != nil || err3 != nil {
+		fmt.Printf("⚠ 统计查询部分失败: q=%v kp=%v cat=%v\n", err1, err2, err3)
+	}
 
 	writeJSON(w, 200, map[string]any{
-		"question_count":      questionCount,
-		"knowledge_count":     kpCount,
+		"question_count":       questionCount,
+		"knowledge_count":      kpCount,
 		"knowledge_categories": categories,
 	})
 }

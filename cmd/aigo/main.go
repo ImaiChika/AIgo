@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"aigo/internal/aicheck"
 	"aigo/internal/api"
 	"aigo/internal/audit"
 	"aigo/internal/auth"
@@ -81,10 +82,13 @@ func run(ctx context.Context, args []string) error {
 	// 创建批量推理服务（DashScope 批量 API，云端执行）
 	batchSvc := batch.NewService(cfg.Qwen.APIKey, cfg.Qwen.BaseURL, pgStore, pgStore)
 
+	// 创建 AI 检查服务（使用 LLM 检查题目质量）
+	aiCheckSvc := aicheck.NewService(client, pgStore, pgStore, cfg.Qwen.Model)
+
 	pipe := pipeline.New(genSvc, evaluator.NewService(), reviewSvc, imageSvc, kpSvc, pgStore)
 
-	// 初始化认证服务
-	authSvc := auth.NewService(pgStore.DB(), "aigo-jwt-secret-2025", 24*time.Hour)
+	// 初始化认证服务（JWT 密钥从配置读取，通过 JWT_SECRET 环境变量设置）
+	authSvc := auth.NewService(pgStore.DB(), cfg.JWTSecret, 24*time.Hour)
 	if err := authSvc.InitAdmin("admin", "admin", "系统管理员"); err != nil {
 		fmt.Printf("初始化管理员账号失败: %v\n", err)
 	} else {
@@ -147,7 +151,7 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 2 {
 			port = args[2]
 		}
-		server := api.NewServer(pipe, kpSvc, imageSvc, reviewSvc, auditSvc, pgStore, authSvc, batchSvc)
+		server := api.NewServer(pipe, kpSvc, imageSvc, reviewSvc, auditSvc, pgStore, authSvc, batchSvc, aiCheckSvc)
 		addr := "127.0.0.1:" + port
 		fmt.Printf("AIgo HTTP 服务启动: http://%s\n", addr)
 		fmt.Println("API 文档:")
@@ -468,11 +472,18 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 
-		saved, err := batchSvc.DownloadAndImport(ctx, outputFileID, allKPs)
+		result, err := batchSvc.DownloadAndImport(ctx, outputFileID, allKPs)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("已导入 %d 道题目\n", saved)
+		fmt.Printf("已导入 %d 道题目（成功 %d, 失败 %d）\n", result.Saved+result.Failed, result.Saved, result.Failed)
+		for _, item := range result.Items {
+			if item.Status == "ok" {
+				fmt.Printf("  ✅ %s: 导入 %d 题\n", item.OutlineCode, item.Count)
+			} else {
+				fmt.Printf("  ❌ %s: %s\n", item.OutlineCode, item.Error)
+			}
+		}
 		return nil
 
 	// ===== 旧版批量推理（已废弃，请使用 batch-run）=====

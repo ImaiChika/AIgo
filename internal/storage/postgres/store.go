@@ -11,7 +11,7 @@ import (
 	"aigo/internal/domain"
 	"aigo/internal/storage"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 // Store PostgreSQL 存储实现。
@@ -787,5 +787,91 @@ func (s *Store) SearchBatchJobs(ctx context.Context, name string, limit int) ([]
 		result = append(result, j)
 	}
 	return result, rows.Err()
+}
+
+// ===== AI 检查结果 =====
+
+func (s *Store) SaveReviewResult(ctx context.Context, result domain.AIReviewResult) error {
+	scoresJSON, _ := json.Marshal(result.Scores)
+	issuesJSON, _ := json.Marshal(result.Issues)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO ai_review_results (id, question_id, verdict, scores, issues, suggestion, model, raw_response, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+	`, result.ID, result.QuestionID, result.Verdict, string(scoresJSON), string(issuesJSON),
+		result.Suggestion, result.Model, result.RawResponse)
+	return err
+}
+
+func (s *Store) GetLatestByQuestionID(ctx context.Context, questionID string) (*domain.AIReviewResult, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, question_id, verdict, scores, issues, suggestion, model, raw_response, created_at
+		FROM ai_review_results WHERE question_id=$1 ORDER BY created_at DESC LIMIT 1
+	`, questionID)
+	var r domain.AIReviewResult
+	var scoresJSON, issuesJSON string
+	err := row.Scan(&r.ID, &r.QuestionID, &r.Verdict, &scoresJSON, &issuesJSON,
+		&r.Suggestion, &r.Model, &r.RawResponse, &r.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	json.Unmarshal([]byte(scoresJSON), &r.Scores)
+	json.Unmarshal([]byte(issuesJSON), &r.Issues)
+	return &r, nil
+}
+
+func (s *Store) ListByQuestionIDs(ctx context.Context, questionIDs []string) ([]domain.AIReviewResult, error) {
+	if len(questionIDs) == 0 {
+		return nil, nil
+	}
+	query := `SELECT DISTINCT ON (question_id) id, question_id, verdict, scores, issues, suggestion, model, raw_response, created_at
+		FROM ai_review_results WHERE question_id = ANY($1) ORDER BY question_id, created_at DESC`
+	rows, err := s.db.QueryContext(ctx, query, pq.Array(questionIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []domain.AIReviewResult
+	for rows.Next() {
+		var r domain.AIReviewResult
+		var scoresJSON, issuesJSON string
+		if err := rows.Scan(&r.ID, &r.QuestionID, &r.Verdict, &scoresJSON, &issuesJSON,
+			&r.Suggestion, &r.Model, &r.RawResponse, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		json.Unmarshal([]byte(scoresJSON), &r.Scores)
+		json.Unmarshal([]byte(issuesJSON), &r.Issues)
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+func (s *Store) ListAll(ctx context.Context, limit int) ([]domain.AIReviewResult, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, question_id, verdict, scores, issues, suggestion, model, raw_response, created_at
+		FROM ai_review_results ORDER BY created_at DESC LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []domain.AIReviewResult
+	for rows.Next() {
+		var r domain.AIReviewResult
+		var scoresJSON, issuesJSON string
+		if err := rows.Scan(&r.ID, &r.QuestionID, &r.Verdict, &scoresJSON, &issuesJSON,
+			&r.Suggestion, &r.Model, &r.RawResponse, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		json.Unmarshal([]byte(scoresJSON), &r.Scores)
+		json.Unmarshal([]byte(issuesJSON), &r.Issues)
+		results = append(results, r)
+	}
+	return results, rows.Err()
 }
 

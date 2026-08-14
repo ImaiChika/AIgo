@@ -2,16 +2,13 @@ AIgo 智能命题系统 - 项目结构
 ==============================
 
 .
-├── 2025执医a2_含知识点.xlsx        # 原始真题 + 反推的知识点列（589题）
-├── 2025执医A2.xlsx                # 原始真题数据集（589道A2型题）
 ├── CLAUDE.md                      # Claude Code 开发约束文件
 ├── README.md                      # 项目说明
 ├── 功能需求文档.txt                # 产品需求基准（树状图在内）
 ├── 当前还缺的功能提示.txt          # 待开发功能清单
-├── 项目使用方法.txt                # 启动和使用说明
 ├── 项目结构.txt                    # 本文件
-├── 基于AI的智能命题研究-开题报告.pdf  # 开题报告参考
-├── 知识点表.xlsx                   # 去重后的知识点（516个）
+├── start.sh                       # 一键启动脚本（PostgreSQL + 后端 + 前端）
+├── end.sh                         # 一键停止脚本
 ├── .env                           # 环境变量（API Key、数据库连接，不提交git）
 ├── .gitignore                     # git 忽略规则
 ├── go.mod                         # Go 模块定义
@@ -33,12 +30,25 @@ AIgo 智能命题系统 - 项目结构
 │   │   ├── handler_expert.go      # 专家接口：增删改查
 │   │   ├── handler_review.go      # 审核接口：提交、审核操作、任务查询、记录、流程列表
 │   │   ├── handler_image.go       # 图片接口：提示词生成、候选图生成、列表、审核
+│   │   ├── handler_batch.go       # 批量推理接口：提交、状态查询、列表、下载导入
+│   │   ├── handler_ai_check.go    # AI检查接口：批量检查、结果查询
+│   │   ├── handler_export.go      # 导出接口：Excel、Word 导出
+│   │   ├── handler_audit.go       # 审计日志接口
 │   │   ├── handler_utils.go       # 工具函数：JSON读写、CORS、错误响应
 │   │   └── helper.go              # 文件上传辅助函数
+│   │
+│   ├── aicheck/                   # AI 检查模块
+│   │   └── service.go             # LLM 检查题目质量，四维评分，结果持久化
 │   │
 │   ├── auth/                      # 认证模块
 │   │   ├── auth.go                # JWT 签发/验证、bcrypt 密码哈希、RBAC 权限表、用户CRUD
 │   │   └── middleware.go          # HTTP 认证中间件、context 注入用户信息
+│   │
+│   ├── audit/                     # 审计日志模块
+│   │   └── service.go             # 操作日志记录
+│   │
+│   ├── batch/                     # 批量推理模块
+│   │   └── service.go             # DashScope 批量 API：生成JSONL、上传、提交、状态查询、导入
 │   │
 │   ├── config/                    # 配置模块
 │   │   └── config.go              # 从环境变量和 .env 文件加载配置
@@ -46,36 +56,35 @@ AIgo 智能命题系统 - 项目结构
 │   ├── domain/                    # 领域模型（核心数据结构）
 │   │   ├── types.go               # 题目、知识点、选项、难度、来源、素材、生成请求、评估报告
 │   │   ├── validate.go            # 题目基础校验（题干非空、选项4-5个、答案在选项中）
-│   │   ├── review.go              # 专家、审核流程、审核任务、审核记录、题目版本
+│   │   ├── review.go              # 专家、审核流程、审核任务、审核记录、AI检查结果
 │   │   └── image.go               # 图片提示词、候选图、图片审核记录
 │   │
 │   ├── evaluator/                 # 质量评估模块
 │   │   ├── service.go             # 规则评估：选项数量、答案存在性、解析加分
 │   │   └── evaluator_test.go      # 评估器单元测试
 │   │
+│   ├── exporter/                  # 导出模块
+│   │   └── docx.go                # Word (.docx) 导出
+│   │
 │   ├── generator/                 # 题目生成模块
 │   │   ├── prompt.go              # 千问 prompt 构建、JSON schema、响应解析
-│   │   └── service.go             # 生成服务：调千问API、解析结果、存入题库
+│   │   ├── service.go             # 生成服务：调千问API、解析结果、存入题库
+│   │   └── generator_test.go      # 生成器测试
 │   │
 │   ├── image/                     # 图片服务模块
-│   │   ├── service.go             # 提示词生成（调千问）、Mock生图、图片审核
-│   │   └── image_test.go          # Mock生图器单元测试
+│   │   ├── service.go             # 提示词生成（调千问）、图片审核
+│   │   └── zimage.go              # z-image-turbo 真实生图
 │   │
 │   ├── importer/                  # 数据导入模块
-│   │   ├── xlsx.go                # 真题 xlsx 读取和转换
-│   │   ├── kp_importer.go         # 知识点 xlsx 读取和转换
-│   │   └── xlsx_test.go           # 导入器单元测试
+│   │   └── xlsx.go                # 题目/知识点 xlsx 读取和转换
 │   │
 │   ├── knowledge/                 # 知识点服务模块
 │   │   ├── service.go             # 知识点导入、搜索、筛选、统计、删除
 │   │   └── knowledge_test.go      # 知识点导入+搜索集成测试
 │   │
 │   ├── llm/                       # 大模型调用模块
-│   │   ├── client.go              # LLM 通用接口定义
-│   │   └── qwen.go                # 千问 OpenAI 兼容客户端（net/http 实现）
-│   │
-│   ├── multimodal/                # 多模态接口预留
-│   │   └── interfaces.go          # OCR、图像特征、医学图片生成接口（当前为 stub）
+│   │   ├── client.go              # LLM 通用接口定义（可调换模型）
+│   │   └── qwen.go                # 千问 OpenAI 兼容客户端
 │   │
 │   ├── pipeline/                  # 流程编排模块
 │   │   └── pipeline.go            # 串联生成→评估→存储，对外暴露各业务方法
@@ -84,16 +93,14 @@ AIgo 智能命题系统 - 项目结构
 │   │   └── service.go             # 审核流程：提交、多轮审核、状态流转、admin可审任意轮
 │   │
 │   └── storage/                   # 存储模块
-│       ├── memory.go              # 题目内存存储（开发测试用）
-│       ├── knowledge_store.go     # 知识点存储接口 + 内存实现
-│       ├── review_store.go        # 专家、审核流程、审核任务、审核记录存储
-│       ├── image_store.go         # 图片提示词、候选图、图片审核记录存储
+│       ├── interfaces.go          # 所有存储接口定义
+│       ├── testutil/
+│       │   └── store.go           # 内存存储实现（仅供测试）
 │       └── postgres/              # PostgreSQL 持久化存储
-│           ├── schema.sql         # 数据库建表语句（10张表）
+│           ├── schema.sql         # 数据库建表语句（12张表）
 │           └── store.go           # PostgreSQL 存储实现（所有接口）
 │
-├── tools/                         # 工具脚本
-│   └── extract_kp.py              # 从真题反推知识点的 Python 脚本
+├── output/                        # 运行时输出（导出文件、日志）
 │
 └── web/                           # 前端（Vue 3 + Vite）
     ├── index.html                 # HTML 入口
@@ -104,32 +111,37 @@ AIgo 智能命题系统 - 项目结构
         ├── App.vue                # 根组件：侧边栏导航、用户信息、昵称编辑
         ├── auth.js                # 前端认证状态管理（token、用户信息）
         ├── api.js                 # API 服务层（封装所有后端接口调用）
-        ├── router.js              # Vue Router 路由配置 + 登录守卫
+        ├── router.js              # Vue Router 路由配置 + 登录守卫 + admin守卫
         ├── styles.css             # 全局样式
         └── pages/                 # 页面组件
             ├── LoginPage.vue      # 登录页
             ├── GeneratePage.vue   # AI出题页：选知识点→生成→编辑→保存→配图
             ├── KnowledgePage.vue  # 知识点管理页：搜索、添加、删除、Excel导入
+            ├── AICheckPage.vue    # AI检查页：选题→LLM检查→评分/问题/建议
             ├── ReviewPage.vue     # 审核页：选题→提交审核→多轮审核→记录
             ├── BankPage.vue       # 题库页：搜索、筛选、详情、删除、导出
+            ├── BatchPage.vue      # 批量推理页：提交任务、状态监控、导入结果
             ├── ExpertsPage.vue    # 专家库页：增删改查、启用停用（admin）
+            ├── ReviewFlowPage.vue # 审核流程配置页（admin）
+            ├── AuditPage.vue      # 操作日志页（admin）
             └── UsersPage.vue      # 用户管理页：创建账号、查看列表（admin）
 
 
 数据库表（PostgreSQL）
 ====================
 
-users               # 用户表（账号、密码哈希、角色、昵称）
-knowledge_points    # 知识点表（科目、系统、名称、关键词）
-questions           # 题目表（题干、选项、答案、解析、状态、版本）
-experts             # 专家表（姓名、科室、职称、擅长知识点）
-review_flows        # 审核流程配置表（流程名、轮次配置JSON）
-review_tasks        # 审核任务表（题目ID、流程ID、当前轮次、状态）
-review_records      # 审核记录表（任务ID、轮次、审核人、结论、意见）
-question_versions   # 题目版本表（题目ID、版本号、JSON快照）
-image_prompts       # 图片提示词表（题目ID、结构化提示词）
-generated_images    # 候选图表（提示词ID、图片路径、审核状态）
-image_review_records# 图片审核记录表
+users                # 用户表（账号、密码哈希、角色、昵称）
+knowledge_points     # 知识点表（科目、系统、名称、关键词）
+questions            # 题目表（题干、选项、答案、解析、状态、版本）
+experts              # 专家表（姓名、科室、职称、擅长知识点）
+review_flows         # 审核流程配置表（流程名、轮次配置JSON）
+review_tasks         # 审核任务表（题目ID、流程ID、当前轮次、状态）
+review_records       # 审核记录表（任务ID、轮次、审核人、结论、意见）
+image_prompts        # 图片提示词表（题目ID、结构化提示词）
+generated_images     # 候选图表（提示词ID、图片路径、审核状态）
+image_review_records # 图片审核记录表
+batch_jobs           # 批量任务表（任务名、状态、进度、知识点JSON）
+ai_review_results    # AI检查结果表（verdict、四维评分、问题列表、建议）
 
 
 API 接口
@@ -154,9 +166,8 @@ API 接口
   DELETE /api/questions/{id}          删除题目
 
 知识点:
-  GET    /api/knowledge-points        知识点列表（分页）
+  GET    /api/knowledge-points        知识点列表
   GET    /api/knowledge-points/search 搜索知识点
-  POST   /api/knowledge-points        创建知识点
   POST   /api/knowledge-points/import Excel导入
   DELETE /api/knowledge-points/{id}   删除知识点
 
@@ -172,6 +183,17 @@ API 接口
   GET    /api/images/{questionId}     候选图列表
   POST   /api/images/review           审核图片
 
+AI检查:
+  POST   /api/ai-check                批量AI检查题目
+  GET    /api/ai-check/result/{id}    单题检查结果
+  GET    /api/ai-check/results        所有检查结果
+
+批量推理:
+  POST   /api/batch/submit            提交批量任务
+  GET    /api/batch/list              任务列表
+  GET    /api/batch/status/{jobId}    任务状态
+  POST   /api/batch/download/{jobId}  下载结果并导入
+
 审核:
   POST   /api/review/submit           提交审核
   POST   /api/review/action           审核操作
@@ -179,6 +201,11 @@ API 接口
   GET    /api/review/task-by-question/{id}  按题目查审核任务
   GET    /api/review/records/{id}     审核记录
   GET    /api/review/flows            审核流程列表
+
+导出:
+  POST   /api/export/xlsx             导出Excel
+  POST   /api/export/docx             导出Word
+  GET    /api/export/download/{file}  下载导出文件
 
 统计:
   GET    /api/stats                   系统统计
@@ -189,103 +216,4 @@ API 接口
 
 admin（管理员）:  全部权限
 expert（专家）:   出题、知识点增删、题库删除、审核、专家查看
-teacher（教师）:  出题、知识点查看、提交审核
-
-
-从头了解项目的阅读顺序
-========================
-
-第一层：先看"是什么"
---------------------
-1. 功能需求文档.txt         ← 产品要做什么，树状图是核心
-2. CLAUDE.md                ← 开发约束，什么不能做
-3. README.md                ← 项目简介
-
-
-第二层：理解数据结构（domain）
-----------------------------
-4. internal/domain/types.go      ← 核心：题目、知识点、选项长什么样
-5. internal/domain/validate.go   ← 题目校验规则
-6. internal/domain/review.go     ← 审核相关的数据结构
-7. internal/domain/image.go      ← 图片相关的数据结构
-
-这层回答：系统里有哪些数据，字段是什么，状态怎么流转。
-
-
-第三层：理解存储层（storage）
-----------------------------
-8.  internal/storage/memory.go           ← 题目怎么存（最简单的实现）
-9.  internal/storage/knowledge_store.go  ← 知识点怎么存
-10. internal/storage/review_store.go     ← 审核数据怎么存
-11. internal/storage/image_store.go      ← 图片数据怎么存
-12. internal/storage/postgres/schema.sql ← 数据库表结构（10张表的关系）
-13. internal/storage/postgres/store.go   ← PostgreSQL 实现
-
-这层回答：数据存在哪里，怎么增删改查。
-
-
-第四层：理解业务逻辑（service）
-------------------------------
-14. internal/llm/client.go + qwen.go    ← 怎么调千问API
-15. internal/generator/prompt.go         ← 怎么构建出题prompt
-16. internal/generator/service.go        ← 出题流程
-17. internal/evaluator/service.go        ← 质量评估规则
-18. internal/knowledge/service.go        ← 知识点管理逻辑
-19. internal/review/service.go           ← 审核流程逻辑（核心复杂度在这）
-20. internal/image/service.go            ← 图片生成和审核逻辑
-
-这层回答：每个功能具体怎么做，业务规则是什么。
-
-
-第五层：理解流程编排（pipeline）
-------------------------------
-21. internal/pipeline/pipeline.go        ← 把上面的service串起来，对外暴露方法
-
-这层回答：各个模块怎么协作，一个请求从进来到出去经过哪些步骤。
-
-
-第六层：理解 API 层（api）
---------------------------
-22. internal/api/server.go               ← 路由表：哪些URL对应哪些handler
-23. internal/api/handler_auth.go         ← 登录、权限
-24. internal/api/handler_question.go     ← 题目相关接口
-25. internal/api/handler_review.go       ← 审核相关接口
-26. internal/api/handler_utils.go        ← JSON读写、CORS
-
-这层回答：前端调哪个URL，后端怎么处理。
-
-
-第七层：理解入口和配置
---------------------
-27. internal/config/config.go            ← 配置从哪来
-28. internal/auth/auth.go                ← JWT怎么签发、权限怎么检查
-29. cmd/aigo/main.go                     ← 程序从哪开始，怎么组装各模块
-30. configs/review_flows.json            ← 审核流程怎么配置
-
-这层回答：系统怎么启动，配置怎么管理。
-
-
-第八层：理解前端（web）
-----------------------
-31. web/src/auth.js                      ← 前端怎么存token
-32. web/src/api.js                       ← 前端怎么调后端
-33. web/src/router.js                    ← 页面路由
-34. web/src/App.vue                      ← 整体布局
-35. web/src/pages/LoginPage.vue          ← 登录流程
-36. web/src/pages/GeneratePage.vue       ← 出题页面
-37. web/src/pages/ReviewPage.vue         ← 审核页面
-38. web/src/pages/BankPage.vue           ← 题库页面
-
-这层回答：用户看到什么界面，怎么和后端交互。
-
-
-一句话总结每层
-==============
-domain    → 数据长什么样
-storage   → 数据存在哪
-service   → 业务怎么做
-pipeline  → 流程怎么串
-api       → 对外怎么调
-config    → 系统怎么配
-main.go   → 程序怎么跑
-web/      → 用户怎么看
+teacher（教师）:  出题、知识点查看、AI检查、提交审核

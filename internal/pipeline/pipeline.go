@@ -112,7 +112,9 @@ func (p *Pipeline) EvaluateSample(ctx context.Context) error {
 	// 评估后更新状态为 auto_checked
 	q.Status = domain.StatusAutoChecked
 	q.UpdatedAt = time.Now()
-	p.store.SaveQuestion(ctx, q)
+	if err := p.store.SaveQuestion(ctx, q); err != nil {
+		return fmt.Errorf("保存评估结果失败: %w", err)
+	}
 
 	return printJSON(report)
 }
@@ -179,7 +181,9 @@ func (p *Pipeline) EvaluateByID(ctx context.Context, id string) error {
 
 	q.Status = domain.StatusAutoChecked
 	q.UpdatedAt = time.Now()
-	p.store.SaveQuestion(ctx, *q)
+	if err := p.store.SaveQuestion(ctx, *q); err != nil {
+		return fmt.Errorf("保存评估结果失败: %w", err)
+	}
 
 	return printJSON(report)
 }
