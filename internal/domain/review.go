@@ -113,15 +113,16 @@ type AuditLog struct {
 
 // AIReviewResult AI 检查结果。
 type AIReviewResult struct {
-	ID          string       `json:"id"`
-	QuestionID  string       `json:"question_id"`
-	Verdict     string       `json:"verdict"`      // "pass" / "issues_found" / "reject"
-	Scores      ReviewScores `json:"scores"`
-	Issues      []ReviewIssue `json:"issues"`
-	Suggestion  string       `json:"suggestion"`   // AI 的修改建议
-	Model       string       `json:"model"`        // 使用的模型
-	RawResponse string       `json:"raw_response"` // 原始 LLM 响应
-	CreatedAt   time.Time    `json:"created_at"`
+	ID              string        `json:"id"`
+	QuestionID      string        `json:"question_id"`
+	QuestionVersion int           `json:"question_version"` // 检查时的题目版本号（用于判断结果是否过期）
+	Verdict         string        `json:"verdict"`          // "pass" / "issues_found" / "reject"
+	Scores          ReviewScores  `json:"scores"`
+	Issues          []ReviewIssue `json:"issues"`
+	Suggestion      string        `json:"suggestion"`  // AI 的修改建议
+	Model           string        `json:"model"`       // 使用的模型
+	RawResponse     string        `json:"raw_response"` // 原始 LLM 响应
+	CreatedAt       time.Time     `json:"created_at"`
 }
 
 // ReviewScores AI 检查各维度评分。

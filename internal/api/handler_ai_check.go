@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 )
 
 // handleAICheck 批量 AI 检查题目。
@@ -53,8 +54,18 @@ func (s *Server) handleAICheckResult(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAICheckResults 列出所有 AI 检查结果。
+// 查询参数：limit=数量上限（默认50，最大1000）。
 func (s *Server) handleAICheckResults(w http.ResponseWriter, r *http.Request) {
-	results, err := s.aiCheckSvc.ListResults(r.Context(), 50)
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			if n > 1000 {
+				n = 1000
+			}
+			limit = n
+		}
+	}
+	results, err := s.aiCheckSvc.ListResults(r.Context(), limit)
 	if err != nil {
 		writeError(w, 500, "查询失败: "+err.Error())
 		return

@@ -14,6 +14,12 @@ const lightboxImage = ref("");
 const editing = ref(false);
 const editForm = ref({ clinical_stem: "", options: [], answer: "", explanation: "" });
 
+// 分页
+const page = ref(1);
+const pageSize = 100;
+const totalCount = ref(0);
+const hasMore = ref(false);
+
 // 批量选择
 const selectedIds = ref(new Set());
 const selectAll = ref(false);
@@ -39,7 +45,7 @@ function toggleSelectAll() {
 
 function downloadFile(filename) {
   const a = document.createElement('a');
-  a.href = `http://127.0.0.1:8080/api/export/download/${filename}`;
+  a.href = `/api/export/download/${filename}`;
   a.download = filename;
   document.body.appendChild(a);
   a.click();
@@ -101,16 +107,39 @@ function showToast(msg) {
   toast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
 }
 
-async function loadQuestions() {
+async function loadQuestions(resetPage = true) {
+  loading.value = true;
+  if (resetPage) page.value = 1;
+  try {
+    let data;
+    if (searchQuery.value || filterStatus.value) {
+      data = await api.searchQuestions(searchQuery.value, filterStatus.value, page.value, pageSize);
+    } else {
+      data = await api.listQuestions(page.value, pageSize);
+    }
+    questions.value = data.questions || [];
+    totalCount.value = data.total || 0;
+    hasMore.value = !!data.has_more;
+  } catch (e) {
+    showToast("加载失败: " + e.message);
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function loadMore() {
+  page.value += 1;
   loading.value = true;
   try {
     let data;
     if (searchQuery.value || filterStatus.value) {
-      data = await api.searchQuestions(searchQuery.value, filterStatus.value);
+      data = await api.searchQuestions(searchQuery.value, filterStatus.value, page.value, pageSize);
     } else {
-      data = await api.listQuestions();
+      data = await api.listQuestions(page.value, pageSize);
     }
-    questions.value = data.questions || [];
+    questions.value = questions.value.concat(data.questions || []);
+    totalCount.value = data.total || 0;
+    hasMore.value = !!data.has_more;
   } catch (e) {
     showToast("加载失败: " + e.message);
   } finally {
@@ -132,7 +161,7 @@ async function selectQuestion(q) {
 function imageSrc(path) {
   if (!path) return "";
   const filename = path.split("/").pop();
-  return `http://127.0.0.1:8080/images/${filename}`;
+  return `/images/${filename}`;
 }
 
 function openImage(src) { lightboxImage.value = src; }
@@ -144,6 +173,7 @@ async function deleteQuestion(q) {
     await api.deleteQuestion(q.id);
     showToast("已删除");
     questions.value = questions.value.filter((item) => item.id !== q.id);
+    totalCount.value = Math.max(0, totalCount.value - 1);
     if (selectedQuestion.value?.id === q.id) selectedQuestion.value = null;
   } catch (e) {
     showToast("删除失败: " + e.message);
@@ -208,11 +238,17 @@ async function saveEdit() {
   }
 }
 
-function doSearch() { loadQuestions(); }
+function doSearch() {
+  selectedIds.value.clear();
+  selectAll.value = false;
+  loadQuestions();
+}
 
 function clearSearch() {
   searchQuery.value = "";
   filterStatus.value = "";
+  selectedIds.value.clear();
+  selectAll.value = false;
   loadQuestions();
 }
 
@@ -229,10 +265,31 @@ function statusClass(status) {
   if (status === "approved" || status === "published" || status === "ai_reviewed") return "status-good";
   if (status === "rejected") return "status-bad";
   if (status === "reviewing") return "status-active";
+  if (status === "revision_required") return "status-warn";
   return "";
 }
 
-onMounted(loadQuestions);
+async function selectQuestionById(id) {
+  try {
+    const q = await api.getQuestion(id);
+    if (q) {
+      selectedQuestion.value = q;
+      selectedImages.value = [];
+      startEdit();
+    }
+  } catch (e) {
+    showToast("定位题目失败: " + e.message);
+  }
+}
+
+onMounted(async () => {
+  await loadQuestions();
+  // 支持从审核页「去修改题目」跳转：?edit=<题目ID> 自动定位并进入编辑
+  const editId = new URLSearchParams(window.location.search).get("edit");
+  if (editId) {
+    await selectQuestionById(editId);
+  }
+});
 </script>
 
 <template>
@@ -317,6 +374,14 @@ onMounted(loadQuestions);
           </button>
         </div>
         <div v-if="!questions.length" class="empty">暂无题目</div>
+        <div v-else-if="hasMore" class="load-more">
+          <button class="ghost-button" type="button" @click="loadMore" :disabled="loading">
+            {{ loading ? "加载中..." : `加载更多（已显示 ${questions.length} / ${totalCount}）` }}
+          </button>
+        </div>
+        <div v-else-if="totalCount > questions.length" class="load-more-end">
+          已显示全部 {{ totalCount }} 道题目
+        </div>
       </div>
     </section>
 
@@ -594,6 +659,7 @@ onMounted(loadQuestions);
 .status-good { background: #f0fff8; color: #087c55; }
 .status-bad { background: #fff0f0; color: #c54858; }
 .status-active { background: #eff8ff; color: #0571dc; }
+.status-warn { background: #fdf2e3; color: #c07b22; }
 
 .delete-btn {
   width: 28px; height: 28px;
@@ -731,6 +797,8 @@ onMounted(loadQuestions);
 
 .empty-panel { display: grid; place-items: center; color: #6e7b8f; }
 .empty, .loading { text-align: center; color: #6e7b8f; padding: 30px; }
+.load-more { text-align: center; padding: 16px; }
+.load-more-end { text-align: center; color: #9aa5b4; font-size: 12px; padding: 12px; }
 .edit-actions { margin-left: auto; }
 
 .edit-textarea {

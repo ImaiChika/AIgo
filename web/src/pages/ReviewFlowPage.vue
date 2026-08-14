@@ -5,8 +5,10 @@ import { api } from "../api.js";
 const toast = ref("");
 const flows = ref([]);
 const experts = ref([]);
+const users = ref([]); // 用户账号列表，用于判断专家是否有登录账号
 const loading = ref(false);
 const showCreate = ref(false);
+const editingFlowId = ref(""); // 非空表示编辑模式
 
 const form = ref({
   id: "",
@@ -20,7 +22,7 @@ const form = ref({
 function showToast(msg) {
   toast.value = msg;
   window.clearTimeout(showToast.timer);
-  toast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
+  showToast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
 }
 
 async function loadFlows() {
@@ -44,6 +46,20 @@ async function loadExperts() {
   }
 }
 
+async function loadUsers() {
+  try {
+    const data = await api.listUsers();
+    users.value = data.users || [];
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+// 专家是否有对应登录账号（无账号的专家无法登录系统执行审核）
+function hasAccount(expertId) {
+  return users.value.some((u) => u.id === expertId);
+}
+
 function resetForm() {
   form.value = {
     id: "",
@@ -53,6 +69,7 @@ function resetForm() {
       { round_number: 1, name: "命题教师初审", expert_ids: [], required_count: 1, can_modify: true, pass_condition: "" },
     ],
   };
+  editingFlowId.value = "";
 }
 
 function addRound() {
@@ -91,16 +108,34 @@ function toggleExpert(roundIndex, expertId) {
   }
 }
 
-async function submitFlow() {
+// 回填表单进入编辑模式
+function startEditFlow(flow) {
+  editingFlowId.value = flow.id;
+  form.value = {
+    id: flow.id,
+    name: flow.name,
+    description: flow.description || "",
+    rounds: (flow.rounds || []).map((r) => ({
+      round_number: r.round_number,
+      name: r.name,
+      expert_ids: [...(r.expert_ids || [])],
+      required_count: r.required_count || 1,
+      can_modify: !!r.can_modify,
+      pass_condition: r.pass_condition || "",
+    })),
+  };
+  showCreate.value = true;
+}
+
+function validateForm() {
   if (!form.value.name.trim()) {
     showToast("流程名称不能为空");
-    return;
+    return false;
   }
-  // 校验每轮
   for (const round of form.value.rounds) {
     if (round.expert_ids.length === 0) {
       showToast(`第${round.round_number}轮没有选择审核人`);
-      return;
+      return false;
     }
     if (round.required_count < 1) {
       round.required_count = 1;
@@ -109,6 +144,11 @@ async function submitFlow() {
       round.required_count = round.expert_ids.length;
     }
   }
+  return true;
+}
+
+async function submitFlow() {
+  if (!validateForm()) return;
 
   const flowId = form.value.id || `flow-${Date.now()}`;
   const flow = {
@@ -120,13 +160,18 @@ async function submitFlow() {
   };
 
   try {
-    await api.createFlow(flow);
-    showToast("创建成功");
+    if (editingFlowId.value) {
+      await api.updateFlow(editingFlowId.value, flow);
+      showToast("修改成功");
+    } else {
+      await api.createFlow(flow);
+      showToast("创建成功");
+    }
     showCreate.value = false;
     resetForm();
     loadFlows();
   } catch (e) {
-    showToast("创建失败: " + e.message);
+    showToast(`${editingFlowId.value ? "修改" : "创建"}失败: ` + e.message);
   }
 }
 
@@ -149,6 +194,7 @@ function expertName(id) {
 onMounted(() => {
   loadFlows();
   loadExperts();
+  loadUsers();
 });
 </script>
 
@@ -164,8 +210,11 @@ onMounted(() => {
         </button>
       </div>
 
-      <!-- 创建表单 -->
+      <!-- 创建/编辑表单 -->
       <div v-if="showCreate" class="create-form">
+        <div class="form-heading-row">
+          <h3>{{ editingFlowId ? "编辑流程" : "新建流程" }}</h3>
+        </div>
         <div class="form-row">
           <div class="field">
             <label>流程名称 *</label>
@@ -176,8 +225,8 @@ onMounted(() => {
             <input v-model="form.description" placeholder="可选" />
           </div>
           <div class="field">
-            <label>流程ID（自动生成）</label>
-            <input v-model="form.id" placeholder="留空自动生成" />
+            <label>流程ID（{{ editingFlowId ? "不可修改" : "自动生成" }}）</label>
+            <input v-model="form.id" placeholder="留空自动生成" :disabled="!!editingFlowId" />
           </div>
         </div>
 
@@ -218,13 +267,15 @@ onMounted(() => {
                   :key="e.id"
                   type="button"
                   class="expert-chip"
-                  :class="{ selected: round.expert_ids.includes(e.id) }"
+                  :class="{ selected: round.expert_ids.includes(e.id), 'no-account': !hasAccount(e.id) }"
                   @click="toggleExpert(ri, e.id)"
                 >
                   {{ e.name }} ({{ e.department }})
+                  <span v-if="!hasAccount(e.id)" class="no-account-mark" title="该专家没有登录账号，无法执行审核">无账号</span>
                 </button>
                 <span v-if="!experts.length" class="no-expert">暂无专家，请先在专家库添加</span>
               </div>
+              <p class="expert-hint">提示：标记「无账号」的专家无法登录系统执行审核，请在「用户管理」创建对应专家账号。</p>
             </div>
           </div>
 
@@ -232,7 +283,9 @@ onMounted(() => {
         </div>
 
         <div class="form-actions">
-          <button class="primary-button" type="button" @click="submitFlow">创建流程</button>
+          <button class="primary-button" type="button" @click="submitFlow">
+            {{ editingFlowId ? "保存修改" : "创建流程" }}
+          </button>
           <button class="ghost-button" type="button" @click="showCreate = false; resetForm()">取消</button>
         </div>
       </div>
@@ -246,7 +299,10 @@ onMounted(() => {
               <strong>{{ flow.name }}</strong>
               <span class="flow-id">{{ flow.id }}</span>
             </div>
-            <button class="delete-btn" type="button" @click="deleteFlow(flow)" title="删除">×</button>
+            <div class="flow-actions">
+              <button class="edit-btn" type="button" @click="startEditFlow(flow)" title="编辑">编辑</button>
+              <button class="delete-btn" type="button" @click="deleteFlow(flow)" title="删除">×</button>
+            </div>
           </div>
           <p v-if="flow.description" class="flow-desc">{{ flow.description }}</p>
           <div class="flow-rounds">
@@ -281,6 +337,54 @@ onMounted(() => {
   border: 1px solid #dce8f7;
   border-radius: 8px;
   margin-bottom: 16px;
+}
+
+.form-heading-row h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  color: #172033;
+}
+
+.flow-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.edit-btn {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid #dce8f7;
+  border-radius: 6px;
+  background: #fff;
+  color: #1385f8;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.edit-btn:hover {
+  background: #eff8ff;
+  border-color: #1385f8;
+}
+
+.no-account-mark {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #fff0f0;
+  color: #c54858;
+  font-size: 10px;
+}
+
+.expert-chip.no-account {
+  border-color: #f3c2c2;
+}
+
+.expert-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #9aa5b4;
 }
 
 .form-row {

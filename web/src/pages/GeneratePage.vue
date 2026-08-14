@@ -333,7 +333,7 @@ function selectImage(index) {
 function imageSrc(path) {
   if (!path) return "";
   const filename = path.split("/").pop();
-  return `http://127.0.0.1:8080/images/${filename}`;
+  return `/images/${filename}`;
 }
 
 onMounted(() => {

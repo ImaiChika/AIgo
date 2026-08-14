@@ -461,7 +461,7 @@ func run(ctx context.Context, args []string) error {
 		if err == nil && job.OutputFileID != "" {
 			outputFileID = job.OutputFileID
 			fmt.Printf("任务状态: %s\n", job.Status)
-			if job.Status != "succeeded" {
+			if job.Status != "completed" && job.Status != "complete" {
 				return fmt.Errorf("任务尚未完成，当前状态: %s", job.Status)
 			}
 		} else {

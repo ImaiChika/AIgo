@@ -16,6 +16,9 @@ const selectedFlowId = ref("");
 const selectedImages = ref([]);
 const lightboxImage = ref("");
 const experts = ref([]);
+const questionPage = ref(1);
+const questionTotal = ref(0);
+const questionHasMore = ref(false);
 
 function showToast(msg) {
   toast.value = msg;
@@ -25,11 +28,24 @@ function showToast(msg) {
 
 async function loadQuestions() {
   try {
-    const data = await api.listQuestions();
-    questions.value = data.questions || [];
+    const data = await api.listQuestions(questionPage.value, 200);
+    questions.value = questionPage.value === 1 ? (data.questions || []) : questions.value.concat(data.questions || []);
+    questionTotal.value = data.total || 0;
+    questionHasMore.value = !!data.has_more;
   } catch (e) {
     showToast("加载题目失败: " + e.message);
   }
+}
+
+async function loadMoreQuestions() {
+  questionPage.value += 1;
+  await loadQuestions();
+}
+
+// 跳转到题库页修改题目
+function goEditQuestion() {
+  if (!selectedQuestion.value) return;
+  window.location.href = `/bank?edit=${encodeURIComponent(selectedQuestion.value.id)}`;
 }
 
 async function loadFlows() {
@@ -76,7 +92,7 @@ async function selectQuestion(q) {
 function imageSrc(path) {
   if (!path) return "";
   const filename = path.split("/").pop();
-  return `http://127.0.0.1:8080/images/${filename}`;
+  return `/images/${filename}`;
 }
 
 function openImage(src) {
@@ -97,9 +113,10 @@ async function submitToReview() {
   try {
     const task = await api.submitReview(selectedQuestion.value.id, selectedFlowId.value);
     reviewTask.value = task;
-    // 刷新题目状态
+    // 刷新题目状态和左侧列表
     const q = await api.getQuestion(selectedQuestion.value.id);
     if (q) selectedQuestion.value = q;
+    loadQuestions();
     showToast("已提交到审核流程");
   } catch (e) {
     showToast("提交失败: " + e.message);
@@ -153,6 +170,7 @@ function statusClass(status) {
   if (status === "approved" || status === "published" || status === "ai_reviewed") return "status-good";
   if (status === "rejected") return "status-bad";
   if (status === "reviewing") return "status-active";
+  if (status === "revision_required") return "status-warn";
   return "";
 }
 
@@ -161,9 +179,27 @@ function canSubmit(q) {
   return q && (q.status === "ai_draft" || q.status === "auto_checked" || q.status === "ai_reviewed" || q.status === "revision_required" || q.status === "rejected");
 }
 
-// 判断是否可以执行审核
+// 判断是否可以执行审核（任务进行中 且 当前用户被分配到当前轮 或 是 admin）
 function canReview(task) {
-  return task && (task.status === "reviewing" || task.status === "revision_required");
+  if (!task || (task.status !== "reviewing" && task.status !== "revision_required")) return false;
+  const user = currentUser.value;
+  if (!user) return false;
+  if (user.role === "admin") return true;
+  const assigned = (task.assigned_to || []).includes(user.id);
+  const alreadyReviewed = (task.round_results || []).some(
+    (rr) => rr.round_number === task.current_round && (rr.reviews || []).some((r) => r.expert_id === user.id)
+  );
+  return assigned && !alreadyReviewed;
+}
+
+// 判断是否可以（重新）提交审核
+function canResubmit(task) {
+  if (!task) return false;
+  if (task.status === "rejected" || task.status === "revision_required") return true;
+  // 题目被编辑回退为草稿、旧任务处于终态 → 允许重新提交（后端会创建新任务）
+  const q = selectedQuestion.value;
+  if (q && q.status === "ai_draft" && ["approved", "published", "archived"].includes(task.status)) return true;
+  return false;
 }
 
 async function loadExperts() {
@@ -195,11 +231,11 @@ onMounted(() => {
       <div class="section-heading">
         <span class="dot blue"></span>
         <h2>题目列表</h2>
-        <small>{{ questions.length }} 道</small>
+        <small>{{ questionTotal || questions.length }} 道</small>
       </div>
       <div class="question-list">
         <button
-          v-for="q in questions.slice(0, 50)"
+          v-for="q in questions"
           :key="q.id"
           class="question-item"
           :class="{ active: selectedQuestion?.id === q.id }"
@@ -210,6 +246,9 @@ onMounted(() => {
           <span class="q-status" :class="statusClass(q.status)">{{ statusText(q.status) }}</span>
         </button>
         <div v-if="!questions.length" class="empty">暂无题目，请先生成</div>
+        <button v-else-if="questionHasMore" class="load-more-btn" type="button" @click="loadMoreQuestions">
+          加载更多（已显示 {{ questions.length }} / {{ questionTotal }}）
+        </button>
       </div>
     </section>
 
@@ -237,9 +276,11 @@ onMounted(() => {
         </div>
       </div>
 
-      <div v-if="selectedQuestion.explanation" class="detail-section">
+      <div class="detail-section">
         <h3>解析</h3>
-        <p>{{ selectedQuestion.explanation }}</p>
+        <p v-if="selectedQuestion.explanation && selectedQuestion.explanation.trim().length >= 10">{{ selectedQuestion.explanation }}</p>
+        <p v-else-if="selectedQuestion.explanation" class="warn-text">⚠ 解析内容过短（{{ selectedQuestion.explanation.trim().length }} 字），可能不完整，请重点核查</p>
+        <p v-else class="warn-text">⚠ 此题无解析（解析为可选项，请专家注意评估）</p>
       </div>
 
       <!-- 配图 -->
@@ -256,7 +297,7 @@ onMounted(() => {
       <!-- 审核操作区 -->
       <div class="review-actions">
         <!-- 提交审核 -->
-        <div v-if="canSubmit(selectedQuestion) && !reviewTask" class="submit-section">
+        <div v-if="(canSubmit(selectedQuestion) && !reviewTask) || (reviewTask && canResubmit(reviewTask))" class="submit-section">
           <div class="flow-select">
             <label>审核流程：</label>
             <select v-model="selectedFlowId">
@@ -264,7 +305,7 @@ onMounted(() => {
             </select>
           </div>
           <button class="primary-button" type="button" :disabled="loading" @click="submitToReview">
-            提交到审核流程
+            {{ reviewTask && canResubmit(reviewTask) ? "重新提交审核" : "提交到审核流程" }}
           </button>
         </div>
 
@@ -272,6 +313,18 @@ onMounted(() => {
         <div v-if="reviewTask" class="task-info">
           <h3>审核任务 <span class="task-status" :class="statusClass(reviewTask.status)">{{ statusText(reviewTask.status) }}</span></h3>
           <p>当前轮次：第 {{ reviewTask.current_round }} 轮 | 审核人：{{ (reviewTask.assigned_to || []).map(id => expertName(id)).join(", ") }}</p>
+        </div>
+
+        <!-- 打回提示：需修改 -->
+        <div v-if="reviewTask && reviewTask.status === 'revision_required'" class="task-hint hint-warn">
+          <p>专家要求修改题目。请修改题目内容后点击下方「重新提交审核」，将回到第 {{ reviewTask.current_round }} 轮重新审核。</p>
+          <button class="ghost-button" type="button" @click="goEditQuestion">去修改题目</button>
+        </div>
+
+        <!-- 打回提示：已驳回 -->
+        <div v-else-if="reviewTask && reviewTask.status === 'rejected'" class="task-hint hint-bad">
+          <p>题目已被驳回。修改后可点击下方「重新提交审核」，将从头开始完整审核流程。</p>
+          <button class="ghost-button" type="button" @click="goEditQuestion">去修改题目</button>
         </div>
 
         <!-- 审核表单 -->
@@ -289,8 +342,13 @@ onMounted(() => {
           </div>
         </div>
 
+        <!-- 任务进行中但当前用户不是本轮审核人 -->
+        <div v-else-if="reviewTask && (reviewTask.status === 'reviewing' || reviewTask.status === 'revision_required')" class="task-done">
+          <p>等待本轮审核人审核</p>
+        </div>
+
         <!-- 已完成审核 -->
-        <div v-if="reviewTask && !canReview(reviewTask)" class="task-done">
+        <div v-else-if="reviewTask" class="task-done">
           <p>审核已结束，最终状态：{{ statusText(reviewTask.status) }}</p>
         </div>
 
@@ -299,7 +357,7 @@ onMounted(() => {
           <h3>审核记录</h3>
           <div v-for="rec in reviewRecords" :key="rec.id" class="record-item">
             <span class="record-round">第{{ rec.round_number }}轮</span>
-            <span class="record-expert">{{ rec.expert_id }}</span>
+            <span class="record-expert">{{ expertName(rec.expert_id) }}</span>
             <span class="record-conclusion" :class="statusClass(rec.review_status)">
               {{ statusText(rec.review_status) }}
             </span>
@@ -383,6 +441,27 @@ onMounted(() => {
 .status-good { background: #f0fff8; color: #087c55; }
 .status-bad { background: #fff0f0; color: #c54858; }
 .status-active { background: #eff8ff; color: #0571dc; }
+.status-warn { background: #fdf2e3; color: #c07b22; }
+
+.task-hint {
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 10px 0;
+  font-size: 13px;
+  line-height: 1.6;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.task-hint p {
+  margin: 0;
+  flex: 1;
+}
+
+.hint-warn { background: #fdf2e3; border: 1px solid #f3d9b0; color: #9a6213; }
+.hint-bad { background: #fff0f0; border: 1px solid #f3c2c2; color: #a13535; }
 
 .detail-section {
   margin-bottom: 16px;
@@ -399,6 +478,14 @@ onMounted(() => {
   line-height: 1.7;
   margin: 0;
   color: #172033;
+}
+
+.detail-section p.warn-text {
+  color: #c07b22;
+  background: #fdf2e3;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
 }
 
 .option-item {
@@ -561,6 +648,22 @@ onMounted(() => {
   text-align: center;
   color: #6e7b8f;
   padding: 30px;
+}
+
+.load-more-btn {
+  width: 100%;
+  padding: 10px;
+  border: 1px dashed #dce8f7;
+  border-radius: 6px;
+  background: #f8fbff;
+  color: #1385f8;
+  font-size: 13px;
+  cursor: pointer;
+  margin-top: 8px;
+}
+
+.load-more-btn:hover {
+  background: #eff8ff;
 }
 
 .image-grid {

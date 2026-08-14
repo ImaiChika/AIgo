@@ -53,8 +53,16 @@ func (s *Service) Generate(ctx context.Context, req domain.GenerationRequest) ([
 	// 转换为领域对象，自动从知识点填充元数据
 	var questions []domain.A2Question
 	for _, item := range items {
+		// 无大纲代码时用知识点主题做 ID 前缀，避免出现 "q--xxx" 空段
+		idPrefix := SanitizeIDPrefix(kp.OutlineCode)
+		if idPrefix == "" {
+			idPrefix = SanitizeIDPrefix(kp.Topic)
+		}
+		if idPrefix == "" {
+			idPrefix = "custom"
+		}
 		q := domain.A2Question{
-			ID:              fmt.Sprintf("q-%s-%d", kp.OutlineCode, time.Now().UnixNano()),
+			ID:              fmt.Sprintf("q-%s-%d", idPrefix, time.Now().UnixNano()),
 			OutlineCode:     kp.OutlineCode,  // 大纲代码
 			Profession:      kp.Subject,       // 专业
 			System:          kp.Category,      // 系统（基础医学/临床综合）
@@ -105,4 +113,27 @@ func (s *Service) Generate(ctx context.Context, req domain.GenerationRequest) ([
 		questions = append(questions, q)
 	}
 	return questions, nil
+}
+
+// SanitizeIDPrefix 清理 ID 前缀中的非安全字符（用于 URL 路径和显示）。
+// 保留中文、字母、数字，其他字符替换为短横线。
+func SanitizeIDPrefix(s string) string {
+	var b []rune
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			b = append(b, r)
+		case r >= 'a' && r <= 'z':
+			b = append(b, r)
+		case r >= 'A' && r <= 'Z':
+			b = append(b, r)
+		case r == '.' || r == '-':
+			b = append(b, r)
+		case r >= 0x4e00 && r <= 0x9fff: // CJK 统一汉字
+			b = append(b, r)
+		default:
+			b = append(b, '-')
+		}
+	}
+	return string(b)
 }

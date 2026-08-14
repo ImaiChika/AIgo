@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,21 +62,11 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		Count:           req.Count,
 	}
 
-	// 调用 pipeline 生成题目（内部会调千问API + 解析JSON + 存入数据库）
+	// 调用 pipeline 生成题目（内部会调千问API + 解析JSON + 存入数据库，状态为 ai_draft 草稿）
 	questions, err := s.pipe.Generate(r.Context(), genReq)
 	if err != nil {
 		writeError(w, 500, "生成失败: "+err.Error())
 		return
-	}
-
-	// 将生成的题目状态改为 auto_checked（直接入库，无需再次确认）
-	for i := range questions {
-		questions[i].Status = domain.StatusAutoChecked
-		questions[i].UpdatedAt = time.Now()
-		if err := s.questionStore.SaveQuestion(r.Context(), questions[i]); err != nil {
-			writeError(w, 500, "保存题目失败: "+err.Error())
-			return
-		}
 	}
 
 	// 记录日志
@@ -93,17 +84,15 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleListQuestions 列出所有题目。
+// handleListQuestions 列出所有题目（支持分页）。
+// 查询参数：page=页码（默认1），page_size=每页数量（默认100，最大500）。
 func (s *Server) handleListQuestions(w http.ResponseWriter, r *http.Request) {
 	questions, err := s.questionStore.ListQuestions(r.Context())
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{
-		"questions": questions,
-		"total":     len(questions),
-	})
+	writePagedQuestions(w, questions, r)
 }
 
 // handleGetQuestion 根据 ID 获取单道题目详情。
@@ -217,8 +206,8 @@ func (s *Server) handlePublishQuestion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, q)
 }
 
-// handleSearchQuestions 搜索题目。
-// 查询参数：q=关键词（匹配题干和答案），status=状态筛选。
+// handleSearchQuestions 搜索题目（支持分页）。
+// 查询参数：q=关键词（匹配题干和答案），status=状态筛选，page=页码，page_size=每页数量。
 func (s *Server) handleSearchQuestions(w http.ResponseWriter, r *http.Request) {
 	keyword := r.URL.Query().Get("q")
 	status := r.URL.Query().Get("status")
@@ -250,5 +239,36 @@ func (s *Server) handleSearchQuestions(w http.ResponseWriter, r *http.Request) {
 		filtered = append(filtered, q)
 	}
 
-	writeJSON(w, 200, map[string]any{"questions": filtered, "total": len(filtered)})
+	writePagedQuestions(w, filtered, r)
+}
+
+// writePagedQuestions 对题目列表做分页并输出统一 JSON 结构。
+// 支持 page（默认1）和 page_size（默认100，最大500）参数。
+func writePagedQuestions(w http.ResponseWriter, questions []domain.A2Question, r *http.Request) {
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 500 {
+		pageSize = 100
+	}
+
+	total := len(questions)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+
+	writeJSON(w, 200, map[string]any{
+		"questions": questions[start:end],
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
+		"has_more":  end < total,
+	})
 }

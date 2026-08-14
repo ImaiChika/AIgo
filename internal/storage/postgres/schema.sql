@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS review_flows (
 -- 审核任务
 CREATE TABLE IF NOT EXISTS review_tasks (
     id TEXT PRIMARY KEY,
-    question_id TEXT NOT NULL REFERENCES questions(id),
+    question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
     flow_id TEXT NOT NULL REFERENCES review_flows(id),
     current_round INT NOT NULL DEFAULT 1,
     status TEXT NOT NULL DEFAULT 'reviewing',
@@ -75,8 +75,8 @@ CREATE TABLE IF NOT EXISTS review_tasks (
 -- 审核记录
 CREATE TABLE IF NOT EXISTS review_records (
     id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL REFERENCES review_tasks(id),
-    question_id TEXT NOT NULL REFERENCES questions(id),
+    task_id TEXT NOT NULL REFERENCES review_tasks(id) ON DELETE CASCADE,
+    question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
     round_number INT NOT NULL,
     expert_id TEXT NOT NULL,
     conclusion TEXT NOT NULL,
@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 -- 图片提示词
 CREATE TABLE IF NOT EXISTS image_prompts (
     id TEXT PRIMARY KEY,
-    question_id TEXT NOT NULL REFERENCES questions(id),
+    question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
     purpose TEXT NOT NULL DEFAULT '',
     image_type TEXT NOT NULL DEFAULT '',
     subject TEXT NOT NULL DEFAULT '',
@@ -112,8 +112,8 @@ CREATE TABLE IF NOT EXISTS image_prompts (
 -- 候选图
 CREATE TABLE IF NOT EXISTS generated_images (
     id TEXT PRIMARY KEY,
-    prompt_id TEXT NOT NULL REFERENCES image_prompts(id),
-    question_id TEXT NOT NULL REFERENCES questions(id),
+    prompt_id TEXT NOT NULL REFERENCES image_prompts(id) ON DELETE CASCADE,
+    question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
     image_path TEXT NOT NULL DEFAULT '',
     model_name TEXT NOT NULL DEFAULT '',
     model_version TEXT NOT NULL DEFAULT '',
@@ -125,7 +125,7 @@ CREATE TABLE IF NOT EXISTS generated_images (
 -- 图片审核记录
 CREATE TABLE IF NOT EXISTS image_review_records (
     id TEXT PRIMARY KEY,
-    image_id TEXT NOT NULL REFERENCES generated_images(id),
+    image_id TEXT NOT NULL REFERENCES generated_images(id) ON DELETE CASCADE,
     expert_id TEXT NOT NULL,
     conclusion TEXT NOT NULL,
     opinion TEXT NOT NULL DEFAULT '',
@@ -162,6 +162,7 @@ CREATE TABLE IF NOT EXISTS batch_jobs (
 CREATE TABLE IF NOT EXISTS ai_review_results (
     id TEXT PRIMARY KEY,
     question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+    question_version INT NOT NULL DEFAULT 0,     -- 检查时的题目版本号，用于判断结果是否过期
     verdict TEXT NOT NULL DEFAULT 'pass',       -- pass / issues_found / reject
     scores JSONB NOT NULL DEFAULT '{}',         -- 各维度分数
     issues JSONB NOT NULL DEFAULT '[]',         -- 问题列表

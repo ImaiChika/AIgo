@@ -60,6 +60,32 @@ func (s *Service) LogPublish(ctx context.Context, questionID, actor string) erro
 	return s.Log(ctx, questionID, "publish", actor, "发布到正式题库")
 }
 
+// LogSubmit 记录提交/重新提交审核。
+func (s *Service) LogSubmit(ctx context.Context, questionID, flowID, actor string, resubmit bool) error {
+	action := "submit"
+	detail := "提交审核"
+	if resubmit {
+		action = "resubmit"
+		detail = "重新提交审核"
+	}
+	return s.Log(ctx, questionID, action, actor, fmt.Sprintf("%s, 流程: %s", detail, flowID))
+}
+
+// LogFlow 记录审核流程配置变更。
+func (s *Service) LogFlow(ctx context.Context, flowID, actor, action, detail string) error {
+	return s.Log(ctx, "", "flow_"+action, actor, fmt.Sprintf("流程 %s: %s", flowID, detail))
+}
+
+// LogExpert 记录专家库变更。
+func (s *Service) LogExpert(ctx context.Context, expertID, actor, action, detail string) error {
+	return s.Log(ctx, "", "expert_"+action, actor, fmt.Sprintf("专家 %s: %s", expertID, detail))
+}
+
+// LogUser 记录用户管理变更。
+func (s *Service) LogUser(ctx context.Context, username, actor, action string) error {
+	return s.Log(ctx, "", "user_"+action, actor, fmt.Sprintf("用户 %s", username))
+}
+
 // LogImport 记录批量导入。
 func (s *Service) LogImport(ctx context.Context, actor string, count int) error {
 	return s.Log(ctx, "", "import", actor, fmt.Sprintf("批量导入 %d 道题目", count))

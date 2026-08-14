@@ -40,6 +40,7 @@ type ReviewStore interface {
 	GetTaskByQuestionID(ctx context.Context, questionID string) (*domain.ReviewTask, error)
 	UpdateTask(ctx context.Context, task domain.ReviewTask) error
 	CountActiveTasksByFlow(ctx context.Context, flowID string) (int, error) // 统计某流程的进行中任务数
+	CountTasksByFlow(ctx context.Context, flowID string) (int, error)       // 统计某流程的全部任务数（含历史）
 
 	SaveRecord(ctx context.Context, record domain.ReviewRecord) error
 	ListRecordsByTaskID(ctx context.Context, taskID string) ([]domain.ReviewRecord, error)

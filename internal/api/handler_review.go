@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 
 	"aigo/internal/auth"
@@ -26,6 +27,18 @@ func (s *Server) handleSubmitReview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "提交审核失败: "+err.Error())
 		return
 	}
+
+	// 记录提交/重提日志：通过历史审核记录判断是否为重提
+	records, _ := s.reviewSvc.ListRecords(r.Context(), task.ID)
+	isResubmit := len(records) > 0
+	actor := auth.GetUsername(r.Context())
+	if actor == "" {
+		actor = auth.GetUserID(r.Context())
+	}
+	if err := s.auditSvc.LogSubmit(r.Context(), req.QuestionID, req.FlowID, actor, isResubmit); err != nil {
+		fmt.Printf("⚠ 写提交日志失败: %v\n", err)
+	}
+
 	writeJSON(w, 200, task)
 }
 
@@ -128,7 +141,30 @@ func (s *Server) handleCreateFlow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err.Error())
 		return
 	}
+	actor := auth.GetUsername(r.Context())
+	if err := s.auditSvc.LogFlow(r.Context(), flow.ID, actor, "create", fmt.Sprintf("创建流程「%s」（%d 轮）", flow.Name, len(flow.Rounds))); err != nil {
+		fmt.Printf("⚠ 写流程日志失败: %v\n", err)
+	}
 	writeJSON(w, 201, flow)
+}
+
+// handleUpdateFlow 更新审核流程（有进行中任务时禁止修改）。
+func (s *Server) handleUpdateFlow(w http.ResponseWriter, r *http.Request) {
+	var flow domain.ReviewFlowConfig
+	if err := readJSON(r, &flow); err != nil {
+		writeError(w, 400, "请求格式错误: "+err.Error())
+		return
+	}
+	flow.ID = r.PathValue("id")
+	if err := s.reviewSvc.UpdateFlow(r.Context(), flow); err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	actor := auth.GetUsername(r.Context())
+	if err := s.auditSvc.LogFlow(r.Context(), flow.ID, actor, "update", fmt.Sprintf("修改流程「%s」（%d 轮）", flow.Name, len(flow.Rounds))); err != nil {
+		fmt.Printf("⚠ 写流程日志失败: %v\n", err)
+	}
+	writeJSON(w, 200, flow)
 }
 
 // handleDeleteFlow 删除审核流程。
@@ -137,6 +173,10 @@ func (s *Server) handleDeleteFlow(w http.ResponseWriter, r *http.Request) {
 	if err := s.reviewSvc.DeleteFlow(r.Context(), id); err != nil {
 		writeError(w, 500, err.Error())
 		return
+	}
+	actor := auth.GetUsername(r.Context())
+	if err := s.auditSvc.LogFlow(r.Context(), id, actor, "delete", "删除流程"); err != nil {
+		fmt.Printf("⚠ 写流程日志失败: %v\n", err)
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok", "id": id})
 }

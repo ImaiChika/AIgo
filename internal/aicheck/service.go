@@ -60,6 +60,8 @@ func (s *Service) CheckQuestion(ctx context.Context, questionID string) (*domain
 	if err != nil {
 		return nil, fmt.Errorf("解析检查结果失败: %w", err)
 	}
+	// 记录检查时的题目版本号，用于判断结果是否过期
+	result.QuestionVersion = q.Version
 
 	// 4. 持久化结果
 	if err := s.aiReviewStore.SaveReviewResult(ctx, *result); err != nil {
@@ -67,11 +69,18 @@ func (s *Service) CheckQuestion(ctx context.Context, questionID string) (*domain
 	}
 
 	// 5. 根据检查结果更新题目状态
+	// 注意：只能推进草稿态（ai_draft/auto_checked），不能回退人工审核后的状态
+	// （reviewing/approved/published 等状态由人工审核流程管理，AI 检查无权改动）
 	if result.Verdict == "pass" {
-		q.Status = domain.StatusAIReviewed
-		q.UpdatedAt = time.Now()
-		if err := s.questionStore.SaveQuestion(ctx, *q); err != nil {
-			fmt.Printf("⚠ 更新题目状态失败: %v\n", err)
+		switch q.Status {
+		case domain.StatusAIDraft, domain.StatusAutoChecked, domain.StatusAIReviewed:
+			q.Status = domain.StatusAIReviewed
+			q.UpdatedAt = time.Now()
+			if err := s.questionStore.SaveQuestion(ctx, *q); err != nil {
+				fmt.Printf("⚠ 更新题目状态失败: %v\n", err)
+			}
+		default:
+			// 已进入人工审核或更后状态，不修改题目状态，只保存检查结果
 		}
 	}
 

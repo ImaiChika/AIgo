@@ -7,6 +7,24 @@ const logs = ref([]);
 const loading = ref(false);
 const filterType = ref("all");
 const filterValue = ref("");
+const users = ref([]); // 用于把 actor 的 user ID 映射为可读用户名
+
+// actor 显示名：user ID → 昵称/用户名
+function actorName(actor) {
+  if (!actor) return "-";
+  const u = users.value.find((x) => x.id === actor);
+  if (u) return `${u.display_name || u.username} (${u.username})`;
+  return actor;
+}
+
+async function loadUsers() {
+  try {
+    const data = await api.listUsers();
+    users.value = data.users || [];
+  } catch (e) {
+    console.error(e);
+  }
+}
 
 function showToast(msg) {
   toast.value = msg;
@@ -51,16 +69,26 @@ function actionText(action) {
     review: "审核",
     publish: "发布",
     import: "导入",
+    submit: "提交审核",
+    resubmit: "重新提交",
+    flow_create: "建流程",
+    flow_update: "改流程",
+    flow_delete: "删流程",
+    expert_create: "建专家",
+    expert_update: "改专家",
+    expert_delete: "删专家",
+    user_create: "建账号",
   };
   return map[action] || action;
 }
 
 function actionClass(action) {
-  if (action === "create" || action === "import") return "action-create";
-  if (action === "update") return "action-update";
-  if (action === "delete") return "action-delete";
-  if (action === "review") return "action-review";
+  if (action === "create" || action === "import" || action === "expert_create" || action === "user_create") return "action-create";
+  if (action === "update" || action === "flow_update" || action === "expert_update") return "action-update";
+  if (action === "delete" || action === "flow_delete" || action === "expert_delete") return "action-delete";
+  if (action === "review" || action === "submit" || action === "resubmit") return "action-review";
   if (action === "publish") return "action-publish";
+  if (action === "flow_create") return "action-flow";
   return "";
 }
 
@@ -70,7 +98,10 @@ function formatTime(t) {
   return d.toLocaleString("zh-CN");
 }
 
-onMounted(loadLogs);
+onMounted(() => {
+  loadLogs();
+  loadUsers();
+});
 </script>
 
 <template>
@@ -116,7 +147,7 @@ onMounted(loadLogs);
             <td>
               <span class="action-tag" :class="actionClass(log.action)">{{ actionText(log.action) }}</span>
             </td>
-            <td class="actor-cell">{{ log.actor }}</td>
+            <td class="actor-cell">{{ actorName(log.actor) }}</td>
             <td class="id-cell">{{ log.question_id || "-" }}</td>
             <td class="detail-cell">{{ log.detail }}</td>
           </tr>
@@ -227,6 +258,7 @@ onMounted(loadLogs);
 .action-delete { background: #fff0f0; color: #c54858; }
 .action-review { background: #fff3e2; color: #dd8a00; }
 .action-publish { background: #e9f8ef; color: #199e63; }
+.action-flow { background: #f3efff; color: #7a5ae0; }
 
 .empty {
   text-align: center;

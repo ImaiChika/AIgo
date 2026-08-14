@@ -10,6 +10,9 @@ const checking = ref(false);
 const filterStatus = ref("");
 const searchQuery = ref("");
 const selectedQuestion = ref(null);
+const questionPage = ref(1);
+const questionTotal = ref(0);
+const questionHasMore = ref(false);
 
 function showToast(msg) {
   toast.value = msg;
@@ -17,21 +20,29 @@ function showToast(msg) {
   showToast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
 }
 
-// 加载题目列表
+// 加载题目列表（分页追加）
 async function loadQuestions() {
   try {
-    const data = await api.listQuestions();
-    questions.value = data.questions || data || [];
+    const data = await api.listQuestions(questionPage.value, 200);
+    const list = data.questions || data || [];
+    questions.value = questionPage.value === 1 ? list : questions.value.concat(list);
+    questionTotal.value = data.total || 0;
+    questionHasMore.value = !!data.has_more;
   } catch (e) {
     console.error(e);
     showToast("加载题目失败: " + e.message);
   }
 }
 
+async function loadMoreQuestions() {
+  questionPage.value += 1;
+  await loadQuestions();
+}
+
 // 加载已有检查结果
 async function loadResults() {
   try {
-    const data = await api.aiCheckResults();
+    const data = await api.aiCheckResults(1000);
     const map = {};
     for (const r of data.results || []) {
       map[r.question_id] = r;
@@ -121,6 +132,13 @@ function getResult(questionId) {
   return results.value[questionId] || null;
 }
 
+// 检查结果是否过期（题目在检查后被修改过）
+function isResultStale(q) {
+  const r = getResult(q.id);
+  if (!r) return false;
+  return (q.version || 0) > (r.question_version || 0);
+}
+
 // 状态文本
 function statusText(status) {
   const map = {
@@ -146,7 +164,7 @@ function statusClass(status) {
 
 // Verdict 文本
 function verdictText(verdict) {
-  const map = { pass: "通过", issues_found: "有问题", reject: "驳回" };
+  const map = { pass: "通过", issues_found: "有问题", reject: "驳回", error: "检查失败" };
   return map[verdict] || verdict;
 }
 
@@ -230,10 +248,17 @@ onMounted(() => {
                   <span v-if="getResult(q.id)" class="verdict-tag" :class="verdictClass(getResult(q.id).verdict)">
                     {{ verdictText(getResult(q.id).verdict) }}
                   </span>
+                  <span v-else class="verdict-tag verdict-none">未检查</span>
+                  <span v-if="getResult(q.id) && isResultStale(q)" class="verdict-tag verdict-stale" title="题目内容已修改，检查结果可能过期">
+                    内容已修改
+                  </span>
                 </div>
               </div>
             </div>
           </div>
+          <button v-if="questionHasMore" class="load-more-btn" type="button" @click="loadMoreQuestions">
+            加载更多（已显示 {{ questions.length }} / {{ questionTotal }}）
+          </button>
         </div>
       </section>
 
@@ -497,6 +522,24 @@ onMounted(() => {
 .verdict-pass { background: #f0fff8; color: #087c55; }
 .verdict-issues { background: #fff8f0; color: #d4a017; }
 .verdict-reject { background: #fff0f0; color: #c54858; }
+.verdict-none { background: #f3f6fb; color: #9aa5b4; }
+.verdict-stale { background: #fdf2e3; color: #c07b22; }
+
+.load-more-btn {
+  width: 100%;
+  padding: 10px;
+  border: 1px dashed #dce8f7;
+  border-radius: 6px;
+  background: #f8fbff;
+  color: #1385f8;
+  font-size: 13px;
+  cursor: pointer;
+  margin-top: 8px;
+}
+
+.load-more-btn:hover {
+  background: #eff8ff;
+}
 
 .empty-state {
   display: flex;

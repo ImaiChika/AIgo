@@ -238,6 +238,18 @@ func (s *MemoryReviewStore) CountActiveTasksByFlow(_ context.Context, flowID str
 	return count, nil
 }
 
+func (s *MemoryReviewStore) CountTasksByFlow(_ context.Context, flowID string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := 0
+	for _, t := range s.tasks {
+		if t.FlowID == flowID {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func (s *MemoryReviewStore) SaveRecord(_ context.Context, r domain.ReviewRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

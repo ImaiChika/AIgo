@@ -35,9 +35,60 @@ func New(dsn string) (*Store, error) {
 }
 
 // InitSchema 初始化数据库表结构。
+// 先执行建表语句（CREATE TABLE IF NOT EXISTS），再执行幂等迁移，
+// 保证已有部署的旧库也能补充新增列和约束。
 func (s *Store) InitSchema(schemaSQL string) error {
-	_, err := s.db.Exec(schemaSQL)
-	return err
+	if _, err := s.db.Exec(schemaSQL); err != nil {
+		return err
+	}
+	return s.runMigrations()
+}
+
+// runMigrations 幂等迁移：对已存在的旧表补充新增列/约束。
+// 每条迁移都必须可重复执行（IF NOT EXISTS / IF EXISTS 判断）。
+func (s *Store) runMigrations() error {
+	migrations := []string{
+		// ai_review_results 增加 question_version 列（AI 检查结果版本绑定）
+		`ALTER TABLE ai_review_results ADD COLUMN IF NOT EXISTS question_version INT NOT NULL DEFAULT 0`,
+		// 删除题目时级联清理关联数据
+		`DO $$ BEGIN
+			ALTER TABLE review_tasks DROP CONSTRAINT IF EXISTS review_tasks_question_id_fkey;
+			ALTER TABLE review_tasks ADD CONSTRAINT review_tasks_question_id_fkey
+				FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE review_records DROP CONSTRAINT IF EXISTS review_records_task_id_fkey;
+			ALTER TABLE review_records ADD CONSTRAINT review_records_task_id_fkey
+				FOREIGN KEY (task_id) REFERENCES review_tasks(id) ON DELETE CASCADE;
+			ALTER TABLE review_records DROP CONSTRAINT IF EXISTS review_records_question_id_fkey;
+			ALTER TABLE review_records ADD CONSTRAINT review_records_question_id_fkey
+				FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE image_prompts DROP CONSTRAINT IF EXISTS image_prompts_question_id_fkey;
+			ALTER TABLE image_prompts ADD CONSTRAINT image_prompts_question_id_fkey
+				FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE generated_images DROP CONSTRAINT IF EXISTS generated_images_prompt_id_fkey;
+			ALTER TABLE generated_images ADD CONSTRAINT generated_images_prompt_id_fkey
+				FOREIGN KEY (prompt_id) REFERENCES image_prompts(id) ON DELETE CASCADE;
+			ALTER TABLE generated_images DROP CONSTRAINT IF EXISTS generated_images_question_id_fkey;
+			ALTER TABLE generated_images ADD CONSTRAINT generated_images_question_id_fkey
+				FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE;
+		END $$`,
+		`DO $$ BEGIN
+			ALTER TABLE image_review_records DROP CONSTRAINT IF EXISTS image_review_records_image_id_fkey;
+			ALTER TABLE image_review_records ADD CONSTRAINT image_review_records_image_id_fkey
+				FOREIGN KEY (image_id) REFERENCES generated_images(id) ON DELETE CASCADE;
+		END $$`,
+	}
+	for _, m := range migrations {
+		if _, err := s.db.Exec(m); err != nil {
+			return fmt.Errorf("数据库迁移失败: %w\nSQL: %s", err, m)
+		}
+	}
+	return nil
 }
 
 // Close 关闭数据库连接。
@@ -350,6 +401,14 @@ func (s *Store) CountActiveTasksByFlow(ctx context.Context, flowID string) (int,
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM review_tasks WHERE flow_id=$1 AND status IN ('reviewing', 'revision_required')
+	`, flowID).Scan(&count)
+	return count, err
+}
+
+func (s *Store) CountTasksByFlow(ctx context.Context, flowID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM review_tasks WHERE flow_id=$1
 	`, flowID).Scan(&count)
 	return count, err
 }
@@ -803,21 +862,21 @@ func (s *Store) SaveReviewResult(ctx context.Context, result domain.AIReviewResu
 	scoresJSON, _ := json.Marshal(result.Scores)
 	issuesJSON, _ := json.Marshal(result.Issues)
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO ai_review_results (id, question_id, verdict, scores, issues, suggestion, model, raw_response, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
-	`, result.ID, result.QuestionID, result.Verdict, string(scoresJSON), string(issuesJSON),
+		INSERT INTO ai_review_results (id, question_id, question_version, verdict, scores, issues, suggestion, model, raw_response, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+	`, result.ID, result.QuestionID, result.QuestionVersion, result.Verdict, string(scoresJSON), string(issuesJSON),
 		result.Suggestion, result.Model, result.RawResponse)
 	return err
 }
 
 func (s *Store) GetLatestByQuestionID(ctx context.Context, questionID string) (*domain.AIReviewResult, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, question_id, verdict, scores, issues, suggestion, model, raw_response, created_at
+		SELECT id, question_id, question_version, verdict, scores, issues, suggestion, model, raw_response, created_at
 		FROM ai_review_results WHERE question_id=$1 ORDER BY created_at DESC LIMIT 1
 	`, questionID)
 	var r domain.AIReviewResult
 	var scoresJSON, issuesJSON string
-	err := row.Scan(&r.ID, &r.QuestionID, &r.Verdict, &scoresJSON, &issuesJSON,
+	err := row.Scan(&r.ID, &r.QuestionID, &r.QuestionVersion, &r.Verdict, &scoresJSON, &issuesJSON,
 		&r.Suggestion, &r.Model, &r.RawResponse, &r.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -834,7 +893,7 @@ func (s *Store) ListByQuestionIDs(ctx context.Context, questionIDs []string) ([]
 	if len(questionIDs) == 0 {
 		return nil, nil
 	}
-	query := `SELECT DISTINCT ON (question_id) id, question_id, verdict, scores, issues, suggestion, model, raw_response, created_at
+	query := `SELECT DISTINCT ON (question_id) id, question_id, question_version, verdict, scores, issues, suggestion, model, raw_response, created_at
 		FROM ai_review_results WHERE question_id = ANY($1) ORDER BY question_id, created_at DESC`
 	rows, err := s.db.QueryContext(ctx, query, pq.Array(questionIDs))
 	if err != nil {
@@ -845,7 +904,7 @@ func (s *Store) ListByQuestionIDs(ctx context.Context, questionIDs []string) ([]
 	for rows.Next() {
 		var r domain.AIReviewResult
 		var scoresJSON, issuesJSON string
-		if err := rows.Scan(&r.ID, &r.QuestionID, &r.Verdict, &scoresJSON, &issuesJSON,
+		if err := rows.Scan(&r.ID, &r.QuestionID, &r.QuestionVersion, &r.Verdict, &scoresJSON, &issuesJSON,
 			&r.Suggestion, &r.Model, &r.RawResponse, &r.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -861,7 +920,7 @@ func (s *Store) ListAll(ctx context.Context, limit int) ([]domain.AIReviewResult
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, question_id, verdict, scores, issues, suggestion, model, raw_response, created_at
+		SELECT id, question_id, question_version, verdict, scores, issues, suggestion, model, raw_response, created_at
 		FROM ai_review_results ORDER BY created_at DESC LIMIT $1
 	`, limit)
 	if err != nil {
@@ -872,7 +931,7 @@ func (s *Store) ListAll(ctx context.Context, limit int) ([]domain.AIReviewResult
 	for rows.Next() {
 		var r domain.AIReviewResult
 		var scoresJSON, issuesJSON string
-		if err := rows.Scan(&r.ID, &r.QuestionID, &r.Verdict, &scoresJSON, &issuesJSON,
+		if err := rows.Scan(&r.ID, &r.QuestionID, &r.QuestionVersion, &r.Verdict, &scoresJSON, &issuesJSON,
 			&r.Suggestion, &r.Model, &r.RawResponse, &r.CreatedAt); err != nil {
 			return nil, err
 		}

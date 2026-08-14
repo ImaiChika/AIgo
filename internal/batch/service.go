@@ -422,7 +422,11 @@ func (s *Service) uploadFile(ctx context.Context, filePath string) (string, erro
 
 	url := fmt.Sprintf("%s/files", s.baseURL)
 	fmt.Printf("  上传URL: %s\n", url)
-	fmt.Printf("  API Key: %s...%s\n", s.apiKey[:10], s.apiKey[len(s.apiKey)-4:])
+	if len(s.apiKey) >= 10 {
+		fmt.Printf("  API Key: %s...%s\n", s.apiKey[:6], s.apiKey[len(s.apiKey)-4:])
+	} else {
+		fmt.Printf("  API Key: （未配置或长度异常）\n")
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, &buf)
 	if err != nil {
@@ -599,13 +603,20 @@ func getSystemPrompt() string {
 
 // buildQuestion 从 map 构建 A2Question。
 func buildQuestion(item map[string]interface{}, kp domain.KnowledgePoint) domain.A2Question {
+	idPrefix := generator.SanitizeIDPrefix(kp.OutlineCode)
+	if idPrefix == "" {
+		idPrefix = generator.SanitizeIDPrefix(kp.Topic)
+	}
+	if idPrefix == "" {
+		idPrefix = "custom"
+	}
 	q := domain.A2Question{
-		ID:              fmt.Sprintf("q-%s-%d", kp.OutlineCode, time.Now().UnixNano()),
+		ID:              fmt.Sprintf("q-%s-%d", idPrefix, time.Now().UnixNano()),
 		OutlineCode:     kp.OutlineCode,
 		Profession:      kp.Subject,
 		System:          kp.Category,
 		KnowledgePoints: []domain.KnowledgePoint{kp},
-		Status:          domain.StatusAutoChecked,
+		Status:          domain.StatusAIDraft,
 		Version:         1,
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),

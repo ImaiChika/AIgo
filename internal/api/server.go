@@ -137,6 +137,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/review/records/{taskId}", s.requireAuth("review:view", s.handleReviewRecords))
 	mux.HandleFunc("GET /api/review/flows", s.requireAuth("review:view", s.handleListFlows))
 	mux.HandleFunc("POST /api/review/flows", s.requireAuth("expert:create", s.handleCreateFlow))
+	mux.HandleFunc("PUT /api/review/flows/{id}", s.requireAuth("expert:create", s.handleUpdateFlow))
 	mux.HandleFunc("DELETE /api/review/flows/{id}", s.requireAuth("expert:create", s.handleDeleteFlow))
 
 	// 包装中间件：CORS 跨域 + JSON Content-Type

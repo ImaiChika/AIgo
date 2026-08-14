@@ -66,20 +66,84 @@ func (s *Service) CreateFlow(ctx context.Context, flow domain.ReviewFlowConfig) 
 	if flow.ID == "" {
 		return fmt.Errorf("流程ID不能为空")
 	}
+	// 重复 ID 拒绝（防止静默覆盖已有流程）
+	if existing, _ := s.reviewStore.GetFlowConfig(ctx, flow.ID); existing != nil {
+		return fmt.Errorf("流程 ID %s 已存在，请更换 ID", flow.ID)
+	}
+	if err := s.validateFlow(ctx, flow); err != nil {
+		return err
+	}
+	flow.CreatedAt = time.Now()
+	return s.reviewStore.SaveFlowConfig(ctx, flow)
+}
+
+// UpdateFlow 更新审核流程配置。有进行中的任务引用该流程时禁止修改。
+func (s *Service) UpdateFlow(ctx context.Context, flow domain.ReviewFlowConfig) error {
+	existing, _ := s.reviewStore.GetFlowConfig(ctx, flow.ID)
+	if existing == nil {
+		return fmt.Errorf("流程 %s 不存在", flow.ID)
+	}
+	// 进行中的任务引用该流程时禁止修改，防止轮次变化破坏审核任务
+	activeCount, err := s.reviewStore.CountActiveTasksByFlow(ctx, flow.ID)
+	if err != nil {
+		return fmt.Errorf("检查流程引用失败: %w", err)
+	}
+	if activeCount > 0 {
+		return fmt.Errorf("流程 %s 有 %d 个进行中的审核任务，暂不能修改", flow.ID, activeCount)
+	}
+	if err := s.validateFlow(ctx, flow); err != nil {
+		return err
+	}
+	return s.reviewStore.SaveFlowConfig(ctx, flow)
+}
+
+// validateFlow 校验流程配置（名称、轮次、专家、通过人数）。
+func (s *Service) validateFlow(ctx context.Context, flow domain.ReviewFlowConfig) error {
 	if flow.Name == "" {
 		return fmt.Errorf("流程名称不能为空")
 	}
 	if len(flow.Rounds) == 0 {
 		return fmt.Errorf("至少需要一轮审核配置")
 	}
-	// 给每轮设置默认 RequiredCount
+	// 校验每一轮配置
 	for i := range flow.Rounds {
-		if flow.Rounds[i].RequiredCount == 0 {
-			flow.Rounds[i].RequiredCount = len(flow.Rounds[i].ExpertIDs)
+		round := &flow.Rounds[i]
+		if len(round.ExpertIDs) == 0 {
+			return fmt.Errorf("第 %d 轮「%s」未指定审核人", round.RoundNumber, round.Name)
+		}
+		// 专家去重：同一轮不能出现重复专家
+		seen := make(map[string]bool)
+		for _, expertID := range round.ExpertIDs {
+			if seen[expertID] {
+				return fmt.Errorf("第 %d 轮「%s」审核人 %s 重复", round.RoundNumber, round.Name, expertID)
+			}
+			seen[expertID] = true
+			// 专家必须存在且启用
+			expert, err := s.expertStore.GetExpert(ctx, expertID)
+			if err != nil {
+				return fmt.Errorf("查询专家 %s 失败: %w", expertID, err)
+			}
+			if expert == nil {
+				return fmt.Errorf("第 %d 轮审核人 %s 不存在于专家库", round.RoundNumber, expertID)
+			}
+			if !expert.Enabled {
+				return fmt.Errorf("第 %d 轮审核人 %s（%s）已停用", round.RoundNumber, expertID, expert.Name)
+			}
+		}
+		// required_count=0 表示全部专家需通过
+		if round.RequiredCount == 0 {
+			round.RequiredCount = len(round.ExpertIDs)
+		}
+		// required_count 范围校验：1 ≤ required ≤ 专家数
+		if round.RequiredCount < 1 || round.RequiredCount > len(round.ExpertIDs) {
+			return fmt.Errorf("第 %d 轮「%s」通过人数 %d 超出范围 [1, %d]", round.RoundNumber, round.Name, round.RequiredCount, len(round.ExpertIDs))
+		}
+		// 轮次号补全（防止配置遗漏轮次号）
+		if round.RoundNumber == 0 {
+			round.RoundNumber = i + 1
 		}
 	}
-	flow.CreatedAt = time.Now()
-	return s.reviewStore.SaveFlowConfig(ctx, flow)
+	return nil
 }
 
 // LoadFlowsFromFile 从 JSON 文件加载审核流程配置。
@@ -107,14 +171,22 @@ func (s *Service) ListFlows(ctx context.Context) ([]domain.ReviewFlowConfig, err
 	return s.reviewStore.ListFlowConfigs(ctx)
 }
 
-// DeleteFlow 删除审核流程。如果有进行中的任务引用该流程，拒绝删除。
+// DeleteFlow 删除审核流程。有任务引用该流程（含历史任务）时拒绝删除，
+// 保证历史审核记录始终能追溯到当时的流程配置。
 func (s *Service) DeleteFlow(ctx context.Context, id string) error {
-	count, err := s.reviewStore.CountActiveTasksByFlow(ctx, id)
+	activeCount, err := s.reviewStore.CountActiveTasksByFlow(ctx, id)
 	if err != nil {
 		return fmt.Errorf("检查流程引用失败: %w", err)
 	}
-	if count > 0 {
-		return fmt.Errorf("流程 %s 有 %d 个进行中的审核任务，无法删除", id, count)
+	if activeCount > 0 {
+		return fmt.Errorf("流程 %s 有 %d 个进行中的审核任务，无法删除", id, activeCount)
+	}
+	totalCount, err := s.reviewStore.CountTasksByFlow(ctx, id)
+	if err != nil {
+		return fmt.Errorf("检查流程历史引用失败: %w", err)
+	}
+	if totalCount > 0 {
+		return fmt.Errorf("流程 %s 有 %d 个历史审核任务引用，无法删除（历史记录需保留）", id, totalCount)
 	}
 	return s.reviewStore.DeleteFlowConfig(ctx, id)
 }
@@ -156,6 +228,7 @@ func (s *Service) SubmitQuestion(ctx context.Context, questionID string, flowID 
 		// 如果是"已驳回"状态，允许重新提交（重置任务从头再来）
 		if existing.Status == domain.StatusRejected {
 			existing.Status = domain.StatusReviewing
+			existing.FlowID = flowID // 更新为本次选择的流程
 			existing.CurrentRound = 1
 			existing.AssignedTo = flow.Rounds[0].ExpertIDs
 			existing.RoundResults = make([]domain.RoundResult, len(flow.Rounds))
@@ -179,12 +252,17 @@ func (s *Service) SubmitQuestion(ctx context.Context, questionID string, flowID 
 			s.updateQuestionStatus(ctx, questionID, domain.StatusReviewing)
 			return existing, nil
 		}
-		return nil, fmt.Errorf("题目 %s 已有审核任务 %s，状态为 %s", questionID, existing.ID, existing.Status)
+		// 题目被编辑后回退为草稿（旧任务处于终态），允许创建新任务重新走流程
+		isTerminalTask := existing.Status == domain.StatusApproved || existing.Status == domain.StatusPublished || existing.Status == domain.StatusArchived
+		if q.Status == domain.StatusAIDraft && isTerminalTask {
+			// 继续向下创建新任务
+		} else {
+			return nil, fmt.Errorf("题目 %s 已有审核任务 %s，状态为 %s", questionID, existing.ID, existing.Status)
+		}
 	}
 
-	// 更新题目状态
+	// 更新题目状态（版本号保持不变，版本由内容编辑递增，AI 检查结果依赖它判断过期）
 	q.Status = domain.StatusReviewing
-	q.Version = 1
 	q.UpdatedAt = time.Now()
 	if err := s.questionStore.SaveQuestion(ctx, *q); err != nil {
 		return nil, fmt.Errorf("更新题目状态失败: %w", err)
@@ -237,6 +315,14 @@ func (s *Service) Review(ctx context.Context, req ReviewRequest) error {
 	if err != nil {
 		return err
 	}
+	if flow == nil {
+		return fmt.Errorf("审核流程 %s 不存在（可能已被删除）", task.FlowID)
+	}
+
+	// 只有进行中的任务允许审核，终态任务（approved/rejected）不可再审核
+	if task.Status != domain.StatusReviewing && task.Status != domain.StatusRevisionRequired {
+		return fmt.Errorf("审核任务已结束，当前状态为 %s，不能再审核", task.Status)
+	}
 
 	roundIdx := task.CurrentRound - 1
 	if roundIdx < 0 || roundIdx >= len(flow.Rounds) {
@@ -280,9 +366,9 @@ func (s *Service) Review(ctx context.Context, req ReviewRequest) error {
 	}
 	task.RoundResults[roundIdx].Reviews = append(task.RoundResults[roundIdx].Reviews, expertReview)
 
-	// 保存审核记录
+	// 保存审核记录（ID 带时间戳，同一专家打回后重新审核不会主键冲突）
 	record := domain.ReviewRecord{
-		ID:          fmt.Sprintf("rec-%s-%d-%s", task.ID, task.CurrentRound, req.ExpertID),
+		ID:          fmt.Sprintf("rec-%s-%d-%s-%d", task.ID, task.CurrentRound, req.ExpertID, now.UnixNano()),
 		TaskID:      task.ID,
 		QuestionID:  task.QuestionID,
 		RoundNumber: task.CurrentRound,

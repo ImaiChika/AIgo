@@ -1,6 +1,6 @@
 import { getToken, clearAuth } from "./auth.js";
 
-const BASE = "http://127.0.0.1:8080/api";
+const BASE = "/api";
 
 async function request(path, options = {}) {
   const token = getToken();
@@ -15,7 +15,7 @@ async function request(path, options = {}) {
 
   const res = await fetch(`${BASE}${path}`, { ...options, headers });
 
-  if (res.status === 401) {
+  if (res.status === 401 && !path.startsWith("/auth/login")) {
     clearAuth();
     window.location.href = "/login";
     throw new Error("登录已过期");
@@ -62,7 +62,10 @@ export const api = {
   auditLogsByActor: (actor) => request(`/audit-logs/actor/${actor}`),
 
   // 题目
-  listQuestions: () => request("/questions"),
+  listQuestions: (page = 1, pageSize = 100) => {
+    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    return request(`/questions?${params}`);
+  },
   getQuestion: (id) => request(`/questions/${id}`),
   updateQuestion: (id, data) =>
     request(`/questions/${id}`, {
@@ -72,10 +75,12 @@ export const api = {
   deleteQuestion: (id) => request(`/questions/${id}`, { method: "DELETE" }),
   publishQuestion: (id) =>
     request(`/questions/${id}/publish`, { method: "POST" }),
-  searchQuestions: (q, status = "") => {
+  searchQuestions: (q, status = "", page = 1, pageSize = 100) => {
     const params = new URLSearchParams();
     if (q) params.set("q", q);
     if (status) params.set("status", status);
+    params.set("page", String(page));
+    params.set("page_size", String(pageSize));
     return request(`/questions/search?${params}`);
   },
   generate: (params) =>
@@ -162,8 +167,8 @@ export const api = {
     }),
   aiCheckResult: (questionId) =>
     request(`/ai-check/result/${questionId}`),
-  aiCheckResults: () =>
-    request("/ai-check/results"),
+  aiCheckResults: (limit = 50) =>
+    request(`/ai-check/results?limit=${limit}`),
 
   // 专家
   listExperts: () => request("/experts"),
@@ -197,6 +202,11 @@ export const api = {
   createFlow: (data) =>
     request("/review/flows", {
       method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateFlow: (id, data) =>
+    request(`/review/flows/${id}`, {
+      method: "PUT",
       body: JSON.stringify(data),
     }),
   deleteFlow: (id) => request(`/review/flows/${id}`, { method: "DELETE" }),
