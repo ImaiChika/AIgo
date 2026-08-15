@@ -1,7 +1,13 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, onMounted, computed } from "vue";
 import { api } from "../api.js";
-import { isAdmin } from "../auth.js";
+import { isAdmin, currentUser } from "../auth.js";
+
+// 删除权限：仅 admin/expert（teacher 无 question:delete 权限）
+const canDelete = computed(() => {
+  const role = currentUser.value?.role;
+  return role === "admin" || role === "expert";
+});
 
 const toast = ref("");
 const questions = ref([]);
@@ -353,10 +359,12 @@ onMounted(async () => {
             @click.stop
             class="q-checkbox"
           />
-          <button
+          <div
             class="q-content"
-            type="button"
+            role="button"
+            tabindex="0"
             @click="selectQuestion(q)"
+            @keydown.enter="selectQuestion(q)"
           >
             <div class="q-info">
               <span class="q-stem">{{ (q.clinical_stem || "").slice(0, 60) }}...</span>
@@ -369,9 +377,9 @@ onMounted(async () => {
             <div class="q-actions">
               <span class="q-status" :class="statusClass(q.status)">{{ statusText(q.status) }}</span>
               <button v-if="q.status === 'approved' && isAdmin" class="publish-btn" type="button" @click.stop="publishQuestion(q)" title="发布">发布</button>
-              <button class="delete-btn" type="button" @click.stop="deleteQuestion(q)" title="删除">×</button>
+              <button v-if="canDelete" class="delete-btn" type="button" @click.stop="deleteQuestion(q)" title="删除">×</button>
             </div>
-          </button>
+          </div>
         </div>
         <div v-if="!questions.length" class="empty">暂无题目</div>
         <div v-else-if="hasMore" class="load-more">
@@ -629,6 +637,9 @@ onMounted(async () => {
   text-align: left;
   cursor: pointer;
   min-width: 0;
+  font-size: inherit;
+  font-family: inherit;
+  color: inherit;
 }
 
 .q-info { flex: 1; min-width: 0; }

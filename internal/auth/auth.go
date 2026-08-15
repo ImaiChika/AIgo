@@ -88,6 +88,24 @@ func (s *Service) InitAdmin(username, password, displayName string) error {
 	return err
 }
 
+// GetUserByUsername 根据用户名查询用户，不存在时返回 nil。
+func (s *Service) GetUserByUsername(username string) (*User, error) {
+	var user User
+	var passwordHash string
+	var enabled bool
+	err := s.db.QueryRow(`
+		SELECT id, username, password_hash, display_name, role, enabled, created_at, updated_at
+		FROM users WHERE username=$1
+	`, username).Scan(&user.ID, &user.Username, &passwordHash, &user.DisplayName, &user.Role, &enabled, &user.CreatedAt, &user.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
 // Login 用户登录：验证密码 → 生成 JWT token。
 func (s *Service) Login(username, password string) (string, *User, error) {
 	var user User
@@ -229,6 +247,26 @@ func (s *Service) ListUsers() ([]User, error) {
 
 // CreateUser 创建新用户。
 func (s *Service) CreateUser(username, password, displayName, role string) (*User, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return nil, fmt.Errorf("用户名不能为空")
+	}
+	if len(password) < 8 {
+		return nil, fmt.Errorf("密码至少8位")
+	}
+	switch role {
+	case "admin", "expert", "teacher":
+	default:
+		return nil, fmt.Errorf("无效的角色: %s（可选 admin/expert/teacher）", role)
+	}
+	// 检查用户名是否已存在（友好提示而非裸数据库错误）
+	existing, err := s.GetUserByUsername(username)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return nil, fmt.Errorf("用户名 %s 已存在", username)
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, err

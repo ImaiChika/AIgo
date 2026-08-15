@@ -1,5 +1,6 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, onMounted, computed } from "vue";
+import { currentUser } from "../auth.js";
 import { api } from "../api.js";
 
 const toast = ref("");
@@ -8,6 +9,12 @@ const total = ref(0);
 const page = ref(1);
 const searchQuery = ref("");
 const loading = ref(false);
+
+// 导入/添加/删除权限：仅 admin/expert（teacher 只有查看权限）
+const canManage = computed(() => {
+  const role = currentUser.value?.role;
+  return role === "admin" || role === "expert";
+});
 
 function showToast(msg) {
   toast.value = msg;
@@ -119,7 +126,7 @@ onMounted(loadPoints);
           <button class="primary-button" type="button" @click="doSearch">搜索</button>
           <button class="ghost-button" type="button" @click="clearSearch">重置</button>
         </div>
-        <div class="action-btns">
+        <div class="action-btns" v-if="canManage">
           <label class="ghost-button import-btn">
             导入考试大纲
             <input type="file" accept=".xlsx,.xls" hidden @change="handleImport" />
@@ -150,7 +157,7 @@ onMounted(loadPoints);
             <td>{{ p.sub_item }}</td>
             <td>{{ p.topic }}</td>
             <td>
-              <button class="delete-btn" type="button" @click="deleteKP(p)" title="删除">×</button>
+              <button v-if="canManage" class="delete-btn" type="button" @click="deleteKP(p)" title="删除">×</button>
             </td>
           </tr>
           <tr v-if="!points.length">
