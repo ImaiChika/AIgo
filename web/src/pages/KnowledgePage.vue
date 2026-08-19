@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, computed } from "vue";
-import { currentUser } from "../auth.js";
+import { hasPerm } from "../auth.js";
 import { api } from "../api.js";
 
 const toast = ref("");
@@ -10,11 +10,8 @@ const page = ref(1);
 const searchQuery = ref("");
 const loading = ref(false);
 
-// 导入/添加/删除权限：仅 admin/expert（teacher 只有查看权限）
-const canManage = computed(() => {
-  const role = currentUser.value?.role;
-  return role === "admin" || role === "expert";
-});
+// 导入/添加/删除权限：knowledge:manage
+const canManage = computed(() => hasPerm("knowledge:manage"));
 
 function showToast(msg) {
   toast.value = msg;

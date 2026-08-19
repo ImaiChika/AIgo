@@ -6,46 +6,53 @@ import "time"
 type QuestionStatus string
 
 const (
-	StatusAIDraft          QuestionStatus = "ai_draft"           // AI 草稿（刚生成）
-	StatusAutoChecked      QuestionStatus = "auto_checked"       // 自动初评完成
-	StatusReviewing        QuestionStatus = "reviewing"          // 审核中
-	StatusRevisionRequired QuestionStatus = "revision_required"  // 需要修改
-	StatusRejected         QuestionStatus = "rejected"           // 驳回
-	StatusApproved         QuestionStatus = "approved"           // 审核通过
-	StatusAIReviewed       QuestionStatus = "ai_reviewed"        // AI 检查通过
-	StatusPublished        QuestionStatus = "published"          // 进入正式题库
-	StatusArchived         QuestionStatus = "archived"           // 归档
+	StatusAIDraft          QuestionStatus = "ai_draft"          // AI 草稿（刚生成）
+	StatusAutoChecked      QuestionStatus = "auto_checked"      // 自动初评完成
+	StatusReviewing        QuestionStatus = "reviewing"         // 审核中
+	StatusConflict         QuestionStatus = "conflict"          // 本轮票数冲突，待最终把关人决断
+	StatusRevisionRequired QuestionStatus = "revision_required" // 需要修改
+	StatusRejected         QuestionStatus = "rejected"          // 驳回
+	StatusApproved         QuestionStatus = "approved"          // 审核通过
+	StatusAIReviewed       QuestionStatus = "ai_reviewed"       // AI 检查通过
+	StatusPublished        QuestionStatus = "published"         // 进入正式题库
+	StatusArchived         QuestionStatus = "archived"          // 归档
 )
 
 // Expert 专家信息。
 type Expert struct {
-	ID          string   `json:"id"`           // 专家唯一标识
-	Name        string   `json:"name"`         // 姓名
-	Department  string   `json:"department"`   // 所属科室或专业方向
-	Title       string   `json:"title"`        // 职称
-	Specialties []string `json:"specialties"`  // 擅长知识点
-	ExpertTypes []string `json:"expert_types"` // 可审核题型
+	ID          string   `json:"id"`                // 专家唯一标识
+	Name        string   `json:"name"`              // 姓名
+	Department  string   `json:"department"`        // 所属科室或专业方向
+	Title       string   `json:"title"`             // 职称
+	Specialties []string `json:"specialties"`       // 擅长知识点
+	ExpertTypes []string `json:"expert_types"`      // 可审核题型
 	Contact     string   `json:"contact,omitempty"` // 联系方式
-	Enabled     bool     `json:"enabled"`      // 是否启用
+	Enabled     bool     `json:"enabled"`           // 是否启用
 }
 
 // ReviewFlowConfig 审核流程配置。
 // 管理员可配置多个流程，每个流程包含多轮审核。
+// BankID 限定该流程适用的题库（空=通用）；FinalReviewerIDs 为最终把关管理员列表。
+// VoteRule 投票规则："" = 达到通过票数即过轮（默认）；"veto" = 一票否决（任一驳回直接驳回）。
 type ReviewFlowConfig struct {
-	ID          string         `json:"id"`          // 流程唯一标识
-	Name        string         `json:"name"`        // 流程名称
-	Description string         `json:"description,omitempty"` // 描述
-	Subject     string         `json:"subject"`     // 适用专业
-	Rounds      []RoundConfig  `json:"rounds"`      // 各轮配置
-	CreatedAt   time.Time      `json:"created_at"`  // 创建时间
+	ID               string        `json:"id"`                // 流程唯一标识
+	Name             string        `json:"name"`              // 流程名称
+	Description      string        `json:"description,omitempty"` // 描述
+	Subject          string        `json:"subject"`           // 适用专业（兼容旧字段）
+	BankID           string        `json:"bank_id,omitempty"` // 适用题库（空=通用）
+	FinalReviewerIDs []string      `json:"final_reviewer_ids,omitempty"` // 最终把关管理员（空=任意有最终把关权限者）
+	VoteRule         string        `json:"vote_rule,omitempty"` // 投票规则（""/veto）
+	Rounds           []RoundConfig `json:"rounds"`            // 各轮配置
+	CreatedAt        time.Time     `json:"created_at"`        // 创建时间
 }
 
 // RoundConfig 单轮审核配置。
+// ExpertIDs 为空时，提交审核自动收集"有审题权限且题库范围匹配"的用户作为本轮审核人。
 type RoundConfig struct {
 	RoundNumber   int      `json:"round_number"`   // 第几轮
 	Name          string   `json:"name"`           // 轮次名称（如"命题教师初审"）
-	ExpertIDs     []string `json:"expert_ids"`     // 本轮审核人 ID 列表
-	RequiredCount int      `json:"required_count"` // 需要几位通过才算本轮通过（0=全部）
+	ExpertIDs     []string `json:"expert_ids"`     // 本轮审核人 ID 列表（空=按审题权限自动匹配）
+	RequiredCount int      `json:"required_count"` // 需要几位通过（无反对票时提前通过；0=全部）
 	CanModify     bool     `json:"can_modify"`     // 是否允许直接修改题目
 	PassCondition string   `json:"pass_condition"` // 通过条件说明
 	IsRequired    bool     `json:"is_required"`    // 是否必审
@@ -54,15 +61,18 @@ type RoundConfig struct {
 // ReviewTask 审核任务。
 // 一道题提交到审核流程后生成一个任务，跟踪各轮审核进度。
 type ReviewTask struct {
-	ID           string         `json:"id"`            // 任务唯一标识
-	QuestionID   string         `json:"question_id"`   // 关联的题目 ID
-	FlowID       string         `json:"flow_id"`       // 使用的审核流程 ID
-	CurrentRound int            `json:"current_round"` // 当前轮次
-	Status       QuestionStatus `json:"status"`        // 任务状态
-	AssignedTo   []string       `json:"assigned_to"`   // 当前轮审核人 ID
-	RoundResults []RoundResult  `json:"round_results"` // 各轮审核结果
-	CreatedAt    time.Time      `json:"created_at"`    // 创建时间
-	UpdatedAt    time.Time      `json:"updated_at"`    // 更新时间
+	ID                 string         `json:"id"`                       // 任务唯一标识
+	QuestionID         string         `json:"question_id"`              // 关联的题目 ID
+	FlowID             string         `json:"flow_id"`                  // 使用的审核流程 ID
+	CurrentRound       int            `json:"current_round"`            // 当前轮次
+	Status             QuestionStatus `json:"status"`                   // 任务状态
+	AssignedTo         []string       `json:"assigned_to"`              // 当前轮审核人 ID
+	FinalReviewerIDs   []string       `json:"final_reviewer_ids"`       // 最终把关管理员快照
+	FinalDecision      *ExpertReview  `json:"final_decision,omitempty"` // 最终把关决断
+	QuestionPrevStatus QuestionStatus `json:"question_prev_status"`     // 提交前题目状态（撤销时恢复用）
+	RoundResults       []RoundResult  `json:"round_results"`            // 各轮审核结果
+	CreatedAt          time.Time      `json:"created_at"`               // 创建时间
+	UpdatedAt          time.Time      `json:"updated_at"`               // 更新时间
 }
 
 // RoundResult 记录某一轮的审核结果。
@@ -71,6 +81,7 @@ type RoundResult struct {
 	Reviews       []ExpertReview `json:"reviews"`        // 每位专家的审核
 	ApprovedCount int            `json:"approved_count"` // 通过数
 	RejectedCount int            `json:"rejected_count"` // 驳回数
+	RevisionCount int            `json:"revision_count"` // 需修改数
 	Passed        bool           `json:"passed"`         // 本轮是否通过
 }
 
@@ -89,14 +100,14 @@ type FlowsConfigFile struct {
 
 // ReviewRecord 审核记录，每轮审核留痕，不可修改。
 type ReviewRecord struct {
-	ID          string         `json:"id"`           // 记录唯一标识
-	TaskID      string         `json:"task_id"`      // 关联的审核任务 ID
-	QuestionID  string         `json:"question_id"`  // 关联的题目 ID
-	RoundNumber int            `json:"round_number"` // 第几轮
-	ExpertID    string         `json:"expert_id"`    // 审核人 ID
+	ID          string         `json:"id"`            // 记录唯一标识
+	TaskID      string         `json:"task_id"`       // 关联的审核任务 ID
+	QuestionID  string         `json:"question_id"`   // 关联的题目 ID
+	RoundNumber int            `json:"round_number"`  // 第几轮
+	ExpertID    string         `json:"expert_id"`     // 审核人 ID
 	Conclusion  QuestionStatus `json:"review_status"` // 审核结论
-	Opinion     string         `json:"opinion"`      // 审核意见
-	CreatedAt   time.Time      `json:"created_at"`   // 审核时间
+	Opinion     string         `json:"opinion"`       // 审核意见
+	CreatedAt   time.Time      `json:"created_at"`    // 审核时间
 }
 
 // AuditLog 操作日志，记录所有对题库的变更操作。
@@ -119,8 +130,8 @@ type AIReviewResult struct {
 	Verdict         string        `json:"verdict"`          // "pass" / "issues_found" / "reject"
 	Scores          ReviewScores  `json:"scores"`
 	Issues          []ReviewIssue `json:"issues"`
-	Suggestion      string        `json:"suggestion"`  // AI 的修改建议
-	Model           string        `json:"model"`       // 使用的模型
+	Suggestion      string        `json:"suggestion"`   // AI 的修改建议
+	Model           string        `json:"model"`        // 使用的模型
 	RawResponse     string        `json:"raw_response"` // 原始 LLM 响应
 	CreatedAt       time.Time     `json:"created_at"`
 }

@@ -3,6 +3,8 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"aigo/internal/auth"
 	"aigo/internal/domain"
@@ -42,14 +44,14 @@ func (s *Server) handleSubmitReview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, task)
 }
 
-// handleReviewAction 执行审核操作（通过/驳回/需修改）。
-// admin 角色可以审核任意轮次，其他角色只能审核分配给自己的轮次。
-// expert_id 强制使用当前登录用户 ID（admin 除外，admin 可指定任意审核人）。
+// handleReviewAction 执行审核投票（通过/驳回/需修改）。
+// 单人反对不再立即退回；所有分配审核人投票完毕后自动统计，冲突进入待决断。
+// 拥有最终把关权限的用户可以审核任意轮次。
 // 请求：{"task_id": "xxx", "action": "approved", "opinion": "通过"}
 func (s *Server) handleReviewAction(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TaskID   string `json:"task_id"`   // 审核任务 ID
-		ExpertID string `json:"expert_id"` // 审核人 ID（admin 可指定，其他角色忽略此字段）
+		ExpertID string `json:"expert_id"` // 审核人 ID（有最终把关权限可指定，其他用户忽略此字段）
 		Action   string `json:"action"`    // approved / rejected / revision_required
 		Opinion  string `json:"opinion"`   // 审核意见
 	}
@@ -58,22 +60,27 @@ func (s *Server) handleReviewAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 获取当前用户信息
-	role := auth.GetRole(r.Context())
 	currentUserID := auth.GetUserID(r.Context())
 
-	// 非 admin 用户：强制使用当前登录用户的 ID，防止冒名
-	expertID := currentUserID
-	if role == "admin" && req.ExpertID != "" {
-		expertID = req.ExpertID // admin 可指定任意审核人
+	// 最终把关权限查询
+	hasFinalRight, err := s.authSvc.HasFinalRight(r.Context(), currentUserID)
+	if err != nil {
+		writeError(w, 500, "权限查询失败")
+		return
 	}
 
-	err := s.reviewSvc.Review(r.Context(), review.ReviewRequest{
-		TaskID:   req.TaskID,
-		ExpertID: expertID,
-		Action:   domain.QuestionStatus(req.Action),
-		Opinion:  req.Opinion,
-		Role:     role,
+	// 普通用户强制使用自己的 ID，防止冒名；把关人可指定任意审核人
+	expertID := currentUserID
+	if hasFinalRight && req.ExpertID != "" {
+		expertID = req.ExpertID
+	}
+
+	err = s.reviewSvc.Review(r.Context(), review.ReviewRequest{
+		TaskID:        req.TaskID,
+		ExpertID:      expertID,
+		Action:        domain.QuestionStatus(req.Action),
+		Opinion:       req.Opinion,
+		HasFinalRight: hasFinalRight,
 	})
 	if err != nil {
 		writeError(w, 500, "审核失败: "+err.Error())
@@ -87,6 +94,227 @@ func (s *Server) handleReviewAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+// handleReviewFinalize 最终把关人对票数冲突的任务做决断。
+// 请求：{"task_id": "xxx", "action": "approved", "opinion": "..."}
+// action：approved（通过进下一轮/完成）/ rejected（驳回）/ revision_required（退回修改）
+func (s *Server) handleReviewFinalize(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TaskID  string `json:"task_id"`
+		Action  string `json:"action"`
+		Opinion string `json:"opinion"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	currentUserID := auth.GetUserID(r.Context())
+	// 系统管理员（用户管理权限）不受把关人名单限制
+	isSysAdmin, _ := s.authSvc.HasPermission(r.Context(), currentUserID, domain.PermUserManage)
+	if err := s.reviewSvc.Finalize(r.Context(), review.FinalizeRequest{
+		TaskID:        req.TaskID,
+		ReviewerID:    currentUserID,
+		Action:        domain.QuestionStatus(req.Action),
+		Opinion:       req.Opinion,
+		IsSystemAdmin: isSysAdmin,
+	}); err != nil {
+		writeError(w, 400, "决断失败: "+err.Error())
+		return
+	}
+
+	task, _ := s.reviewSvc.GetTask(r.Context(), req.TaskID)
+	if task != nil {
+		s.auditSvc.LogReview(r.Context(), task.QuestionID, currentUserID, "final_"+req.Action, req.Opinion)
+	}
+
+	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+// handleSubmitBankReview 按题库统一提交审核：把题库内所有可提交状态的题目
+// 批量提交到审核流程（不再需要在审核页一题一题点击提交）。
+// 已在审核中/已审核结束的题目自动跳过并在结果中统计（提示题库状态冲突）。
+// 请求：{"bank_id": "xxx", "flow_id": "xxx"}（bank_id 为空=提交未分类题目）
+func (s *Server) handleSubmitBankReview(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BankID string `json:"bank_id"`
+		FlowID string `json:"flow_id"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	if req.FlowID == "" {
+		writeError(w, 400, "请指定审核流程")
+		return
+	}
+	result, err := s.reviewSvc.SubmitBank(r.Context(), req.BankID, req.FlowID)
+	if err != nil {
+		writeError(w, 400, "批量提交失败: "+err.Error())
+		return
+	}
+	actor := auth.GetUsername(r.Context())
+	if actor == "" {
+		actor = auth.GetUserID(r.Context())
+	}
+	s.auditSvc.Log(r.Context(), "", "submit_bank", actor, fmt.Sprintf("批量提交题库 %s 到流程 %s：成功 %d，跳过审核中 %d，跳过已结束 %d，失败 %d", bankLabel(req.BankID), req.FlowID, result.Submitted, result.SkippedReviewing, result.SkippedFinished, len(result.Failed)))
+	writeJSON(w, 200, result)
+}
+
+// handleMyTasks 列出待我审核的任务（含题目完整信息、流程轮次、投票进度）。
+// 仅当前轮分配给我的任务；投票完成即移开；待决断任务在「待决断」页面处理。
+func (s *Server) handleMyTasks(w http.ResponseWriter, r *http.Request) {
+	userID := auth.GetUserID(r.Context())
+	hasFinalRight, err := s.authSvc.HasFinalRight(r.Context(), userID)
+	if err != nil {
+		writeError(w, 500, "权限查询失败")
+		return
+	}
+	// 仅审题/把关相关用户可查看
+	hasReview, err := s.authSvc.HasPermission(r.Context(), userID, domain.PermReviewDo)
+	if err != nil {
+		writeError(w, 500, "权限查询失败")
+		return
+	}
+	if !hasReview && !hasFinalRight {
+		writeError(w, 403, "权限不足")
+		return
+	}
+	tasks, err := s.reviewSvc.MyTasks(r.Context(), userID, hasFinalRight)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"tasks": tasks, "total": len(tasks)})
+}
+
+// handleMyDecisions 列出待我决断的任务（最终把关人专用，供「待决断」页面）。
+func (s *Server) handleMyDecisions(w http.ResponseWriter, r *http.Request) {
+	userID := auth.GetUserID(r.Context())
+	hasFinalRight, err := s.authSvc.HasFinalRight(r.Context(), userID)
+	if err != nil {
+		writeError(w, 500, "权限查询失败")
+		return
+	}
+	if !hasFinalRight {
+		writeError(w, 403, "权限不足")
+		return
+	}
+	tasks, err := s.reviewSvc.MyDecisions(r.Context(), userID)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"tasks": tasks, "total": len(tasks)})
+}
+
+func bankLabel(bankID string) string {
+	if bankID == "" {
+		return "未分类"
+	}
+	return bankID
+}
+
+// handleReviewResults 审核结果汇总：统计 + 题目列表 + 专家评语。
+// 查询参数：final_status（pending/reviewing/conflict/approved/rejected/revision_required/published）、
+// bank_id、q（关键词）、page、page_size。
+func (s *Server) handleReviewResults(w http.ResponseWriter, r *http.Request) {
+	items, stats, err := s.reviewSvc.ListResults(r.Context())
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+
+	finalStatus := r.URL.Query().Get("final_status")
+	bankID := r.URL.Query().Get("bank_id")
+	keyword := strings.ToLower(r.URL.Query().Get("q"))
+
+	var filtered []review.ReviewResultItem
+	for _, item := range items {
+		if finalStatus != "" && item.FinalStatus != finalStatus {
+			continue
+		}
+		// bank_id 筛选：__unclassified__ = 未分类题目（不属于任何题库）
+		if bankID == "__unclassified__" {
+			if len(item.Question.BankIDs) > 0 {
+				continue
+			}
+		} else if bankID != "" {
+			inBank := false
+			for _, b := range item.Question.BankIDs {
+				if b == bankID {
+					inBank = true
+					break
+				}
+			}
+			if !inBank {
+				continue
+			}
+		}
+		if keyword != "" {
+			if !strings.Contains(strings.ToLower(item.Question.ClinicalStem), keyword) &&
+				!strings.Contains(strings.ToLower(item.Question.ID), keyword) &&
+				!strings.Contains(strings.ToLower(item.Question.Profession), keyword) {
+				continue
+			}
+		}
+		filtered = append(filtered, item)
+	}
+
+	// 分页
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 500 {
+		pageSize = 50
+	}
+	total := len(filtered)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+
+	writeJSON(w, 200, map[string]any{
+		"items":     filtered[start:end],
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
+		"has_more":  end < total,
+		"stats":     stats,
+	})
+}
+
+// handleRevokeFlow 撤销流程下所有未完成的审核任务（管理员防误提交/卡死用）。
+// 未完成审核的题目恢复提交前状态；已审核结束的题目不受影响。
+func (s *Server) handleRevokeFlow(w http.ResponseWriter, r *http.Request) {
+	flowID := r.PathValue("id")
+	result, err := s.reviewSvc.RevokeFlow(r.Context(), flowID)
+	if err != nil {
+		writeError(w, 400, "撤销失败: "+err.Error())
+		return
+	}
+	actor := auth.GetUsername(r.Context())
+	if actor == "" {
+		actor = auth.GetUserID(r.Context())
+	}
+	s.auditSvc.LogFlow(r.Context(), flowID, actor, "revoke", fmt.Sprintf("撤销未完成审核任务 %d 个，恢复题目 %d 道，保留终态 %d 个", result.Revoked, result.Restored, result.Kept))
+	writeJSON(w, 200, result)
+}
+
+// handleListReviewers 列出有审题权限的用户（流程配置选审核人、名字映射用）。
+func (s *Server) handleListReviewers(w http.ResponseWriter, r *http.Request) {
+	candidates, err := s.authSvc.ListReviewCandidates(r.Context())
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"reviewers": candidates, "total": len(candidates)})
 }
 
 // handleGetReviewTask 根据任务 ID 获取审核任务详情。

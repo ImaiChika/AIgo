@@ -5,9 +5,13 @@ import { api } from "../api.js";
 import { setAuth } from "../auth.js";
 
 const router = useRouter();
+const mode = ref("login"); // login | register
 const username = ref("");
 const password = ref("");
+const confirmPassword = ref("");
+const displayName = ref("");
 const error = ref("");
+const success = ref("");
 const loading = ref(false);
 
 async function doLogin() {
@@ -27,6 +31,41 @@ async function doLogin() {
     loading.value = false;
   }
 }
+
+async function doRegister() {
+  error.value = "";
+  success.value = "";
+  if (!username.value || !password.value) {
+    error.value = "请输入用户名和密码";
+    return;
+  }
+  if (password.value.length < 8) {
+    error.value = "密码至少8位";
+    return;
+  }
+  if (password.value !== confirmPassword.value) {
+    error.value = "两次输入的密码不一致";
+    return;
+  }
+  loading.value = true;
+  try {
+    await api.register(username.value, password.value, displayName.value);
+    success.value = "注册成功，请等待管理员分配权限后登录";
+    mode.value = "login";
+    password.value = "";
+    confirmPassword.value = "";
+  } catch (e) {
+    error.value = e.message;
+  } finally {
+    loading.value = false;
+  }
+}
+
+function switchMode(m) {
+  mode.value = m;
+  error.value = "";
+  success.value = "";
+}
 </script>
 
 <template>
@@ -38,20 +77,57 @@ async function doLogin() {
         <p>智能命题系统</p>
       </div>
 
-      <form @submit.prevent="doLogin">
-        <div class="field">
-          <label>用户名</label>
-          <input v-model="username" type="text" placeholder="请输入用户名" autocomplete="username" />
-        </div>
-        <div class="field">
-          <label>密码</label>
-          <input v-model="password" type="password" placeholder="请输入密码" autocomplete="current-password" />
-        </div>
-        <div v-if="error" class="error">{{ error }}</div>
-        <button class="primary-button full" type="submit" :disabled="loading">
-          {{ loading ? "登录中..." : "登录" }}
-        </button>
-      </form>
+      <div v-if="mode === 'login'">
+        <form @submit.prevent="doLogin">
+          <div class="field">
+            <label>用户名</label>
+            <input v-model="username" type="text" placeholder="请输入用户名" autocomplete="username" />
+          </div>
+          <div class="field">
+            <label>密码</label>
+            <input v-model="password" type="password" placeholder="请输入密码" autocomplete="current-password" />
+          </div>
+          <div v-if="error" class="error">{{ error }}</div>
+          <div v-if="success" class="success">{{ success }}</div>
+          <button class="primary-button full" type="submit" :disabled="loading">
+            {{ loading ? "登录中..." : "登录" }}
+          </button>
+        </form>
+        <p class="switch-hint">
+          没有账号？
+          <a href="#" @click.prevent="switchMode('register')">注册新账号</a>
+        </p>
+      </div>
+
+      <div v-else>
+        <form @submit.prevent="doRegister">
+          <div class="field">
+            <label>用户名</label>
+            <input v-model="username" type="text" placeholder="登录用户名" autocomplete="username" />
+          </div>
+          <div class="field">
+            <label>显示名</label>
+            <input v-model="displayName" type="text" placeholder="真实姓名（可选）" />
+          </div>
+          <div class="field">
+            <label>密码</label>
+            <input v-model="password" type="password" placeholder="至少8位" autocomplete="new-password" />
+          </div>
+          <div class="field">
+            <label>确认密码</label>
+            <input v-model="confirmPassword" type="password" placeholder="再次输入密码" autocomplete="new-password" />
+          </div>
+          <div v-if="error" class="error">{{ error }}</div>
+          <button class="primary-button full" type="submit" :disabled="loading">
+            {{ loading ? "注册中..." : "注册" }}
+          </button>
+        </form>
+        <p class="switch-hint">
+          已有账号？
+          <a href="#" @click.prevent="switchMode('login')">返回登录</a>
+        </p>
+        <p class="switch-hint note">注册后默认无任何权限，请联系管理员在「用户管理」中分配权限。</p>
+      </div>
 
       <div class="login-hint">
         默认管理员：admin / admin
@@ -126,6 +202,7 @@ async function doLogin() {
   padding: 0 12px;
   font-size: 14px;
   color: #172033;
+  box-sizing: border-box;
 }
 
 .field input:focus {
@@ -138,6 +215,15 @@ async function doLogin() {
   padding: 8px 12px;
   background: #fff0f0;
   color: #c54858;
+  border-radius: 6px;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+.success {
+  padding: 8px 12px;
+  background: #f0fff8;
+  color: #087c55;
   border-radius: 6px;
   font-size: 13px;
   margin-bottom: 16px;
@@ -165,6 +251,23 @@ async function doLogin() {
 
 .full {
   width: 100%;
+}
+
+.switch-hint {
+  margin: 16px 0 0;
+  text-align: center;
+  font-size: 13px;
+  color: #6e7b8f;
+}
+
+.switch-hint a {
+  color: #1385f8;
+  text-decoration: none;
+}
+
+.switch-hint.note {
+  font-size: 12px;
+  color: #9aa5b4;
 }
 
 .login-hint {

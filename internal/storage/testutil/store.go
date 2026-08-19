@@ -226,6 +226,14 @@ func (s *MemoryReviewStore) UpdateTask(_ context.Context, t domain.ReviewTask) e
 	return nil
 }
 
+func (s *MemoryReviewStore) DeleteTask(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.tasks, id)
+	delete(s.records, id)
+	return nil
+}
+
 func (s *MemoryReviewStore) CountActiveTasksByFlow(_ context.Context, flowID string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -262,6 +270,26 @@ func (s *MemoryReviewStore) ListRecordsByTaskID(_ context.Context, taskID string
 	defer s.mu.Unlock()
 	out := make([]domain.ReviewRecord, len(s.records[taskID]))
 	copy(out, s.records[taskID])
+	return out, nil
+}
+
+func (s *MemoryReviewStore) ListAllTasks(_ context.Context) ([]domain.ReviewTask, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]domain.ReviewTask, 0, len(s.tasks))
+	for _, t := range s.tasks {
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+func (s *MemoryReviewStore) ListAllRecords(_ context.Context) ([]domain.ReviewRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []domain.ReviewRecord
+	for _, recs := range s.records {
+		out = append(out, recs...)
+	}
 	return out, nil
 }
 

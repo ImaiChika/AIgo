@@ -13,6 +13,7 @@ import (
 	"aigo/internal/api"
 	"aigo/internal/audit"
 	"aigo/internal/auth"
+	"aigo/internal/bank"
 	"aigo/internal/batch"
 	"aigo/internal/config"
 	"aigo/internal/domain"
@@ -61,7 +62,23 @@ func run(ctx context.Context, args []string) error {
 	}
 	fmt.Println("数据库: PostgreSQL")
 
-	reviewSvc := review.NewService(pgStore, pgStore, pgStore)
+	// 初始化认证服务（JWT 密钥从配置读取，通过 JWT_SECRET 环境变量设置）
+	authSvc := auth.NewService(pgStore.DB(), cfg.JWTSecret, 24*time.Hour)
+	// 写入内置角色模板（管理员/审题专家/命题教师，可自由修改）
+	if err := authSvc.InitBuiltinRoles(ctx); err != nil {
+		fmt.Printf("初始化内置角色失败: %v\n", err)
+	}
+	if err := authSvc.InitAdmin("admin", "admin", "系统管理员"); err != nil {
+		fmt.Printf("初始化管理员账号失败: %v\n", err)
+	} else {
+		fmt.Println("默认管理员: admin / admin")
+	}
+
+	// 审核服务：依赖认证服务解析审核人（审题权限 + 题库范围）
+	reviewSvc := review.NewService(pgStore, pgStore, pgStore, authSvc)
+
+	// 题库（分库）服务
+	bankSvc := bank.NewService(pgStore, pgStore)
 
 	// 生图服务：始终用真实生图器，无 API Key 时调用会报错
 	zimgGen := image.NewZImageGenerator(image.ZImageConfig{
@@ -87,14 +104,6 @@ func run(ctx context.Context, args []string) error {
 
 	pipe := pipeline.New(genSvc, evaluator.NewService(), reviewSvc, imageSvc, kpSvc, pgStore)
 
-	// 初始化认证服务（JWT 密钥从配置读取，通过 JWT_SECRET 环境变量设置）
-	authSvc := auth.NewService(pgStore.DB(), cfg.JWTSecret, 24*time.Hour)
-	if err := authSvc.InitAdmin("admin", "admin", "系统管理员"); err != nil {
-		fmt.Printf("初始化管理员账号失败: %v\n", err)
-	} else {
-		fmt.Println("默认管理员: admin / admin")
-	}
-
 	// 自动加载审核流程配置（仅在数据库为空时导入，避免覆盖管理员在 UI 上的修改）
 	existingFlows, _ := reviewSvc.ListFlows(ctx)
 	if len(existingFlows) == 0 {
@@ -107,9 +116,9 @@ func run(ctx context.Context, args []string) error {
 		}
 	}
 
-	// 同步专家角色用户到专家库
-	if err := authSvc.SyncExpertUsers(ctx, pgStore); err != nil {
-		fmt.Printf("同步专家用户失败: %v\n", err)
+	// 同步有审题权限的用户到专家库
+	if err := authSvc.SyncReviewUsers(ctx, pgStore); err != nil {
+		fmt.Printf("同步审题用户到专家库失败: %v\n", err)
 	}
 
 	switch args[1] {
@@ -154,7 +163,7 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 2 {
 			port = args[2]
 		}
-		server := api.NewServer(pipe, kpSvc, imageSvc, reviewSvc, auditSvc, pgStore, authSvc, batchSvc, aiCheckSvc)
+		server := api.NewServer(pipe, kpSvc, imageSvc, reviewSvc, auditSvc, pgStore, authSvc, batchSvc, aiCheckSvc, bankSvc)
 		addr := "127.0.0.1:" + port
 		fmt.Printf("AIgo HTTP 服务启动: http://%s\n", addr)
 		fmt.Println("API 文档:")
@@ -227,9 +236,9 @@ func run(ctx context.Context, args []string) error {
   aigo expert-add E001 张三 内科 副主任医师`)
 		}
 		expert := domain.Expert{
-			ID:         args[2],
-			Name:       args[3],
-			Enabled:    true,
+			ID:      args[2],
+			Name:    args[3],
+			Enabled: true,
 		}
 		if len(args) > 4 {
 			expert.Department = args[4]
@@ -331,17 +340,32 @@ func run(ctx context.Context, args []string) error {
 		for i := 2; i < len(args); i++ {
 			switch args[i] {
 			case "--limit":
-				if i+1 < len(args) { fmt.Sscanf(args[i+1], "%d", &limit); i++ }
+				if i+1 < len(args) {
+					fmt.Sscanf(args[i+1], "%d", &limit)
+					i++
+				}
 			case "--no-skip":
 				skipExisting = false
 			case "--ids":
-				if i+1 < len(args) { ids = args[i+1]; i++ }
+				if i+1 < len(args) {
+					ids = args[i+1]
+					i++
+				}
 			case "--count":
-				if i+1 < len(args) { fmt.Sscanf(args[i+1], "%d", &countPerPoint); i++ }
+				if i+1 < len(args) {
+					fmt.Sscanf(args[i+1], "%d", &countPerPoint)
+					i++
+				}
 			case "--from":
-				if i+1 < len(args) { fromCode = args[i+1]; i++ }
+				if i+1 < len(args) {
+					fromCode = args[i+1]
+					i++
+				}
 			case "--to":
-				if i+1 < len(args) { toCode = args[i+1]; i++ }
+				if i+1 < len(args) {
+					toCode = args[i+1]
+					i++
+				}
 			}
 		}
 

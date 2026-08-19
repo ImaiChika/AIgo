@@ -1,24 +1,50 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, onMounted, computed } from "vue";
 import { api } from "../api.js";
-import { currentUser } from "../auth.js";
+import { currentUser, hasPerm } from "../auth.js";
+import QuestionDetailModal from "../components/QuestionDetailModal.vue";
 
 const toast = ref("");
-const questions = ref([]);
-const flows = ref([]);
 const selectedQuestion = ref(null);
+const detailQuestion = ref(null); // 题目详情弹窗数据
 const reviewTask = ref(null);
 const reviewRecords = ref([]);
 const reviewAction = ref("approved");
 const reviewOpinion = ref("");
 const loading = ref(false);
-const selectedFlowId = ref("");
 const selectedImages = ref([]);
 const lightboxImage = ref("");
 const experts = ref([]);
-const questionPage = ref(1);
-const questionTotal = ref(0);
-const questionHasMore = ref(false);
+
+// 待我审核（本页唯一视图：审题人投票工作区）
+const myTasks = ref([]);
+const myTasksLoading = ref(false);
+const flows = ref([]); // 仅用于显示流程名/轮次信息
+
+// 当前任务的流程信息
+const currentFlow = computed(() => {
+  const task = reviewTask.value;
+  if (!task) return null;
+  return flows.value.find((f) => f.id === task.flow_id) || null;
+});
+
+const currentFlowRounds = computed(() => {
+  return currentFlow.value?.rounds?.length || 0;
+});
+
+const currentRoundVotes = computed(() => {
+  const task = reviewTask.value;
+  if (!task || !task.round_results) return null;
+  const rr = task.round_results.find((r) => r.round_number === task.current_round);
+  if (!rr) return null;
+  return {
+    approved: rr.approved_count || 0,
+    rejected: rr.rejected_count || 0,
+    revision: rr.revision_count || 0,
+    total: (rr.reviews || []).length,
+    assigned: (task.assigned_to || []).length,
+  };
+});
 
 function showToast(msg) {
   toast.value = msg;
@@ -26,39 +52,28 @@ function showToast(msg) {
   showToast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
 }
 
-async function loadQuestions() {
+// 待我审核列表
+async function loadMyTasks() {
+  myTasksLoading.value = true;
   try {
-    const data = await api.listQuestions(questionPage.value, 200);
-    questions.value = questionPage.value === 1 ? (data.questions || []) : questions.value.concat(data.questions || []);
-    questionTotal.value = data.total || 0;
-    questionHasMore.value = !!data.has_more;
+    const data = await api.myTasks();
+    myTasks.value = data.tasks || [];
+    // 若当前选中项已不在列表中（投完/进入下一轮），保留右侧供查看
   } catch (e) {
-    showToast("加载题目失败: " + e.message);
+    showToast("加载待审任务失败: " + e.message);
+  } finally {
+    myTasksLoading.value = false;
   }
 }
 
-async function loadMoreQuestions() {
-  questionPage.value += 1;
-  await loadQuestions();
+// 从待审任务卡片进入审核
+async function selectMyTask(item) {
+  await selectQuestion(item.question);
 }
 
-// 跳转到题库页修改题目
-function goEditQuestion() {
-  if (!selectedQuestion.value) return;
-  window.location.href = `/bank?edit=${encodeURIComponent(selectedQuestion.value.id)}`;
-}
-
-async function loadFlows() {
-  try {
-    const data = await api.listFlows();
-    flows.value = data.flows || [];
-    if (flows.value.length > 0 && !selectedFlowId.value) {
-      selectedFlowId.value = flows.value[0].id;
-    }
-  } catch (e) {
-    console.error(e);
-    showToast("加载审核流程失败: " + e.message);
-  }
+function progressPercent(item) {
+  if (!item.assigned) return 0;
+  return Math.min(100, Math.round((item.voted / item.assigned) * 100));
 }
 
 async function selectQuestion(q) {
@@ -103,28 +118,6 @@ function closeLightbox() {
   lightboxImage.value = "";
 }
 
-async function submitToReview() {
-  if (!selectedQuestion.value) return;
-  if (!selectedFlowId.value) {
-    showToast("请先选择审核流程");
-    return;
-  }
-  loading.value = true;
-  try {
-    const task = await api.submitReview(selectedQuestion.value.id, selectedFlowId.value);
-    reviewTask.value = task;
-    // 刷新题目状态和左侧列表
-    const q = await api.getQuestion(selectedQuestion.value.id);
-    if (q) selectedQuestion.value = q;
-    loadQuestions();
-    showToast("已提交到审核流程");
-  } catch (e) {
-    showToast("提交失败: " + e.message);
-  } finally {
-    loading.value = false;
-  }
-}
-
 async function doReview() {
   if (!reviewTask.value) return;
   loading.value = true;
@@ -137,19 +130,21 @@ async function doReview() {
     });
     showToast("审核完成");
     reviewOpinion.value = "";
-    // 刷新任务和记录
-    reviewTask.value = await api.getReviewTask(reviewTask.value.id);
-    const recData = await api.reviewRecords(reviewTask.value.id);
-    reviewRecords.value = recData.records || [];
-    // 刷新题目状态
-    const q = await api.getQuestion(selectedQuestion.value.id);
-    if (q) selectedQuestion.value = q;
-    loadQuestions();
+    await refreshTask();
   } catch (e) {
     showToast("审核失败: " + e.message);
   } finally {
     loading.value = false;
   }
+}
+
+async function refreshTask() {
+  reviewTask.value = await api.getReviewTask(reviewTask.value.id);
+  const recData = await api.reviewRecords(reviewTask.value.id);
+  reviewRecords.value = recData.records || [];
+  const q = await api.getQuestion(selectedQuestion.value.id);
+  if (q) selectedQuestion.value = q;
+  loadMyTasks();
 }
 
 function statusText(status) {
@@ -158,6 +153,7 @@ function statusText(status) {
     auto_checked: "已初评",
     ai_reviewed: "AI已检查",
     reviewing: "审核中",
+    conflict: "待决断",
     approved: "已通过",
     rejected: "已驳回",
     revision_required: "需修改",
@@ -171,20 +167,15 @@ function statusClass(status) {
   if (status === "rejected") return "status-bad";
   if (status === "reviewing") return "status-active";
   if (status === "revision_required") return "status-warn";
+  if (status === "conflict") return "status-conflict";
   return "";
 }
 
-// 判断是否可以提交审核
-function canSubmit(q) {
-  return q && (q.status === "ai_draft" || q.status === "auto_checked" || q.status === "ai_reviewed" || q.status === "revision_required" || q.status === "rejected");
-}
-
-// 判断是否可以执行审核（任务进行中 且 当前用户被分配到当前轮 或 是 admin）
+// 判断是否可以执行审核（任务进行中 且 当前用户被分配到当前轮）
 function canReview(task) {
-  if (!task || (task.status !== "reviewing" && task.status !== "revision_required")) return false;
+  if (!task || task.status !== "reviewing") return false;
   const user = currentUser.value;
   if (!user) return false;
-  if (user.role === "admin") return true;
   const assigned = (task.assigned_to || []).includes(user.id);
   const alreadyReviewed = (task.round_results || []).some(
     (rr) => rr.round_number === task.current_round && (rr.reviews || []).some((r) => r.expert_id === user.id)
@@ -192,33 +183,31 @@ function canReview(task) {
   return assigned && !alreadyReviewed;
 }
 
-// 判断是否可以（重新）提交审核
-function canResubmit(task) {
-  if (!task) return false;
-  if (task.status === "rejected" || task.status === "revision_required") return true;
-  // 题目被编辑回退为草稿、旧任务处于终态 → 允许重新提交（后端会创建新任务）
-  const q = selectedQuestion.value;
-  if (q && q.status === "ai_draft" && ["approved", "published", "archived"].includes(task.status)) return true;
-  return false;
+async function loadFlows() {
+  try {
+    const data = await api.listFlows();
+    flows.value = data.flows || [];
+  } catch (e) {
+    console.error(e);
+  }
 }
 
 async function loadExperts() {
   try {
-    const data = await api.listExperts();
-    experts.value = data.experts || [];
+    const data = await api.listReviewers();
+    experts.value = data.reviewers || [];
   } catch (e) {
     console.error(e);
-    showToast("加载专家列表失败: " + e.message);
   }
 }
 
 function expertName(id) {
   const e = experts.value.find((x) => x.id === id);
-  return e ? e.name : id;
+  return e ? e.display_name || e.username : id;
 }
 
 onMounted(() => {
-  loadQuestions();
+  loadMyTasks();
   loadFlows();
   loadExperts();
 });
@@ -226,33 +215,54 @@ onMounted(() => {
 
 <template>
   <div class="review-layout">
-    <!-- 左侧题目列表 -->
+    <!-- 左侧待我审核列表 -->
     <section class="panel question-list-panel">
       <div class="section-heading">
         <span class="dot blue"></span>
-        <h2>题目列表</h2>
-        <small>{{ questionTotal || questions.length }} 道</small>
+        <h2>待我审核</h2>
+        <small>{{ myTasks.length }} 项</small>
       </div>
-      <div class="question-list">
-        <button
-          v-for="q in questions"
-          :key="q.id"
-          class="question-item"
-          :class="{ active: selectedQuestion?.id === q.id }"
-          type="button"
-          @click="selectQuestion(q)"
+
+      <div v-if="myTasksLoading" class="loading">加载中...</div>
+      <div v-else-if="!myTasks.length" class="empty">
+        暂无待你审核的任务<br />
+        <span class="empty-hint">提交审核由管理员在题库页统一操作，题目进入你的审核轮次后会出现在这里</span>
+      </div>
+      <div v-else class="my-task-list">
+        <div
+          v-for="item in myTasks"
+          :key="item.task.id"
+          class="my-task-card"
+          :class="{ active: selectedQuestion?.id === item.question.id }"
+          role="button"
+          tabindex="0"
+          @click="selectMyTask(item)"
+          @keydown.enter="selectMyTask(item)"
         >
-          <span class="q-stem">{{ (q.clinical_stem || "").slice(0, 40) }}...</span>
-          <span class="q-status" :class="statusClass(q.status)">{{ statusText(q.status) }}</span>
-        </button>
-        <div v-if="!questions.length" class="empty">暂无题目，请先生成</div>
-        <button v-else-if="questionHasMore" class="load-more-btn" type="button" @click="loadMoreQuestions">
-          加载更多（已显示 {{ questions.length }} / {{ questionTotal }}）
-        </button>
+          <div class="mt-head">
+            <span class="mt-flow">{{ item.flow_name || item.task.flow_id }}</span>
+            <span class="mt-round">第 {{ item.round_index }}/{{ item.round_count }} 轮</span>
+            <span class="q-status" :class="statusClass(item.task.status)">
+              {{ statusText(item.task.status) }}
+            </span>
+          </div>
+          <div class="mt-stem">{{ (item.question.clinical_stem || "").slice(0, 60) }}{{ (item.question.clinical_stem || "").length > 60 ? "..." : "" }}</div>
+          <div class="mt-meta">
+            <span v-if="item.round_name">轮次：{{ item.round_name }}</span>
+            <span>已投 {{ item.voted }}/{{ item.assigned }} 票</span>
+            <span v-if="item.approved" class="mt-vote ok">通过 {{ item.approved }}</span>
+            <span v-if="item.rejected" class="mt-vote no">驳回 {{ item.rejected }}</span>
+            <span v-if="item.revision" class="mt-vote warn">需修改 {{ item.revision }}</span>
+          </div>
+          <div class="mt-progress">
+            <div class="mt-progress-fill" :style="{ width: progressPercent(item) + '%' }"></div>
+          </div>
+          <div class="mt-action">去审核 →</div>
+        </div>
       </div>
     </section>
 
-    <!-- 右侧审核详情 -->
+    <!-- 右侧审核工作区 -->
     <section class="panel" v-if="selectedQuestion">
       <div class="section-heading">
         <span class="dot blue"></span>
@@ -260,6 +270,7 @@ onMounted(() => {
         <span class="q-status" :class="statusClass(selectedQuestion.status)">
           {{ statusText(selectedQuestion.status) }}
         </span>
+        <button class="ghost-button" type="button" @click="detailQuestion = selectedQuestion">查看完整信息</button>
       </div>
 
       <div class="detail-section">
@@ -296,35 +307,35 @@ onMounted(() => {
 
       <!-- 审核操作区 -->
       <div class="review-actions">
-        <!-- 提交审核 -->
-        <div v-if="(canSubmit(selectedQuestion) && !reviewTask) || (reviewTask && canResubmit(reviewTask))" class="submit-section">
-          <div class="flow-select">
-            <label>审核流程：</label>
-            <select v-model="selectedFlowId">
-              <option v-for="f in flows" :key="f.id" :value="f.id">{{ f.name }}</option>
-            </select>
-          </div>
-          <button class="primary-button" type="button" :disabled="loading" @click="submitToReview">
-            {{ reviewTask && canResubmit(reviewTask) ? "重新提交审核" : "提交到审核流程" }}
-          </button>
-        </div>
-
         <!-- 审核任务信息 -->
         <div v-if="reviewTask" class="task-info">
-          <h3>审核任务 <span class="task-status" :class="statusClass(reviewTask.status)">{{ statusText(reviewTask.status) }}</span></h3>
-          <p>当前轮次：第 {{ reviewTask.current_round }} 轮 | 审核人：{{ (reviewTask.assigned_to || []).map(id => expertName(id)).join(", ") }}</p>
-        </div>
-
-        <!-- 打回提示：需修改 -->
-        <div v-if="reviewTask && reviewTask.status === 'revision_required'" class="task-hint hint-warn">
-          <p>专家要求修改题目。请修改题目内容后点击下方「重新提交审核」，将回到第 {{ reviewTask.current_round }} 轮重新审核。</p>
-          <button class="ghost-button" type="button" @click="goEditQuestion">去修改题目</button>
-        </div>
-
-        <!-- 打回提示：已驳回 -->
-        <div v-else-if="reviewTask && reviewTask.status === 'rejected'" class="task-hint hint-bad">
-          <p>题目已被驳回。修改后可点击下方「重新提交审核」，将从头开始完整审核流程。</p>
-          <button class="ghost-button" type="button" @click="goEditQuestion">去修改题目</button>
+          <h3>
+            审核任务
+            <span class="task-status" :class="statusClass(reviewTask.status)">{{ statusText(reviewTask.status) }}</span>
+          </h3>
+          <div class="task-flow-row">
+            <span class="task-flow-name">{{ currentFlow?.name || reviewTask.flow_id }}</span>
+            <span class="task-round">第 {{ reviewTask.current_round }}/{{ currentFlowRounds || reviewTask.round_results?.length || 1 }} 轮</span>
+            <span v-if="currentFlow?.rounds?.[reviewTask.current_round - 1]?.name" class="task-round-name">
+              {{ currentFlow.rounds[reviewTask.current_round - 1].name }}
+            </span>
+          </div>
+          <p>审核人：{{ (reviewTask.assigned_to || []).map(id => expertName(id)).join("、") || "自动匹配" }}</p>
+          <!-- 投票进度条 -->
+          <div v-if="currentRoundVotes && reviewTask.status === 'reviewing'" class="vote-progress-wrap">
+            <div class="vote-progress">
+              <div
+                class="vote-progress-fill"
+                :style="{ width: Math.min(100, Math.round((currentRoundVotes.total / Math.max(currentRoundVotes.assigned, 1)) * 100)) + '%' }"
+              ></div>
+            </div>
+            <div v-if="currentRoundVotes" class="vote-stats">
+              <span class="vote approved">通过 {{ currentRoundVotes.approved }}</span>
+              <span class="vote rejected">驳回 {{ currentRoundVotes.rejected }}</span>
+              <span class="vote revision">需修改 {{ currentRoundVotes.revision }}</span>
+              <span class="vote total">已投 {{ currentRoundVotes.total }} / {{ currentRoundVotes.assigned }} 人</span>
+            </div>
+          </div>
         </div>
 
         <!-- 审核表单 -->
@@ -337,19 +348,24 @@ onMounted(() => {
             </select>
             <input v-model="reviewOpinion" placeholder="审核意见（可选）" />
             <button class="primary-button" type="button" :disabled="loading" @click="doReview">
-              提交审核
+              {{ loading ? "提交中..." : "提交审核" }}
             </button>
           </div>
         </div>
 
-        <!-- 任务进行中但当前用户不是本轮审核人 -->
-        <div v-else-if="reviewTask && (reviewTask.status === 'reviewing' || reviewTask.status === 'revision_required')" class="task-done">
-          <p>等待本轮审核人审核</p>
+        <!-- 我已投票（投完即从列表移开） -->
+        <div v-else-if="reviewTask && reviewTask.status === 'reviewing'" class="task-done">
+          <p>你已完成本轮的审核，该题已从「待我审核」移开（进入下一轮后会再次出现）</p>
         </div>
 
-        <!-- 已完成审核 -->
+        <!-- 已进入最终待决断 -->
+        <div v-else-if="reviewTask && reviewTask.status === 'conflict'" class="task-done wait-final">
+          <p>所有轮次审核完成，已进入最终待决断（由把关人在「待决断」页面处理）</p>
+        </div>
+
+        <!-- 已驳回/需修改 -->
         <div v-else-if="reviewTask" class="task-done">
-          <p>审核已结束，最终状态：{{ statusText(reviewTask.status) }}</p>
+          <p>审核已结束，最终状态：{{ statusText(reviewTask.status) }}（由管理员在题库页处理）</p>
         </div>
 
         <!-- 审核记录 -->
@@ -368,7 +384,7 @@ onMounted(() => {
     </section>
 
     <section v-else class="panel empty-panel">
-      <p>← 请从左侧选择一道题目</p>
+      <p>← 请从左侧选择一道待审核的题目</p>
     </section>
   </div>
 
@@ -378,7 +394,11 @@ onMounted(() => {
   <div v-if="lightboxImage" class="lightbox" @click="closeLightbox">
     <img :src="lightboxImage" @click.stop />
   </div>
+
+  <!-- 题目详情弹窗 -->
+  <QuestionDetailModal v-if="detailQuestion" :question="detailQuestion" @close="detailQuestion = null" />
 </template>
+
 
 <style scoped>
 .review-layout {
@@ -442,6 +462,271 @@ onMounted(() => {
 .status-bad { background: #fff0f0; color: #c54858; }
 .status-active { background: #eff8ff; color: #0571dc; }
 .status-warn { background: #fdf2e3; color: #c07b22; }
+.status-conflict { background: #fdf0f8; color: #b93a7c; }
+
+/* 视图切换 */
+.view-toggle {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.view-toggle button {
+  flex: 1;
+  height: 34px;
+  border: 1px solid #e5ebf3;
+  border-radius: 7px;
+  background: #fff;
+  color: #6e7b8f;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.view-toggle button.active {
+  background: #1385f8;
+  border-color: #1385f8;
+  color: #fff;
+}
+
+.toggle-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: #ff5252;
+  color: #fff;
+  font-size: 11px;
+}
+
+/* 待我审核卡片 */
+.my-task-list {
+  display: grid;
+  gap: 8px;
+  max-height: calc(100vh - 260px);
+  overflow-y: auto;
+}
+
+.my-task-card {
+  border: 2px solid #dce8f7;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+  cursor: pointer;
+  transition: all 0.15s;
+  position: relative;
+}
+
+.my-task-card:hover {
+  border-color: #1385f8;
+  box-shadow: 0 4px 12px rgba(19, 133, 248, 0.12);
+}
+
+.my-task-card.active {
+  border-color: #1385f8;
+  background: #eff8ff;
+}
+
+.my-task-card.conflict {
+  border-color: #f0c4dd;
+  background: #fff8fc;
+}
+
+.my-task-card.conflict:hover {
+  border-color: #b93a7c;
+}
+
+.my-task-card.conflict .mt-action {
+  color: #b93a7c;
+}
+
+.mt-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.mt-flow {
+  font-size: 12px;
+  font-weight: 700;
+  color: #172033;
+  background: #f0f3f7;
+  padding: 2px 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+
+.mt-round {
+  font-size: 11px;
+  font-weight: 700;
+  color: #1385f8;
+  background: #eff8ff;
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.mt-stem {
+  font-size: 13px;
+  color: #172033;
+  line-height: 1.5;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.mt-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: #6e7b8f;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.mt-vote {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 700;
+}
+
+.mt-vote.ok { background: #f0fff8; color: #087c55; }
+.mt-vote.no { background: #fff0f0; color: #c54858; }
+.mt-vote.warn { background: #fdf2e3; color: #c07b22; }
+
+.mt-progress {
+  height: 5px;
+  background: #f0f3f7;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.mt-progress-fill {
+  height: 100%;
+  background: #1385f8;
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+
+.mt-action {
+  margin-top: 6px;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 700;
+  color: #1385f8;
+}
+
+/* 任务信息：流程/轮次/进度条 */
+.task-flow-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.task-flow-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #172033;
+}
+
+.task-round {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1385f8;
+  background: #eff8ff;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.task-round-name {
+  font-size: 12px;
+  color: #6e7b8f;
+}
+
+.vote-progress-wrap {
+  margin-top: 8px;
+}
+
+.vote-progress {
+  height: 6px;
+  background: #f0f3f7;
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.vote-progress-fill {
+  height: 100%;
+  background: #1385f8;
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+
+.vote-stats {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.vote {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.vote.approved { background: #f0fff8; color: #087c55; }
+.vote.rejected { background: #fff0f0; color: #c54858; }
+.vote.revision { background: #fdf2e3; color: #c07b22; }
+.vote.total { background: #eff8ff; color: #0571dc; }
+
+.hint-conflict {
+  background: #fdf0f8;
+  border: 1px solid #f0c4dd;
+  color: #a3326c;
+}
+
+.finalize-form {
+  margin: 12px 0;
+  padding: 14px;
+  border: 1px solid #f0c4dd;
+  border-radius: 8px;
+  background: #fff8fc;
+}
+
+.finalize-form h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  color: #b93a7c;
+}
+
+.finalize-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: #6e7b8f;
+}
+
+.wait-final {
+  background: #fdf0f8;
+  border-color: #f0c4dd;
+}
+
+.wait-final p {
+  color: #a3326c;
+}
 
 .task-hint {
   border-radius: 8px;

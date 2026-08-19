@@ -1,17 +1,24 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, onMounted, computed } from "vue";
 import { api } from "../api.js";
+import { roleName } from "../auth.js";
 
 const toast = ref("");
 const users = ref([]);
+const roles = ref([]);
+const banks = ref([]);
+const permGroups = ref([]);
 const loading = ref(false);
 const showCreate = ref(false);
+const expandedRow = ref(""); // 展开权限矩阵的用户ID
 
 const newUser = ref({
   username: "",
   password: "",
   display_name: "",
-  role: "teacher",
+  role: "",
+  permissions: [],
+  bank_ids: [],
 });
 
 function showToast(msg) {
@@ -20,11 +27,25 @@ function showToast(msg) {
   showToast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
 }
 
-async function loadUsers() {
+async function loadAll() {
   loading.value = true;
   try {
-    const data = await api.listUsers();
-    users.value = data.users || [];
+    const [userData, roleData, bankData, permData] = await Promise.all([
+      api.listUsers(),
+      api.listRoles(),
+      api.listBanks(),
+      api.listPermissions(),
+    ]);
+    users.value = userData.users || [];
+    roles.value = roleData.roles || [];
+    banks.value = bankData.banks || [];
+    // 按分组整理权限点
+    const groups = {};
+    for (const p of permData.permissions || []) {
+      if (!groups[p.group]) groups[p.group] = [];
+      groups[p.group].push(p);
+    }
+    permGroups.value = Object.keys(groups).map((g) => ({ group: g, perms: groups[g] }));
   } catch (e) {
     showToast("加载失败: " + e.message);
   } finally {
@@ -32,30 +53,67 @@ async function loadUsers() {
   }
 }
 
+function roleOptions() {
+  return [{ id: "", name: "无角色" }, ...roles.value];
+}
+
 async function createUser() {
   try {
     await api.createUser(newUser.value);
     showToast("创建成功");
     showCreate.value = false;
-    newUser.value = { username: "", password: "", display_name: "", role: "teacher" };
-    loadUsers();
+    newUser.value = { username: "", password: "", display_name: "", role: "", permissions: [], bank_ids: [] };
+    loadAll();
   } catch (e) {
     showToast("创建失败: " + e.message);
   }
 }
 
-function roleText(role) {
-  const map = { admin: "管理员", expert: "专家", teacher: "命题教师" };
-  return map[role] || role;
+// 勾选/取消权限（立即保存整行）
+async function togglePerm(u, code) {
+  const perms = new Set(u.direct_permissions || []);
+  if (perms.has(code)) perms.delete(code);
+  else perms.add(code);
+  await saveUser(u, { permissions: Array.from(perms) });
 }
 
-function roleClass(role) {
-  if (role === "admin") return "role-admin";
-  if (role === "expert") return "role-expert";
-  return "role-teacher";
+async function toggleBank(u, bankId) {
+  const banksArr = new Set(u.bank_ids || []);
+  if (banksArr.has(bankId)) banksArr.delete(bankId);
+  else banksArr.add(bankId);
+  await saveUser(u, { bank_ids: Array.from(banksArr) });
 }
 
-onMounted(loadUsers);
+async function changeRole(u, role) {
+  await saveUser(u, { role });
+}
+
+async function toggleEnabled(u) {
+  await saveUser(u, { enabled: !u.enabled });
+}
+
+async function saveUser(u, patch) {
+  try {
+    const updated = await api.updateUser(u.id, {
+      display_name: u.display_name,
+      role: u.role,
+      permissions: u.direct_permissions,
+      bank_ids: u.bank_ids,
+      ...patch,
+    });
+    Object.assign(u, updated);
+    showToast(`已保存 ${u.username} 的权限`);
+  } catch (e) {
+    showToast("保存失败: " + e.message);
+  }
+}
+
+// 用户直接分配的权限（区别于角色模板权限）
+function directPerms(u) {
+  return u.direct_permissions || [];
+}
+
+onMounted(loadAll);
 </script>
 
 <template>
@@ -64,7 +122,7 @@ onMounted(loadUsers);
       <div class="section-heading">
         <span class="dot blue"></span>
         <h2>用户管理</h2>
-        <small>{{ users.length }} 个用户</small>
+        <small>{{ users.length }} 个用户（含自主注册）</small>
         <button class="primary-button" type="button" @click="showCreate = !showCreate">
           {{ showCreate ? "取消" : "新建用户" }}
         </button>
@@ -86,43 +144,104 @@ onMounted(loadUsers);
             <input v-model="newUser.display_name" placeholder="真实姓名" />
           </div>
           <div class="field">
-            <label>角色</label>
+            <label>角色模板</label>
             <select v-model="newUser.role">
-              <option value="teacher">命题教师</option>
-              <option value="expert">专家</option>
-              <option value="admin">管理员</option>
+              <option v-for="r in roleOptions()" :key="r.id" :value="r.id">{{ r.name }}</option>
             </select>
           </div>
         </div>
         <button class="primary-button" type="button" @click="createUser">确认创建</button>
+        <span class="form-hint">创建后可在下方列表中继续勾选具体权限与题库范围</span>
       </div>
 
-      <!-- 用户列表 -->
       <div v-if="loading" class="loading">加载中...</div>
       <table v-else class="users-table">
         <thead>
           <tr>
             <th>用户名</th>
             <th>显示名</th>
-            <th>角色</th>
+            <th>角色模板</th>
             <th>状态</th>
+            <th>权限</th>
             <th>创建时间</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="u in users" :key="u.id">
-            <td class="username-cell">{{ u.username }}</td>
-            <td>{{ u.display_name }}</td>
-            <td>
-              <span class="role-tag" :class="roleClass(u.role)">{{ roleText(u.role) }}</span>
-            </td>
-            <td>
-              <span :class="u.enabled ? 'status-on' : 'status-off'">
-                {{ u.enabled ? "启用" : "禁用" }}
-              </span>
-            </td>
-            <td class="time-cell">{{ new Date(u.created_at).toLocaleString() }}</td>
-          </tr>
+          <template v-for="u in users" :key="u.id">
+            <tr>
+              <td class="username-cell">
+                {{ u.username }}
+                <span v-if="!u.role && !(u.direct_permissions || []).length" class="new-tag">新注册</span>
+              </td>
+              <td>{{ u.display_name }}</td>
+              <td>
+                <select :value="u.role" @change="changeRole(u, $event.target.value)">
+                  <option v-for="r in roleOptions()" :key="r.id" :value="r.id">{{ r.name }}</option>
+                </select>
+              </td>
+              <td>
+                <button class="toggle-btn" :class="u.enabled ? 'on' : 'off'" type="button" @click="toggleEnabled(u)">
+                  {{ u.enabled ? "启用" : "禁用" }}
+                </button>
+              </td>
+              <td>
+                <span class="perm-count">{{ (u.permissions || []).length }} 项有效权限</span>
+              </td>
+              <td class="time-cell">{{ new Date(u.created_at).toLocaleString() }}</td>
+              <td>
+                <button class="expand-btn" type="button" @click="expandedRow = expandedRow === u.id ? '' : u.id">
+                  {{ expandedRow === u.id ? "收起权限" : "分配权限" }}
+                </button>
+              </td>
+            </tr>
+            <!-- 权限矩阵行：一列列权限打勾分配 -->
+            <tr v-if="expandedRow === u.id" class="perm-matrix-row">
+              <td colspan="7">
+                <div class="perm-matrix">
+                  <div v-for="g in permGroups" :key="g.group" class="perm-group">
+                    <div class="perm-group-title">{{ g.group }}权限</div>
+                    <div class="perm-checks">
+                      <label v-for="p in g.perms" :key="p.code" class="perm-check" :class="{ scoped: p.bank_scope }">
+                        <input
+                          type="checkbox"
+                          :checked="directPerms(u).includes(p.code)"
+                          @change="togglePerm(u, p.code)"
+                        />
+                        {{ p.name }}
+                        <span v-if="p.bank_scope" class="scope-mark" title="可按题库限定范围">库</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <!-- 题库范围 -->
+                  <div class="perm-group bank-scope">
+                    <div class="perm-group-title">
+                      题库范围
+                      <span class="scope-hint">（仅对「库」权限生效，不选 = 全部题库）</span>
+                    </div>
+                    <div class="bank-chips">
+                      <button
+                        v-for="b in banks" :key="b.id"
+                        type="button"
+                        class="bank-chip"
+                        :class="{ selected: (u.bank_ids || []).includes(b.id) }"
+                        @click="toggleBank(u, b.id)"
+                      >
+                        {{ b.name }}
+                      </button>
+                      <span v-if="!banks.length" class="no-bank">暂无题库，请先在「题库管理」创建（如内科、外科）</span>
+                    </div>
+                  </div>
+
+                  <p class="matrix-note">
+                    说明：角色模板带来的权限为全范围；此处勾选的权限可搭配题库范围。审核人 = 勾选「审题」权限的用户，
+                    审哪个库由题库范围决定。
+                  </p>
+                </div>
+              </td>
+            </tr>
+          </template>
         </tbody>
       </table>
     </section>
@@ -167,6 +286,13 @@ onMounted(loadUsers);
   border-radius: 6px;
   padding: 0 10px;
   font-size: 13px;
+  box-sizing: border-box;
+}
+
+.form-hint {
+  margin-left: 12px;
+  font-size: 12px;
+  color: #9aa5b4;
 }
 
 .users-table {
@@ -182,6 +308,7 @@ onMounted(loadUsers);
   color: #6e7b8f;
   font-weight: 600;
   border-bottom: 1px solid #e5ebf3;
+  white-space: nowrap;
 }
 
 .users-table td {
@@ -194,42 +321,166 @@ onMounted(loadUsers);
   color: #172033;
 }
 
+.new-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: #fdf2e3;
+  color: #c07b22;
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .time-cell {
   font-size: 12px;
   color: #6e7b8f;
 }
 
-.role-tag {
-  display: inline-block;
-  padding: 2px 8px;
+.users-table select {
+  height: 30px;
+  border: 1px solid #e5ebf3;
+  border-radius: 6px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+
+.toggle-btn {
+  padding: 3px 10px;
   border-radius: 4px;
+  border: 1px solid transparent;
   font-size: 12px;
   font-weight: 600;
+  cursor: pointer;
 }
 
-.role-admin {
-  background: #fff3e2;
-  color: #dd8a00;
-}
-
-.role-expert {
-  background: #e9f8ef;
-  color: #199e63;
-}
-
-.role-teacher {
-  background: #eff8ff;
-  color: #0571dc;
-}
-
-.status-on {
+.toggle-btn.on {
+  background: #f0fff8;
   color: #087c55;
+  border-color: #bdecd9;
+}
+
+.toggle-btn.off {
+  background: #fff0f0;
+  color: #c54858;
+  border-color: #f3c2c2;
+}
+
+.perm-count {
+  font-size: 12px;
+  color: #1385f8;
   font-weight: 600;
 }
 
-.status-off {
-  color: #c54858;
-  font-weight: 600;
+.expand-btn {
+  padding: 4px 10px;
+  border: 1px solid #dce8f7;
+  border-radius: 6px;
+  background: #fff;
+  color: #1385f8;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.expand-btn:hover {
+  background: #eff8ff;
+}
+
+.perm-matrix-row td {
+  background: #f8fbff;
+  padding: 16px;
+}
+
+.perm-matrix {
+  display: grid;
+  gap: 14px;
+}
+
+.perm-group-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #172033;
+  margin-bottom: 8px;
+}
+
+.perm-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+}
+
+.perm-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: #3a4658;
+  cursor: pointer;
+  padding: 4px 8px;
+  border: 1px solid #e5ebf3;
+  border-radius: 5px;
+  background: #fff;
+}
+
+.perm-check:hover {
+  border-color: #1385f8;
+}
+
+.perm-check input {
+  cursor: pointer;
+}
+
+.scope-mark {
+  font-size: 10px;
+  color: #c07b22;
+  background: #fdf2e3;
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+.bank-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.bank-chip {
+  padding: 5px 14px;
+  border: 1px solid #e5ebf3;
+  border-radius: 16px;
+  background: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.bank-chip:hover {
+  border-color: #1385f8;
+}
+
+.bank-chip.selected {
+  background: #1385f8;
+  color: #fff;
+  border-color: #1385f8;
+}
+
+.no-bank {
+  font-size: 12px;
+  color: #c07b22;
+}
+
+.scope-hint {
+  font-size: 11px;
+  color: #9aa5b4;
+  font-weight: 400;
+}
+
+.matrix-note {
+  margin: 0;
+  font-size: 12px;
+  color: #6e7b8f;
+  background: #eff8ff;
+  border-radius: 6px;
+  padding: 8px 12px;
 }
 
 .loading {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"aigo/internal/domain"
+	"aigo/internal/knowledge"
 )
 
 // handleListKP 列出知识点（支持分页和按专业筛选）。
@@ -56,22 +57,68 @@ func (s *Server) handleListKP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleSearchKP 搜索知识点（按名称或关键词匹配）。
-// 查询参数：q=搜索关键词。
+// handleSearchKP 搜索知识点（模糊 + 精确组合，支持分页）。
+// 查询参数：
+//
+//	q=关键词（模糊匹配 topic/unit/sub_item/subject/大纲代码）
+//	subject=专业（精确）、category=分类（精确）、outline_code=大纲代码前缀（精确）
+//	page=页码、page_size=每页数量（默认50，最大200）
 func (s *Server) handleSearchKP(w http.ResponseWriter, r *http.Request) {
-	keyword := r.URL.Query().Get("q")
-	if keyword == "" {
-		writeError(w, 400, "缺少搜索关键词 q")
+	q := r.URL.Query().Get("q")
+	subject := r.URL.Query().Get("subject")
+	category := r.URL.Query().Get("category")
+	outlineCode := r.URL.Query().Get("outline_code")
+	ctx := r.Context()
+
+	points, err := s.kpSvc.SearchFiltered(ctx, knowledge.KPSearchOptions{
+		Keyword:     q,
+		Subject:     subject,
+		Category:    category,
+		OutlineCode: outlineCode,
+	})
+	if err != nil {
+		writeError(w, 500, err.Error())
 		return
 	}
-	points, err := s.kpSvc.Search(r.Context(), keyword)
+
+	// 分页
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 200 {
+		pageSize = 50
+	}
+	total := len(points)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+
+	writeJSON(w, 200, map[string]any{
+		"points":    points[start:end],
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
+		"has_more":  end < total,
+	})
+}
+
+// handleKPMeta 返回分类与专业列表（知识点搜索筛选下拉用）。
+func (s *Server) handleKPMeta(w http.ResponseWriter, r *http.Request) {
+	categories, subjects, err := s.kpSvc.ListCategoriesAndSubjects(r.Context())
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"points": points,
-		"total":  len(points),
+		"categories": categories,
+		"subjects":   subjects,
 	})
 }
 

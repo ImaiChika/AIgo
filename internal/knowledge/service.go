@@ -5,6 +5,8 @@ package knowledge
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 
 	"aigo/internal/domain"
 	"aigo/internal/importer"
@@ -51,6 +53,74 @@ func (s *Service) ImportFromXlsx(ctx context.Context, path string) (int, error) 
 // Search 搜索知识点（按名称或关键词匹配）。
 func (s *Service) Search(ctx context.Context, keyword string) ([]domain.KnowledgePoint, error) {
 	return s.store.SearchPoints(ctx, keyword)
+}
+
+// KPSearchOptions 知识点筛选条件（精确 + 模糊组合）。
+type KPSearchOptions struct {
+	Keyword     string // 模糊：topic/unit/sub_item/subject/outline_code 包含
+	Subject     string // 精确：专业
+	Category    string // 精确：分类
+	OutlineCode string // 精确：大纲代码前缀
+}
+
+// SearchFiltered 按条件筛选知识点（内存过滤，支持模糊+精确组合）。
+func (s *Service) SearchFiltered(ctx context.Context, opts KPSearchOptions) ([]domain.KnowledgePoint, error) {
+	all, err := s.store.ListPoints(ctx)
+	if err != nil {
+		return nil, err
+	}
+	kw := strings.ToLower(strings.TrimSpace(opts.Keyword))
+	var result []domain.KnowledgePoint
+	for _, p := range all {
+		if opts.Subject != "" && p.Subject != opts.Subject {
+			continue
+		}
+		if opts.Category != "" && p.Category != opts.Category {
+			continue
+		}
+		if opts.OutlineCode != "" && !strings.HasPrefix(p.OutlineCode, opts.OutlineCode) {
+			continue
+		}
+		if kw != "" {
+			matched := strings.Contains(strings.ToLower(p.Topic), kw) ||
+				strings.Contains(strings.ToLower(p.Unit), kw) ||
+				strings.Contains(strings.ToLower(p.SubItem), kw) ||
+				strings.Contains(strings.ToLower(p.Subject), kw) ||
+				strings.Contains(strings.ToLower(p.OutlineCode), kw)
+			if !matched {
+				continue
+			}
+		}
+		result = append(result, p)
+	}
+	return result, nil
+}
+
+// ListCategoriesAndSubjects 返回全部分类与专业列表（搜索筛选下拉用）。
+func (s *Service) ListCategoriesAndSubjects(ctx context.Context) (categories, subjects []string, err error) {
+	all, err := s.store.ListPoints(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	catSet := make(map[string]bool)
+	subSet := make(map[string]bool)
+	for _, p := range all {
+		if p.Category != "" {
+			catSet[p.Category] = true
+		}
+		if p.Subject != "" {
+			subSet[p.Subject] = true
+		}
+	}
+	for c := range catSet {
+		categories = append(categories, c)
+	}
+	for s := range subSet {
+		subjects = append(subjects, s)
+	}
+	sort.Strings(categories)
+	sort.Strings(subjects)
+	return categories, subjects, nil
 }
 
 // ListAll 列出所有知识点。

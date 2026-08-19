@@ -1,18 +1,16 @@
 <script setup>
 import { ref, computed, onMounted } from "vue";
 import { api } from "../api.js";
+import KnowledgePointPicker from "../components/KnowledgePointPicker.vue";
 
 const toast = ref("");
 const stats = ref({ question_count: 0, knowledge_count: 0, knowledge_categories: {} });
 
-// 批量任务配置
+// 批量任务配置（知识点通过选择器多选；仅保留每知识点题数与跳过已有）
+const selectedKPs = ref([]); // 选中的知识点（多选）
 const batchConfig = ref({
-  limit: 100,
   skip_existing: true,
   count: 1,
-  from_code: "",
-  to_code: "",
-  outline_codes: "",
   job_name: "",
 });
 
@@ -82,14 +80,16 @@ async function loadJobsFromDB() {
 
 // 提交批量任务
 async function submitBatch() {
+  if (!selectedKPs.value.length) {
+    showToast("请先搜索并选择至少一个知识点");
+    return;
+  }
   try {
+    const codes = selectedKPs.value.map((k) => k.outline_code || k.id).join(",");
     const data = await api.batchSubmit({
-      limit: batchConfig.value.limit || 0,  // 0 = 处理全部
       skip_existing: batchConfig.value.skip_existing,
       count: batchConfig.value.count,
-      from_code: batchConfig.value.from_code,
-      to_code: batchConfig.value.to_code,
-      outline_codes: batchConfig.value.outline_codes,
+      outline_codes: codes,
       job_name: batchConfig.value.job_name || "",
     });
 
@@ -271,38 +271,22 @@ onMounted(() => {
       </div>
 
       <div class="config-form">
+        <!-- 知识点选择（搜索勾选多选，也可按大纲代码逗号分隔加入） -->
+        <div class="field">
+          <label>选择知识点（可多选，支持精确/模糊搜索）</label>
+          <KnowledgePointPicker v-model="selectedKPs" :multiple="true" placeholder="搜索知识点、大纲代码、专业...（勾选多个，或按大纲代码逗号加入）" />
+          <span class="field-hint">已选 {{ selectedKPs.length }} 个知识点，每个知识点将生成 {{ batchConfig.count }} 道题</span>
+        </div>
+
         <div class="form-row">
-          <div class="field">
-            <label>生成数量（知识点数）</label>
-            <input v-model.number="batchConfig.limit" type="number" min="1" max="7235" placeholder="留空=全部" />
-            <span class="field-hint">留空则处理所有符合条件的知识点</span>
-          </div>
           <div class="field">
             <label>每知识点题数</label>
             <input v-model.number="batchConfig.count" type="number" min="1" max="20" />
             <span class="field-hint">建议 1-3 道，越多越慢越贵</span>
           </div>
-        </div>
-
-        <div class="form-row">
-          <div class="field">
-            <label>起始大纲代码（可选）</label>
-            <input v-model="batchConfig.from_code" placeholder="如: 110.2.3.0" />
-          </div>
-          <div class="field">
-            <label>结束大纲代码（可选）</label>
-            <input v-model="batchConfig.to_code" placeholder="如: 110.2.5.0" />
-          </div>
-        </div>
-
-        <div class="form-row">
           <div class="field">
             <label>任务名称（可选）</label>
-            <input v-model="batchConfig.job_name" placeholder="如: 基础医学第一批" />
-          </div>
-          <div class="field">
-            <label>指定知识点（逗号分隔，可选）</label>
-            <input v-model="batchConfig.outline_codes" placeholder="如: 110.2.1.1.1.1,110.2.1.1.1.2" />
+            <input v-model="batchConfig.job_name" placeholder="如: 呼吸系统第一批" />
           </div>
         </div>
 
@@ -313,8 +297,8 @@ onMounted(() => {
           </label>
         </div>
 
-        <button class="primary-button full" type="button" @click="submitBatch">
-          提交批量任务
+        <button class="primary-button full" type="button" @click="submitBatch" :disabled="!selectedKPs.length">
+          提交批量任务（{{ selectedKPs.length }} 个知识点 × {{ batchConfig.count }} 题）
         </button>
       </div>
     </section>

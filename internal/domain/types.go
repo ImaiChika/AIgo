@@ -42,6 +42,7 @@ type A2Question struct {
 	OutlineCode     string           `json:"outline_code"`     // 大纲代码（标到最后一级）
 	Profession      string           `json:"profession"`       // 专业，如"消化"、"生理，消化"
 	System          string           `json:"system"`           // 系统，如"消化系统"
+	BankIDs         []string         `json:"bank_ids"`         // 所属题库列表（一道题可属于多个题库，空=未分类）
 	Status          QuestionStatus   `json:"status"`           // 审核状态
 	Version         int              `json:"version"`          // 版本号，每次修改递增
 	CreatedAt       time.Time        `json:"created_at"`       // 创建时间
@@ -56,9 +57,9 @@ type Option struct {
 
 // SourceRef 来源引用，记录解析所依据的教材、指南或文献。
 type SourceRef struct {
-	Title string `json:"title"`           // 来源标题
-	URL   string `json:"url,omitempty"`   // 来源链接（可选）
-	Note  string `json:"note,omitempty"`  // 备注（可选）
+	Title string `json:"title"`          // 来源标题
+	URL   string `json:"url,omitempty"`  // 来源链接（可选）
+	Note  string `json:"note,omitempty"` // 备注（可选）
 }
 
 // MediaKind 多模态素材类型。

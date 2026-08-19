@@ -1,23 +1,19 @@
 <script setup>
 import { ref, computed, onMounted } from "vue";
 import { api } from "../api.js";
+import KnowledgePointPicker from "../components/KnowledgePointPicker.vue";
 
-// 知识点选择
-const allTopics = ref([]);
-const topicSearch = ref("");
-const selectedKP = ref(null); // 选中的知识点对象
-const showDropdown = ref(false);
-const topicPage = ref(1);
-const topicTotal = ref(0);
-const topicLoading = ref(false);
-const searchInputRef = ref(null);
-const dropdownStyle = ref({});
+// 知识点选择（单选，使用完善的知识点选择器：精确+模糊搜索）
+const selectedKPs = ref([]); // 单选模式下始终 0/1 个
+const selectedKP = computed(() => (selectedKPs.value.length ? selectedKPs.value[0] : null));
 
 // 出题配置
 const selectedCount = ref(1);
 const selectedDifficulty = ref("0.65");
 const needImages = ref(false);
 const imageCount = ref(3);
+const banks = ref([]);
+const selectedBank = ref("");
 
 // 状态
 const toast = ref("");
@@ -47,80 +43,6 @@ function showToast(message) {
   toast.value = message;
   window.clearTimeout(showToast.timer);
   toast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
-}
-
-// 加载知识点（分页）
-async function loadTopics(page = 1) {
-  topicLoading.value = true;
-  try {
-    const data = await api.listKP({ page, page_size: 100 });
-    if (page === 1) {
-      allTopics.value = data.points || [];
-    } else {
-      allTopics.value = [...allTopics.value, ...(data.points || [])];
-    }
-    topicTotal.value = data.total || 0;
-    topicPage.value = page;
-  } catch (e) {
-    showToast("加载知识点失败: " + e.message);
-  } finally {
-    topicLoading.value = false;
-  }
-}
-
-// 计算下拉框位置
-function updateDropdownPosition() {
-  if (searchInputRef.value) {
-    const rect = searchInputRef.value.getBoundingClientRect();
-    dropdownStyle.value = {
-      position: 'fixed',
-      top: rect.bottom + 4 + 'px',
-      left: rect.left + 'px',
-      width: rect.width + 'px',
-    };
-  }
-}
-
-// 搜索知识点
-async function searchTopics() {
-  if (!topicSearch.value.trim()) {
-    loadTopics(1);
-    return;
-  }
-  topicLoading.value = true;
-  try {
-    const data = await api.searchKP(topicSearch.value.trim());
-    allTopics.value = data.points || [];
-    topicTotal.value = data.total || 0;
-  } catch (e) {
-    showToast("搜索失败: " + e.message);
-  } finally {
-    topicLoading.value = false;
-  }
-}
-
-// 筛选后的知识点列表
-const filteredTopics = computed(() => {
-  return allTopics.value;
-});
-
-// 加载更多知识点
-function loadMoreTopics() {
-  if (allTopics.value.length < topicTotal.value) {
-    loadTopics(topicPage.value + 1);
-  }
-}
-
-// 选择知识点
-function selectTopic(kp) {
-  selectedKP.value = kp;
-  showDropdown.value = false;
-  topicSearch.value = "";
-}
-
-// 清除选择
-function clearSelection() {
-  selectedKP.value = null;
 }
 
 async function loadStats() {
@@ -155,6 +77,7 @@ async function generateQuestion() {
       topic: selectedKP.value.topic,
       outline_code: selectedKP.value.outline_code || selectedKP.value.id || "",
       count: selectedCount.value,
+      bank_id: selectedBank.value,
     };
     console.log("生成参数:", genParams, "选中知识点:", JSON.stringify(selectedKP.value));
     const data = await api.generate(genParams);
@@ -336,9 +259,18 @@ function imageSrc(path) {
   return `/images/${filename}`;
 }
 
+async function loadBanks() {
+  try {
+    const data = await api.listBanks();
+    banks.value = data.banks || [];
+  } catch (e) {
+    console.error(e);
+  }
+}
+
 onMounted(() => {
   loadStats();
-  loadTopics(1);
+  loadBanks();
 });
 </script>
 
@@ -465,31 +397,10 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 知识点选择器 -->
+        <!-- 知识点选择器（精确+模糊搜索，单选） -->
         <div class="kp-selector">
           <label class="field-label">选择知识点</label>
-
-          <!-- 已选知识点 -->
-          <div v-if="selectedKP" class="selected-kp">
-            <div class="kp-info">
-              <span class="kp-code">{{ selectedKP.outline_code }}</span>
-              <span class="kp-subject">{{ selectedKP.subject }}</span>
-              <span class="kp-topic">{{ selectedKP.topic }}</span>
-            </div>
-            <button class="clear-btn" type="button" @click="clearSelection" title="清除选择">×</button>
-          </div>
-
-          <!-- 搜索框 -->
-          <div v-else class="kp-search-box">
-            <input
-              ref="searchInputRef"
-              v-model="topicSearch"
-              placeholder="搜索知识点、大纲代码、专业..."
-              @input="searchTopics"
-              @focus="showDropdown = true; updateDropdownPosition()"
-              class="kp-search-input"
-            />
-          </div>
+          <KnowledgePointPicker v-model="selectedKPs" :multiple="false" placeholder="搜索知识点、大纲代码、专业...（支持精确筛选与模糊搜索）" />
         </div>
 
         <label class="field">
@@ -499,6 +410,14 @@ onMounted(() => {
             <option value="0.65">中等 (0.65)</option>
             <option value="0.75">偏难 (0.75)</option>
             <option value="0.85">困难 (0.85)</option>
+          </select>
+        </label>
+
+        <label class="field" v-if="banks.length">
+          <span>目标题库</span>
+          <select v-model="selectedBank">
+            <option value="">未分类</option>
+            <option v-for="b in banks" :key="b.id" :value="b.id">{{ b.name }}</option>
           </select>
         </label>
 
@@ -574,37 +493,6 @@ onMounted(() => {
       </section>
     </aside>
   </div>
-
-  <!-- 点击外部关闭下拉框 -->
-  <div v-if="showDropdown" class="dropdown-overlay" @click="showDropdown = false"></div>
-
-  <!-- 知识点下拉框（Teleport 到 body，避免被父容器裁剪） -->
-  <Teleport to="body">
-    <div v-if="showDropdown && !selectedKP" class="kp-dropdown" :style="dropdownStyle">
-      <div v-if="topicLoading" class="kp-loading">搜索中...</div>
-      <div v-else-if="filteredTopics.length === 0" class="kp-empty">未找到匹配的知识点</div>
-      <template v-else>
-        <div class="kp-list">
-          <button
-            v-for="kp in filteredTopics"
-            :key="kp.id"
-            class="kp-item"
-            type="button"
-            @click="selectTopic(kp)"
-          >
-            <span class="kp-item-code">{{ kp.outline_code }}</span>
-            <span class="kp-item-subject">{{ kp.subject }}</span>
-            <span class="kp-item-topic">{{ kp.topic }}</span>
-          </button>
-        </div>
-        <div v-if="allTopics.length < topicTotal" class="kp-load-more">
-          <button class="text-button" type="button" @click="loadMoreTopics" :disabled="topicLoading">
-            {{ topicLoading ? "加载中..." : `加载更多 (${allTopics.length}/${topicTotal})` }}
-          </button>
-        </div>
-      </template>
-    </div>
-  </Teleport>
 
   <div class="toast" :class="{ show: toast }" role="status" aria-live="polite">{{ toast }}</div>
 </template>

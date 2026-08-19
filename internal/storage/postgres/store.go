@@ -82,6 +82,34 @@ func (s *Store) runMigrations() error {
 			ALTER TABLE image_review_records ADD CONSTRAINT image_review_records_image_id_fkey
 				FOREIGN KEY (image_id) REFERENCES generated_images(id) ON DELETE CASCADE;
 		END $$`,
+		// 题库分库
+		`ALTER TABLE questions ADD COLUMN IF NOT EXISTS bank_id TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_questions_bank ON questions(bank_id)`,
+		`ALTER TABLE question_banks ADD COLUMN IF NOT EXISTS professions TEXT[] DEFAULT '{}'`,
+		// 题目-题库多对多（一道题可属于多个题库）：
+		// 先把旧单库归属迁入成员表，再删除旧列
+		`DO $$ BEGIN
+			CREATE TABLE IF NOT EXISTS question_bank_members (
+				question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+				bank_id TEXT NOT NULL REFERENCES question_banks(id) ON DELETE CASCADE,
+				PRIMARY KEY (question_id, bank_id)
+			);
+		END $$`,
+		`INSERT INTO question_bank_members (question_id, bank_id)
+			SELECT id, bank_id FROM questions WHERE bank_id != ''
+			ON CONFLICT DO NOTHING`,
+		`ALTER TABLE questions DROP COLUMN IF EXISTS bank_id`,
+		// 用户权限体系
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions TEXT[] DEFAULT '{}'`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS bank_ids TEXT[] DEFAULT '{}'`,
+		// 审核流程：适用题库 + 最终把关人
+		`ALTER TABLE review_flows ADD COLUMN IF NOT EXISTS bank_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE review_flows ADD COLUMN IF NOT EXISTS final_reviewer_ids TEXT[] DEFAULT '{}'`,
+		`ALTER TABLE review_flows ADD COLUMN IF NOT EXISTS vote_rule TEXT NOT NULL DEFAULT ''`,
+		// 审核任务：最终把关人快照
+		`ALTER TABLE review_tasks ADD COLUMN IF NOT EXISTS final_reviewer_ids TEXT[] DEFAULT '{}'`,
+		`ALTER TABLE review_tasks ADD COLUMN IF NOT EXISTS final_decision JSONB DEFAULT 'null'`,
+		`ALTER TABLE review_tasks ADD COLUMN IF NOT EXISTS question_prev_status TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, m := range migrations {
 		if _, err := s.db.Exec(m); err != nil {
@@ -199,7 +227,13 @@ func (s *Store) SaveQuestion(ctx context.Context, q domain.A2Question) error {
 	kps, _ := json.Marshal(q.KnowledgePoints)
 	media, _ := json.Marshal(q.MediaRefs)
 
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO questions (id, clinical_stem, options, answer, explanation, source_refs, knowledge_points, media_refs, difficulty, cognitive_level, exam_points, outline_code, profession, system_name, status, version, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		ON CONFLICT (id) DO UPDATE SET
@@ -213,7 +247,30 @@ func (s *Store) SaveQuestion(ctx context.Context, q domain.A2Question) error {
 	`, q.ID, q.ClinicalStem, opts, q.Answer, q.Explanation, refs, kps, media,
 		q.Difficulty, q.CognitiveLevel, q.ExamPoints, q.OutlineCode, q.Profession, q.System,
 		q.Status, q.Version, q.CreatedAt, q.UpdatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	// 更新题库归属（多对多）
+	if err := s.replaceBankMembers(ctx, tx, q.ID, q.BankIDs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// replaceBankMembers 重建题目-题库成员关系。
+func (s *Store) replaceBankMembers(ctx context.Context, tx *sql.Tx, questionID string, bankIDs []string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM question_bank_members WHERE question_id=$1`, questionID); err != nil {
+		return err
+	}
+	for _, b := range bankIDs {
+		if b == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO question_bank_members (question_id, bank_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, questionID, b); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) SaveQuestions(ctx context.Context, questions []domain.A2Question) (int, error) {
@@ -235,11 +292,15 @@ func (s *Store) SaveQuestions(ctx context.Context, questions []domain.A2Question
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 			ON CONFLICT (id) DO UPDATE SET
 				clinical_stem=EXCLUDED.clinical_stem, options=EXCLUDED.options, answer=EXCLUDED.answer,
-				explanation=EXCLUDED.explanation, status=EXCLUDED.status, updated_at=EXCLUDED.updated_at
+				explanation=EXCLUDED.explanation,
+				status=EXCLUDED.status, updated_at=EXCLUDED.updated_at
 		`, q.ID, q.ClinicalStem, opts, q.Answer, q.Explanation, refs, kps, media,
 			q.Difficulty, q.CognitiveLevel, q.ExamPoints, q.OutlineCode, q.Profession, q.System,
 			q.Status, q.Version, q.CreatedAt, q.UpdatedAt)
 		if err != nil {
+			return count, err
+		}
+		if err := s.replaceBankMembers(ctx, tx, q.ID, q.BankIDs); err != nil {
 			return count, err
 		}
 		count++
@@ -249,8 +310,10 @@ func (s *Store) SaveQuestions(ctx context.Context, questions []domain.A2Question
 
 func (s *Store) GetQuestion(ctx context.Context, id string) (*domain.A2Question, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, clinical_stem, options, answer, explanation, source_refs, knowledge_points, media_refs, difficulty, cognitive_level, exam_points, outline_code, profession, system_name, status, version, created_at, updated_at
-		FROM questions WHERE id=$1
+		SELECT q.id, q.clinical_stem, q.options, q.answer, q.explanation, q.source_refs, q.knowledge_points, q.media_refs, q.difficulty, q.cognitive_level, q.exam_points, q.outline_code, q.profession, q.system_name,
+			COALESCE(ARRAY(SELECT m.bank_id FROM question_bank_members m WHERE m.question_id = q.id ORDER BY m.bank_id), '{}') AS bank_ids,
+			q.status, q.version, q.created_at, q.updated_at
+		FROM questions q WHERE q.id=$1
 	`, id)
 	return scanQuestion(row)
 }
@@ -262,8 +325,10 @@ func (s *Store) DeleteQuestion(ctx context.Context, id string) error {
 
 func (s *Store) ListQuestions(ctx context.Context) ([]domain.A2Question, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, clinical_stem, options, answer, explanation, source_refs, knowledge_points, media_refs, difficulty, cognitive_level, exam_points, outline_code, profession, system_name, status, version, created_at, updated_at
-		FROM questions ORDER BY created_at DESC
+		SELECT q.id, q.clinical_stem, q.options, q.answer, q.explanation, q.source_refs, q.knowledge_points, q.media_refs, q.difficulty, q.cognitive_level, q.exam_points, q.outline_code, q.profession, q.system_name,
+			COALESCE(ARRAY(SELECT m.bank_id FROM question_bank_members m WHERE m.question_id = q.id ORDER BY m.bank_id), '{}') AS bank_ids,
+			q.status, q.version, q.created_at, q.updated_at
+		FROM questions q ORDER BY q.created_at DESC
 	`)
 	if err != nil {
 		return nil, err
@@ -322,44 +387,34 @@ func (s *Store) DeleteExpert(ctx context.Context, id string) error {
 func (s *Store) SaveFlowConfig(ctx context.Context, f domain.ReviewFlowConfig) error {
 	rounds, _ := json.Marshal(f.Rounds)
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO review_flows (id, name, description, subject, rounds, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6)
+		INSERT INTO review_flows (id, name, description, subject, bank_id, final_reviewer_ids, vote_rule, rounds, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		ON CONFLICT (id) DO UPDATE SET
-			name=EXCLUDED.name, description=EXCLUDED.description, subject=EXCLUDED.subject, rounds=EXCLUDED.rounds
-	`, f.ID, f.Name, f.Description, f.Subject, rounds, f.CreatedAt)
+			name=EXCLUDED.name, description=EXCLUDED.description, subject=EXCLUDED.subject,
+			bank_id=EXCLUDED.bank_id, final_reviewer_ids=EXCLUDED.final_reviewer_ids,
+			vote_rule=EXCLUDED.vote_rule, rounds=EXCLUDED.rounds
+	`, f.ID, f.Name, f.Description, f.Subject, f.BankID, pqArray(f.FinalReviewerIDs), f.VoteRule, rounds, f.CreatedAt)
 	return err
 }
 
 func (s *Store) GetFlowConfig(ctx context.Context, id string) (*domain.ReviewFlowConfig, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, description, subject, rounds, created_at FROM review_flows WHERE id=$1`, id)
-	var f domain.ReviewFlowConfig
-	var roundsJSON []byte
-	err := row.Scan(&f.ID, &f.Name, &f.Description, &f.Subject, &roundsJSON, &f.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	json.Unmarshal(roundsJSON, &f.Rounds)
-	return &f, nil
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, description, subject, bank_id, final_reviewer_ids, vote_rule, rounds, created_at FROM review_flows WHERE id=$1`, id)
+	return scanFlow(row)
 }
 
 func (s *Store) ListFlowConfigs(ctx context.Context) ([]domain.ReviewFlowConfig, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, description, subject, rounds, created_at FROM review_flows ORDER BY created_at`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, description, subject, bank_id, final_reviewer_ids, vote_rule, rounds, created_at FROM review_flows ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var result []domain.ReviewFlowConfig
 	for rows.Next() {
-		var f domain.ReviewFlowConfig
-		var roundsJSON []byte
-		if err := rows.Scan(&f.ID, &f.Name, &f.Description, &f.Subject, &roundsJSON, &f.CreatedAt); err != nil {
+		f, err := scanFlowRow(rows)
+		if err != nil {
 			return nil, err
 		}
-		json.Unmarshal(roundsJSON, &f.Rounds)
-		result = append(result, f)
+		result = append(result, *f)
 	}
 	return result, rows.Err()
 }
@@ -373,28 +428,43 @@ func (s *Store) DeleteFlowConfig(ctx context.Context, id string) error {
 
 func (s *Store) SaveTask(ctx context.Context, t domain.ReviewTask) error {
 	results, _ := json.Marshal(t.RoundResults)
+	var finalDecision []byte
+	if t.FinalDecision != nil {
+		finalDecision, _ = json.Marshal(t.FinalDecision)
+	} else {
+		finalDecision = []byte("null")
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO review_tasks (id, question_id, flow_id, current_round, status, assigned_to, round_results, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		INSERT INTO review_tasks (id, question_id, flow_id, current_round, status, assigned_to, final_reviewer_ids, final_decision, question_prev_status, round_results, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		ON CONFLICT (id) DO UPDATE SET
 			current_round=EXCLUDED.current_round, status=EXCLUDED.status,
-			assigned_to=EXCLUDED.assigned_to, round_results=EXCLUDED.round_results, updated_at=EXCLUDED.updated_at
-	`, t.ID, t.QuestionID, t.FlowID, t.CurrentRound, t.Status, pqArray(t.AssignedTo), results, t.CreatedAt, t.UpdatedAt)
+			assigned_to=EXCLUDED.assigned_to, final_reviewer_ids=EXCLUDED.final_reviewer_ids,
+			final_decision=EXCLUDED.final_decision,
+			question_prev_status=EXCLUDED.question_prev_status,
+			round_results=EXCLUDED.round_results, updated_at=EXCLUDED.updated_at
+	`, t.ID, t.QuestionID, t.FlowID, t.CurrentRound, t.Status, pqArray(t.AssignedTo), pqArray(t.FinalReviewerIDs), finalDecision, t.QuestionPrevStatus, results, t.CreatedAt, t.UpdatedAt)
 	return err
 }
 
 func (s *Store) GetTask(ctx context.Context, id string) (*domain.ReviewTask, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, question_id, flow_id, current_round, status, assigned_to, round_results, created_at, updated_at FROM review_tasks WHERE id=$1`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, question_id, flow_id, current_round, status, assigned_to, final_reviewer_ids, final_decision, question_prev_status, round_results, created_at, updated_at FROM review_tasks WHERE id=$1`, id)
 	return scanTask(row)
 }
 
 func (s *Store) GetTaskByQuestionID(ctx context.Context, questionID string) (*domain.ReviewTask, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, question_id, flow_id, current_round, status, assigned_to, round_results, created_at, updated_at FROM review_tasks WHERE question_id=$1 ORDER BY created_at DESC LIMIT 1`, questionID)
+	row := s.db.QueryRowContext(ctx, `SELECT id, question_id, flow_id, current_round, status, assigned_to, final_reviewer_ids, final_decision, question_prev_status, round_results, created_at, updated_at FROM review_tasks WHERE question_id=$1 ORDER BY created_at DESC LIMIT 1`, questionID)
 	return scanTask(row)
 }
 
 func (s *Store) UpdateTask(ctx context.Context, t domain.ReviewTask) error {
 	return s.SaveTask(ctx, t)
+}
+
+// DeleteTask 删除审核任务（级联删除其审核记录）。
+func (s *Store) DeleteTask(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM review_tasks WHERE id=$1`, id)
+	return err
 }
 
 func (s *Store) CountActiveTasksByFlow(ctx context.Context, flowID string) (int, error) {
@@ -425,6 +495,53 @@ func (s *Store) SaveRecord(ctx context.Context, r domain.ReviewRecord) error {
 
 func (s *Store) ListRecordsByTaskID(ctx context.Context, taskID string) ([]domain.ReviewRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, question_id, round_number, expert_id, conclusion, opinion, created_at FROM review_records WHERE task_id=$1 ORDER BY created_at`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []domain.ReviewRecord
+	for rows.Next() {
+		var r domain.ReviewRecord
+		if err := rows.Scan(&r.ID, &r.TaskID, &r.QuestionID, &r.RoundNumber, &r.ExpertID, &r.Conclusion, &r.Opinion, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
+// ListAllTasks 列出全部审核任务（含历史，审核结果汇总用）。
+func (s *Store) ListAllTasks(ctx context.Context) ([]domain.ReviewTask, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, question_id, flow_id, current_round, status, assigned_to, final_reviewer_ids, final_decision, question_prev_status, round_results, created_at, updated_at FROM review_tasks ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []domain.ReviewTask
+	for rows.Next() {
+		var t domain.ReviewTask
+		var assignedTo, finalReviewerIDs []string
+		var resultsJSON, finalDecisionJSON []byte
+		if err := rows.Scan(&t.ID, &t.QuestionID, &t.FlowID, &t.CurrentRound, &t.Status, pqArrayScanner(&assignedTo), pqArrayScanner(&finalReviewerIDs), &finalDecisionJSON, &t.QuestionPrevStatus, &resultsJSON, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		t.AssignedTo = assignedTo
+		t.FinalReviewerIDs = finalReviewerIDs
+		json.Unmarshal(resultsJSON, &t.RoundResults)
+		if len(finalDecisionJSON) > 0 && string(finalDecisionJSON) != "null" {
+			var fd domain.ExpertReview
+			if json.Unmarshal(finalDecisionJSON, &fd) == nil {
+				t.FinalDecision = &fd
+			}
+		}
+		result = append(result, t)
+	}
+	return result, rows.Err()
+}
+
+// ListAllRecords 列出全部审核记录（审核结果汇总用）。
+func (s *Store) ListAllRecords(ctx context.Context) ([]domain.ReviewRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, question_id, round_number, expert_id, conclusion, opinion, created_at FROM review_records ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -666,15 +783,17 @@ func scanPoints(rows *sql.Rows) ([]domain.KnowledgePoint, error) {
 func scanQuestion(row *sql.Row) (*domain.A2Question, error) {
 	var q domain.A2Question
 	var optsJSON, refsJSON, kpsJSON, mediaJSON []byte
+	var bankIDs []string
 	err := row.Scan(&q.ID, &q.ClinicalStem, &optsJSON, &q.Answer, &q.Explanation, &refsJSON, &kpsJSON, &mediaJSON,
 		&q.Difficulty, &q.CognitiveLevel, &q.ExamPoints, &q.OutlineCode, &q.Profession, &q.System,
-		&q.Status, &q.Version, &q.CreatedAt, &q.UpdatedAt)
+		pqArrayScanner(&bankIDs), &q.Status, &q.Version, &q.CreatedAt, &q.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	q.BankIDs = bankIDs
 	json.Unmarshal(optsJSON, &q.Options)
 	json.Unmarshal(refsJSON, &q.SourceRefs)
 	json.Unmarshal(kpsJSON, &q.KnowledgePoints)
@@ -687,11 +806,13 @@ func scanQuestions(rows *sql.Rows) ([]domain.A2Question, error) {
 	for rows.Next() {
 		var q domain.A2Question
 		var optsJSON, refsJSON, kpsJSON, mediaJSON []byte
+		var bankIDs []string
 		if err := rows.Scan(&q.ID, &q.ClinicalStem, &optsJSON, &q.Answer, &q.Explanation, &refsJSON, &kpsJSON, &mediaJSON,
 			&q.Difficulty, &q.CognitiveLevel, &q.ExamPoints, &q.OutlineCode, &q.Profession, &q.System,
-			&q.Status, &q.Version, &q.CreatedAt, &q.UpdatedAt); err != nil {
+			pqArrayScanner(&bankIDs), &q.Status, &q.Version, &q.CreatedAt, &q.UpdatedAt); err != nil {
 			return nil, err
 		}
+		q.BankIDs = bankIDs
 		json.Unmarshal(optsJSON, &q.Options)
 		json.Unmarshal(refsJSON, &q.SourceRefs)
 		json.Unmarshal(kpsJSON, &q.KnowledgePoints)
@@ -727,9 +848,9 @@ func scanExpertRow(rows *sql.Rows) (domain.Expert, error) {
 
 func scanTask(row *sql.Row) (*domain.ReviewTask, error) {
 	var t domain.ReviewTask
-	var assignedTo []string
-	var resultsJSON []byte
-	err := row.Scan(&t.ID, &t.QuestionID, &t.FlowID, &t.CurrentRound, &t.Status, pqArrayScanner(&assignedTo), &resultsJSON, &t.CreatedAt, &t.UpdatedAt)
+	var assignedTo, finalReviewerIDs []string
+	var resultsJSON, finalDecisionJSON []byte
+	err := row.Scan(&t.ID, &t.QuestionID, &t.FlowID, &t.CurrentRound, &t.Status, pqArrayScanner(&assignedTo), pqArrayScanner(&finalReviewerIDs), &finalDecisionJSON, &t.QuestionPrevStatus, &resultsJSON, &t.CreatedAt, &t.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -737,8 +858,46 @@ func scanTask(row *sql.Row) (*domain.ReviewTask, error) {
 		return nil, err
 	}
 	t.AssignedTo = assignedTo
+	t.FinalReviewerIDs = finalReviewerIDs
 	json.Unmarshal(resultsJSON, &t.RoundResults)
+	if len(finalDecisionJSON) > 0 && string(finalDecisionJSON) != "null" {
+		var fd domain.ExpertReview
+		if json.Unmarshal(finalDecisionJSON, &fd) == nil {
+			t.FinalDecision = &fd
+		}
+	}
 	return &t, nil
+}
+
+// scanFlow 扫描单行审核流程配置。
+func scanFlow(row *sql.Row) (*domain.ReviewFlowConfig, error) {
+	var f domain.ReviewFlowConfig
+	var finalReviewerIDs []string
+	var roundsJSON []byte
+	err := row.Scan(&f.ID, &f.Name, &f.Description, &f.Subject, &f.BankID, pqArrayScanner(&finalReviewerIDs), &f.VoteRule, &roundsJSON, &f.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	f.FinalReviewerIDs = finalReviewerIDs
+	json.Unmarshal(roundsJSON, &f.Rounds)
+	return &f, nil
+}
+
+// scanFlowRow 扫描多行结果集中的一行审核流程配置。
+func scanFlowRow(rows *sql.Rows) (*domain.ReviewFlowConfig, error) {
+	var f domain.ReviewFlowConfig
+	var finalReviewerIDs []string
+	var roundsJSON []byte
+	err := rows.Scan(&f.ID, &f.Name, &f.Description, &f.Subject, &f.BankID, pqArrayScanner(&finalReviewerIDs), &f.VoteRule, &roundsJSON, &f.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	f.FinalReviewerIDs = finalReviewerIDs
+	json.Unmarshal(roundsJSON, &f.Rounds)
+	return &f, nil
 }
 
 func scanImagePrompt(row *sql.Row) (*domain.ImagePrompt, error) {
@@ -942,3 +1101,130 @@ func (s *Store) ListAll(ctx context.Context, limit int) ([]domain.AIReviewResult
 	return results, rows.Err()
 }
 
+// ===== 角色模板 =====
+
+func (s *Store) SaveRole(ctx context.Context, r domain.Role) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO roles (id, name, description, permissions, is_builtin, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		ON CONFLICT (id) DO UPDATE SET
+			name=EXCLUDED.name, description=EXCLUDED.description,
+			permissions=EXCLUDED.permissions, is_builtin=EXCLUDED.is_builtin, updated_at=EXCLUDED.updated_at
+	`, r.ID, r.Name, r.Description, pqArray(r.Permissions), r.IsBuiltin, r.CreatedAt, r.UpdatedAt)
+	return err
+}
+
+func (s *Store) GetRole(ctx context.Context, id string) (*domain.Role, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, description, permissions, is_builtin, created_at, updated_at FROM roles WHERE id=$1`, id)
+	var r domain.Role
+	var perms []string
+	err := row.Scan(&r.ID, &r.Name, &r.Description, pqArrayScanner(&perms), &r.IsBuiltin, &r.CreatedAt, &r.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	r.Permissions = perms
+	return &r, nil
+}
+
+func (s *Store) ListRoles(ctx context.Context) ([]domain.Role, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, description, permissions, is_builtin, created_at, updated_at FROM roles ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []domain.Role
+	for rows.Next() {
+		var r domain.Role
+		var perms []string
+		if err := rows.Scan(&r.ID, &r.Name, &r.Description, pqArrayScanner(&perms), &r.IsBuiltin, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		r.Permissions = perms
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) DeleteRole(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM roles WHERE id=$1`, id)
+	return err
+}
+
+// ===== 题库 =====
+
+func (s *Store) SaveBank(ctx context.Context, b domain.QuestionBank) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO question_banks (id, name, description, professions, created_at)
+		VALUES ($1,$2,$3,$4,$5)
+		ON CONFLICT (id) DO UPDATE SET
+			name=EXCLUDED.name, description=EXCLUDED.description, professions=EXCLUDED.professions
+	`, b.ID, b.Name, b.Description, pqArray(b.Professions), b.CreatedAt)
+	return err
+}
+
+func (s *Store) GetBank(ctx context.Context, id string) (*domain.QuestionBank, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, description, professions, created_at FROM question_banks WHERE id=$1`, id)
+	var b domain.QuestionBank
+	var professions []string
+	err := row.Scan(&b.ID, &b.Name, &b.Description, pqArrayScanner(&professions), &b.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	b.Professions = professions
+	return &b, nil
+}
+
+func (s *Store) ListBanks(ctx context.Context) ([]domain.QuestionBank, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, description, professions, created_at FROM question_banks ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []domain.QuestionBank
+	for rows.Next() {
+		var b domain.QuestionBank
+		var professions []string
+		if err := rows.Scan(&b.ID, &b.Name, &b.Description, pqArrayScanner(&professions), &b.CreatedAt); err != nil {
+			return nil, err
+		}
+		b.Professions = professions
+		result = append(result, b)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) DeleteBank(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM question_banks WHERE id=$1`, id)
+	return err
+}
+
+// AddQuestionsToBank 批量把题目加入题库（高效 SQL 插入成员关系，跳过已在库的）。
+func (s *Store) AddQuestionsToBank(ctx context.Context, questionIDs []string, bankID string) (int, error) {
+	if len(questionIDs) == 0 {
+		return 0, nil
+	}
+	// 校验题库存在
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM question_banks WHERE id=$1)`, bankID).Scan(&exists); err != nil {
+		return 0, err
+	}
+	if !exists {
+		return 0, fmt.Errorf("题库 %s 不存在", bankID)
+	}
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO question_bank_members (question_id, bank_id)
+		SELECT q.id, $2 FROM questions q WHERE q.id = ANY($1::text[])
+		ON CONFLICT DO NOTHING
+	`, pq.Array(questionIDs), bankID)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}

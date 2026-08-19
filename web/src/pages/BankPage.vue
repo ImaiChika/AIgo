@@ -1,24 +1,31 @@
 <script setup>
 import { ref, onMounted, computed } from "vue";
 import { api } from "../api.js";
-import { isAdmin, currentUser } from "../auth.js";
+import { hasPerm } from "../auth.js";
 
-// 删除权限：仅 admin/expert（teacher 无 question:delete 权限）
-const canDelete = computed(() => {
-  const role = currentUser.value?.role;
-  return role === "admin" || role === "expert";
-});
-
+// 权限判断
+const canDelete = computed(() => hasPerm("question:delete"));
+const canEdit = computed(() => hasPerm("question:edit"));
+const canDownload = computed(() => hasPerm("question:download"));
+const canCreate = computed(() => hasPerm("question:create"));
 const toast = ref("");
 const questions = ref([]);
 const loading = ref(false);
 const filterStatus = ref("");
 const searchQuery = ref("");
+const filterBank = ref(""); // 题库筛选
+const filterProfession = ref(""); // 专业筛选
+const professions = ref([]); // 专业列表
+const banks = ref([]); // 题库列表
 const selectedQuestion = ref(null);
 const selectedImages = ref([]);
 const lightboxImage = ref("");
 const editing = ref(false);
 const editForm = ref({ clinical_stem: "", options: [], answer: "", explanation: "" });
+
+// 新建题目表单
+const showCreateForm = ref(false);
+const createForm = ref({ clinical_stem: "", options: [{ label: "A", text: "" }], answer: "", explanation: "", difficulty: "medium", bank_id: "" });
 
 // 分页
 const page = ref(1);
@@ -49,13 +56,16 @@ function toggleSelectAll() {
   }
 }
 
-function downloadFile(filename) {
+async function downloadFile(filename) {
+  const blob = await api.downloadExport(filename);
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = `/api/export/download/${filename}`;
+  a.href = url;
   a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 async function exportXlsx() {
@@ -118,10 +128,10 @@ async function loadQuestions(resetPage = true) {
   if (resetPage) page.value = 1;
   try {
     let data;
-    if (searchQuery.value || filterStatus.value) {
-      data = await api.searchQuestions(searchQuery.value, filterStatus.value, page.value, pageSize);
+    if (searchQuery.value || filterStatus.value || filterProfession.value) {
+      data = await api.searchQuestions(searchQuery.value, filterStatus.value, page.value, pageSize, filterBank.value, filterProfession.value ? [filterProfession.value] : []);
     } else {
-      data = await api.listQuestions(page.value, pageSize);
+      data = await api.listQuestions(page.value, pageSize, filterBank.value);
     }
     questions.value = data.questions || [];
     totalCount.value = data.total || 0;
@@ -138,10 +148,10 @@ async function loadMore() {
   loading.value = true;
   try {
     let data;
-    if (searchQuery.value || filterStatus.value) {
-      data = await api.searchQuestions(searchQuery.value, filterStatus.value, page.value, pageSize);
+    if (searchQuery.value || filterStatus.value || filterProfession.value) {
+      data = await api.searchQuestions(searchQuery.value, filterStatus.value, page.value, pageSize, filterBank.value, filterProfession.value ? [filterProfession.value] : []);
     } else {
-      data = await api.listQuestions(page.value, pageSize);
+      data = await api.listQuestions(page.value, pageSize, filterBank.value);
     }
     questions.value = questions.value.concat(data.questions || []);
     totalCount.value = data.total || 0;
@@ -186,18 +196,7 @@ async function deleteQuestion(q) {
   }
 }
 
-async function publishQuestion(q) {
-  if (!confirm(`确定将题目发布到正式题库？\n${(q.clinical_stem || "").slice(0, 50)}...`)) return;
-  try {
-    await api.publishQuestion(q.id);
-    q.status = "published";
-    showToast("已发布到正式题库");
-  } catch (e) {
-    showToast("发布失败: " + e.message);
-  }
-}
-
-function startEdit() {
+async function startEdit() {
   editForm.value = {
     clinical_stem: selectedQuestion.value.clinical_stem || "",
     options: (selectedQuestion.value.options || []).map(o => ({ ...o })),
@@ -253,6 +252,7 @@ function doSearch() {
 function clearSearch() {
   searchQuery.value = "";
   filterStatus.value = "";
+  filterProfession.value = "";
   selectedIds.value.clear();
   selectAll.value = false;
   loadQuestions();
@@ -261,7 +261,7 @@ function clearSearch() {
 function statusText(status) {
   const map = {
     ai_draft: "AI草稿", auto_checked: "已初评", ai_reviewed: "AI已检查",
-    reviewing: "审核中", approved: "已通过", rejected: "已驳回",
+    reviewing: "审核中", conflict: "待决断", approved: "已通过", rejected: "已驳回",
     revision_required: "需修改", published: "已入库", archived: "已归档",
   };
   return map[status] || status;
@@ -272,6 +272,7 @@ function statusClass(status) {
   if (status === "rejected") return "status-bad";
   if (status === "reviewing") return "status-active";
   if (status === "revision_required") return "status-warn";
+  if (status === "conflict") return "status-conflict";
   return "";
 }
 
@@ -288,8 +289,69 @@ async function selectQuestionById(id) {
   }
 }
 
+async function loadBanks() {
+  try {
+    const data = await api.listBanks();
+    banks.value = data.banks || [];
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function loadProfessions() {
+  try {
+    const data = await api.listProfessions();
+    professions.value = data.professions || [];
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function bankName(id) {
+  if (!id) return "未分类";
+  const b = banks.value.find((x) => x.id === id);
+  return b ? b.name : id;
+}
+
+// 题目归属：多题库显示名称列表
+function questionBanks(ids) {
+  if (!ids || !ids.length) return "未分类";
+  return ids.map(bankName).join("、");
+}
+
+// 新建题目
+function addCreateOption() {
+  if (createForm.value.options.length >= 5) {
+    showToast("最多5个选项");
+    return;
+  }
+  const label = String.fromCharCode(65 + createForm.value.options.length);
+  createForm.value.options.push({ label, text: "" });
+}
+
+function removeCreateOption(index) {
+  if (createForm.value.options.length <= 1) {
+    showToast("至少需要一个选项");
+    return;
+  }
+  createForm.value.options.splice(index, 1);
+  createForm.value.options.forEach((o, i) => { o.label = String.fromCharCode(65 + i); });
+}
+
+async function submitCreate() {
+  try {
+    await api.createQuestion(createForm.value);
+    showToast("已创建题目（草稿状态）");
+    showCreateForm.value = false;
+    createForm.value = { clinical_stem: "", options: [{ label: "A", text: "" }], answer: "", explanation: "", difficulty: "medium", bank_id: filterBank.value };
+    loadQuestions();
+  } catch (e) {
+    showToast("创建失败: " + e.message);
+  }
+}
+
 onMounted(async () => {
-  await loadQuestions();
+  await Promise.all([loadQuestions(), loadBanks(), loadProfessions()]);
   // 支持从审核页「去修改题目」跳转：?edit=<题目ID> 自动定位并进入编辑
   const editId = new URLSearchParams(window.location.search).get("edit");
   if (editId) {
@@ -310,18 +372,46 @@ onMounted(async () => {
 
       <div class="filter-row">
         <input v-model="searchQuery" placeholder="搜索ID、题干或答案..." @keyup.enter="doSearch" class="search-input" />
+        <select v-model="filterProfession" @change="doSearch" title="按专业筛选">
+          <option value="">全部专业</option>
+          <option v-for="p in professions" :key="p" :value="p">{{ p }}</option>
+        </select>
         <select v-model="filterStatus" @change="doSearch">
           <option value="">全部状态</option>
           <option value="ai_draft">AI草稿</option>
           <option value="auto_checked">已初评</option>
           <option value="ai_reviewed">AI已检查</option>
           <option value="reviewing">审核中</option>
+          <option value="conflict">待决断</option>
           <option value="approved">已通过</option>
           <option value="rejected">已驳回</option>
+          <option value="revision_required">需修改</option>
           <option value="published">已入库</option>
         </select>
         <button class="ghost-button" type="button" @click="doSearch">搜索</button>
         <button class="ghost-button" type="button" @click="clearSearch">重置</button>
+      </div>
+
+      <!-- 题库筛选 -->
+      <div class="bank-filter-row">
+        <button
+          type="button"
+          class="bank-filter-chip"
+          :class="{ active: filterBank === '' }"
+          @click="filterBank = ''; doSearch()"
+        >
+          全部题库
+        </button>
+        <button
+          v-for="b in banks"
+          :key="b.id"
+          type="button"
+          class="bank-filter-chip"
+          :class="{ active: filterBank === b.id }"
+          @click="filterBank = b.id; doSearch()"
+        >
+          {{ b.name }}
+        </button>
       </div>
 
       <!-- 批量操作栏 -->
@@ -331,7 +421,7 @@ onMounted(async () => {
           <span>全选</span>
         </label>
         <span class="selected-count" v-if="selectedIds.size > 0">已选 {{ selectedIds.size }} 道</span>
-        <div class="export-btns">
+        <div class="export-btns" v-if="canDownload">
           <button class="ghost-button" type="button" @click="exportXlsx" :disabled="exporting || selectedIds.size === 0">
             {{ exporting ? "导出中..." : "导出 Excel" }}
           </button>
@@ -341,6 +431,54 @@ onMounted(async () => {
           <button class="ghost-button" type="button" @click="exportAllXlsx" :disabled="exporting">
             导出全部 Excel
           </button>
+        </div>
+        <button v-if="canCreate" class="ghost-button" type="button" @click="showCreateForm = !showCreateForm">
+          {{ showCreateForm ? "取消新建" : "+ 新建题目" }}
+        </button>
+      </div>
+
+      <!-- 新建题目表单 -->
+      <div v-if="showCreateForm" class="create-form">
+        <div class="create-field">
+          <label>题干 *</label>
+          <textarea v-model="createForm.clinical_stem" class="edit-textarea" placeholder="临床情境题干"></textarea>
+        </div>
+        <div class="create-field">
+          <label>选项 *（答案必须存在于选项中）</label>
+          <div v-for="(opt, i) in createForm.options" :key="i" class="edit-option-row">
+            <span class="opt-label">{{ opt.label }}</span>
+            <input v-model="opt.text" class="edit-input" />
+            <button class="remove-btn" type="button" @click="removeCreateOption(i)">×</button>
+          </div>
+          <button class="text-button" type="button" @click="addCreateOption">+ 添加选项</button>
+        </div>
+        <div class="create-field">
+          <label>正确答案 *</label>
+          <select v-model="createForm.answer" class="edit-select">
+            <option v-for="(opt, i) in createForm.options" :key="i" :value="opt.label">{{ opt.label }}</option>
+          </select>
+        </div>
+        <div class="create-field">
+          <label>解析（可选）</label>
+          <textarea v-model="createForm.explanation" class="edit-textarea"></textarea>
+        </div>
+        <div class="create-field">
+          <label>难度</label>
+          <select v-model="createForm.difficulty" class="edit-select">
+            <option value="easy">简单</option>
+            <option value="medium">中等</option>
+            <option value="hard">困难</option>
+          </select>
+        </div>
+        <div class="create-field">
+          <label>所属题库</label>
+          <select v-model="createForm.bank_id" class="edit-select">
+            <option value="">未分类</option>
+            <option v-for="b in banks" :key="b.id" :value="b.id">{{ b.name }}</option>
+          </select>
+        </div>
+        <div class="create-actions">
+          <button class="primary-button" type="button" @click="submitCreate">创建题目</button>
         </div>
       </div>
 
@@ -370,13 +508,13 @@ onMounted(async () => {
               <span class="q-stem">{{ (q.clinical_stem || "").slice(0, 60) }}...</span>
               <span class="q-meta">
                 答案: {{ q.answer }}
+                <span v-if="(q.bank_ids || []).length"> | 题库: {{ questionBanks(q.bank_ids) }}</span>
                 <span v-if="q.outline_code"> | 大纲: {{ q.outline_code }}</span>
                 <span v-if="q.profession"> | 专业: {{ q.profession }}</span>
               </span>
             </div>
             <div class="q-actions">
               <span class="q-status" :class="statusClass(q.status)">{{ statusText(q.status) }}</span>
-              <button v-if="q.status === 'approved' && isAdmin" class="publish-btn" type="button" @click.stop="publishQuestion(q)" title="发布">发布</button>
               <button v-if="canDelete" class="delete-btn" type="button" @click.stop="deleteQuestion(q)" title="删除">×</button>
             </div>
           </div>
@@ -402,7 +540,7 @@ onMounted(async () => {
           {{ statusText(selectedQuestion.status) }}
         </span>
         <div class="edit-actions" v-if="!editing">
-          <button class="ghost-button" type="button" @click="startEdit">编辑</button>
+          <button v-if="canEdit" class="ghost-button" type="button" @click="startEdit">编辑</button>
         </div>
       </div>
 
@@ -481,9 +619,6 @@ onMounted(async () => {
           <p class="meta-text">创建: {{ selectedQuestion.created_at }}</p>
         </div>
 
-        <div v-if="selectedQuestion.status === 'approved' && isAdmin" class="publish-section">
-          <button class="primary-button" type="button" @click="publishQuestion(selectedQuestion)">发布到正式题库</button>
-        </div>
       </template>
 
       <!-- 编辑模式 -->
@@ -577,6 +712,126 @@ onMounted(async () => {
   padding: 8px 0;
   border-bottom: 1px solid #e5ebf3;
   margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.bank-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.bank-filter-chip {
+  padding: 4px 12px;
+  border: 1px solid #e5ebf3;
+  border-radius: 14px;
+  background: #fff;
+  font-size: 12px;
+  cursor: pointer;
+  color: #6e7b8f;
+}
+
+.bank-filter-chip:hover {
+  border-color: #1385f8;
+  color: #1385f8;
+}
+
+.bank-filter-chip.active {
+  background: #1385f8;
+  border-color: #1385f8;
+  color: #fff;
+  font-weight: 600;
+}
+
+/* 管理员提交审核 */
+.submit-review-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.flow-select-input {
+  height: 32px;
+  border: 1px solid #e5ebf3;
+  border-radius: 6px;
+  padding: 0 8px;
+  font-size: 13px;
+  max-width: 220px;
+}
+
+.submit-btn {
+  height: 32px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 6px;
+  background: #1385f8;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.submit-btn:hover {
+  background: #0571dc;
+}
+
+.submit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.submit-single-section {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: #eff8ff;
+  border: 1px solid #dce8f7;
+  border-radius: 8px;
+}
+
+.submit-single-section label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6e7b8f;
+  margin-bottom: 6px;
+}
+
+.submit-single-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.create-form {
+  padding: 12px;
+  background: #f8fbff;
+  border: 1px solid #dce8f7;
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+
+.create-field {
+  margin-bottom: 10px;
+}
+
+.create-field label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6e7b8f;
+  margin-bottom: 4px;
+}
+
+.create-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.status-conflict {
+  background: #fdf0f8;
+  color: #b93a7c;
 }
 
 .select-all {

@@ -19,6 +19,24 @@ type QuestionStore interface {
 	Count(ctx context.Context) (int, error)
 }
 
+// RoleStore 角色模板存储接口。
+type RoleStore interface {
+	SaveRole(ctx context.Context, role domain.Role) error
+	GetRole(ctx context.Context, id string) (*domain.Role, error)
+	ListRoles(ctx context.Context) ([]domain.Role, error)
+	DeleteRole(ctx context.Context, id string) error
+}
+
+// BankStore 题库存储接口。
+type BankStore interface {
+	SaveBank(ctx context.Context, bank domain.QuestionBank) error
+	GetBank(ctx context.Context, id string) (*domain.QuestionBank, error)
+	ListBanks(ctx context.Context) ([]domain.QuestionBank, error)
+	DeleteBank(ctx context.Context, id string) error
+	// AddQuestionsToBank 批量把题目加入题库（多对多，高效 SQL 插入成员关系，返回加入数量）。
+	AddQuestionsToBank(ctx context.Context, questionIDs []string, bankID string) (int, error)
+}
+
 // ExpertStore 专家存储接口。
 type ExpertStore interface {
 	SaveExpert(ctx context.Context, expert domain.Expert) error
@@ -39,11 +57,14 @@ type ReviewStore interface {
 	GetTask(ctx context.Context, id string) (*domain.ReviewTask, error)
 	GetTaskByQuestionID(ctx context.Context, questionID string) (*domain.ReviewTask, error)
 	UpdateTask(ctx context.Context, task domain.ReviewTask) error
+	DeleteTask(ctx context.Context, id string) error                        // 删除任务（级联删审核记录）
 	CountActiveTasksByFlow(ctx context.Context, flowID string) (int, error) // 统计某流程的进行中任务数
 	CountTasksByFlow(ctx context.Context, flowID string) (int, error)       // 统计某流程的全部任务数（含历史）
 
 	SaveRecord(ctx context.Context, record domain.ReviewRecord) error
 	ListRecordsByTaskID(ctx context.Context, taskID string) ([]domain.ReviewRecord, error)
+	ListAllTasks(ctx context.Context) ([]domain.ReviewTask, error)     // 全部任务（审核结果汇总用）
+	ListAllRecords(ctx context.Context) ([]domain.ReviewRecord, error) // 全部审核记录（审核结果汇总用）
 }
 
 // ImageStore 图片相关存储接口。

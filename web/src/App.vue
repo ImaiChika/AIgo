@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed } from "vue";
 import { useRouter, useRoute } from "vue-router";
-import { currentUser, isLoggedIn, isAdmin, clearAuth, setAuth, getToken } from "./auth.js";
+import { currentUser, isLoggedIn, hasPerm, roleName, clearAuth, setAuth, getToken } from "./auth.js";
 import { api } from "./api.js";
 
 const router = useRouter();
@@ -32,23 +32,31 @@ async function saveProfile() {
   }
 }
 
-const navItems = computed(() => {
-  const items = [
-    { key: "generate", icon: "✦", label: "AI出题", path: "/generate" },
-    { key: "knowledge", icon: "⌁", label: "知识点", path: "/knowledge" },
-    { key: "ai-check", icon: "🔍", label: "AI检查", path: "/ai-check" },
-    { key: "review", icon: "✓", label: "多轮审核", path: "/review" },
-    { key: "bank", icon: "□", label: "题库", path: "/bank" },
-    { key: "batch", icon: "⚡", label: "批量推理", path: "/batch" },
-  ];
-  if (isAdmin.value) {
-    items.push({ key: "experts", icon: "👤", label: "专家库", path: "/experts" });
-    items.push({ key: "review-flows", icon: "⚙", label: "审核流程配置", path: "/review-flows" });
-    items.push({ key: "audit", icon: "📋", label: "操作日志", path: "/audit" });
-    items.push({ key: "users", icon: "⚙", label: "用户管理", path: "/users" });
-  }
-  return items;
-});
+// 菜单按权限点显示
+const allNav = [
+  { key: "generate", icon: "✦", label: "AI出题", path: "/generate", perm: "question:generate" },
+  { key: "knowledge", icon: "⌁", label: "知识点", path: "/knowledge", perm: "" },
+  { key: "ai-check", icon: "🔍", label: "AI检查", path: "/ai-check", perm: "ai:check" },
+  { key: "review", icon: "✓", label: "单题审核", path: "/review", perm: ["review:do", "review:final"] },
+  { key: "review-decisions", icon: "⚖", label: "待决断", path: "/review-decisions", perm: "review:final" },
+  { key: "review-results", icon: "📊", label: "审核结果", path: "/review-results", perm: ["review:do", "review:final", "question:view"] },
+  { key: "bank", icon: "□", label: "题库", path: "/bank", perm: "question:view" },
+  { key: "batch", icon: "⚡", label: "批量推理", path: "/batch", perm: "batch:run" },
+  { key: "stats", icon: "📊", label: "统计分析", path: "/stats", perm: "stats:view" },
+  { key: "review-flows", icon: "⚙", label: "审核流程配置", path: "/review-flows", perm: "flow:manage" },
+  { key: "audit", icon: "📋", label: "操作日志", path: "/audit", perm: "audit:view" },
+  { key: "users", icon: "⚙", label: "用户管理", path: "/users", perm: "user:manage" },
+  { key: "roles", icon: "👥", label: "角色管理", path: "/roles", perm: "role:manage" },
+  { key: "banks", icon: "📚", label: "题库管理", path: "/banks", perm: "bank:manage" },
+];
+
+function navAllowed(n) {
+  if (!n.perm) return true;
+  if (Array.isArray(n.perm)) return n.perm.some((p) => hasPerm(p));
+  return hasPerm(n.perm);
+}
+
+const navItems = computed(() => allNav.filter(navAllowed));
 
 const activeNav = computed(() => {
   const item = navItems.value.find((n) => n.path === route.path);
@@ -99,7 +107,7 @@ const isLoginPage = computed(() => route.path === "/login");
         <div class="user-avatar" @click="openProfile">{{ (currentUser.display_name || currentUser.username)[0] }}</div>
         <div class="user-detail" @click="openProfile">
           <strong>{{ currentUser.display_name || currentUser.username }}</strong>
-          <span>{{ currentUser.role === "admin" ? "管理员" : currentUser.role === "expert" ? "专家" : "命题教师" }}</span>
+          <span>{{ roleName(currentUser.role) }}</span>
         </div>
         <button class="logout-btn" type="button" @click="logout" title="退出登录">⏻</button>
       </div>
@@ -126,7 +134,7 @@ const isLoginPage = computed(() => route.path === "/login");
     <div class="modal-card">
       <h3>修改昵称</h3>
       <div class="modal-field">
-        <label>当前角色：{{ currentUser?.role === "admin" ? "管理员" : currentUser?.role === "expert" ? "专家" : "命题教师" }}</label>
+        <label>当前角色：{{ roleName(currentUser?.role) }}</label>
       </div>
       <div class="modal-field">
         <label>昵称</label>

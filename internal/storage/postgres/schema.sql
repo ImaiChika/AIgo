@@ -36,6 +36,13 @@ CREATE TABLE IF NOT EXISTS questions (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- 题目-题库多对多关系（一道题可属于多个题库）
+CREATE TABLE IF NOT EXISTS question_bank_members (
+    question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+    bank_id TEXT NOT NULL REFERENCES question_banks(id) ON DELETE CASCADE,
+    PRIMARY KEY (question_id, bank_id)
+);
+
 -- 专家
 CREATE TABLE IF NOT EXISTS experts (
     id TEXT PRIMARY KEY,
@@ -49,12 +56,24 @@ CREATE TABLE IF NOT EXISTS experts (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- 题库（分库）
+CREATE TABLE IF NOT EXISTS question_banks (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    professions TEXT[] DEFAULT '{}',          -- 专业范围（自动归纳规则）
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- 审核流程配置
 CREATE TABLE IF NOT EXISTS review_flows (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     subject TEXT NOT NULL DEFAULT '',
+    bank_id TEXT NOT NULL DEFAULT '',             -- 适用题库（空=通用）
+    final_reviewer_ids TEXT[] DEFAULT '{}',       -- 最终把关管理员
+    vote_rule TEXT NOT NULL DEFAULT '',           -- 投票规则：''=通过票数推进 / veto=一票否决
     rounds JSONB NOT NULL DEFAULT '[]',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -67,6 +86,9 @@ CREATE TABLE IF NOT EXISTS review_tasks (
     current_round INT NOT NULL DEFAULT 1,
     status TEXT NOT NULL DEFAULT 'reviewing',
     assigned_to TEXT[] DEFAULT '{}',
+    final_reviewer_ids TEXT[] DEFAULT '{}',
+    final_decision JSONB DEFAULT 'null',
+    question_prev_status TEXT NOT NULL DEFAULT '',   -- 提交前题目状态（撤销时恢复用）
     round_results JSONB DEFAULT '[]',
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -138,8 +160,21 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
     display_name TEXT NOT NULL DEFAULT '',
-    role TEXT NOT NULL DEFAULT 'teacher',
+    role TEXT NOT NULL DEFAULT 'teacher',    -- 角色模板 ID（空=未分配角色）
+    permissions TEXT[] DEFAULT '{}',         -- 直接分配的权限点（与角色权限取并集）
+    bank_ids TEXT[] DEFAULT '{}',            -- 题库范围（空=全部题库）
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 角色模板（管理员可自定义任意数量角色）
+CREATE TABLE IF NOT EXISTS roles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    permissions TEXT[] DEFAULT '{}',
+    is_builtin BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -178,6 +213,8 @@ CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_questions_status ON questions(status);
 CREATE INDEX IF NOT EXISTS idx_questions_difficulty ON questions(difficulty);
+CREATE INDEX IF NOT EXISTS idx_bank_members_bank ON question_bank_members(bank_id);
+CREATE INDEX IF NOT EXISTS idx_bank_members_question ON question_bank_members(question_id);
 CREATE INDEX IF NOT EXISTS idx_kp_subject ON knowledge_points(subject);
 CREATE INDEX IF NOT EXISTS idx_kp_topic ON knowledge_points USING gin(to_tsvector('simple', topic));
 CREATE INDEX IF NOT EXISTS idx_review_tasks_question ON review_tasks(question_id);
