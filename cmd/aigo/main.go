@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"aigo/internal/aicheck"
@@ -68,12 +70,17 @@ func run(ctx context.Context, args []string) error {
 	if err := authSvc.InitBuiltinRoles(ctx); err != nil {
 		fmt.Printf("初始化内置角色失败: %v\n", err)
 	}
-	if err := authSvc.InitAdmin("admin", "admin", "系统管理员"); err != nil {
+	adminPassword := os.Getenv("AIGO_ADMIN_PASSWORD")
+	created, usedPassword, err := authSvc.InitAdmin("admin", adminPassword, "系统管理员")
+	if err != nil {
 		fmt.Printf("初始化管理员账号失败: %v\n", err)
-	} else {
-		fmt.Println("默认管理员: admin / admin")
+	} else if created {
+		if usedPassword == adminPassword && len(adminPassword) >= 8 {
+			fmt.Printf("默认管理员: admin（密码来自 AIGO_ADMIN_PASSWORD）\n")
+		} else {
+			fmt.Printf("⚠⚠ 已创建默认管理员 admin，请立即保存并修改密码：%s\n", usedPassword)
+		}
 	}
-
 	// 审核服务：依赖认证服务解析审核人（审题权限 + 题库范围）
 	reviewSvc := review.NewService(pgStore, pgStore, pgStore, authSvc)
 
@@ -159,11 +166,14 @@ func run(ctx context.Context, args []string) error {
 		return pipe.ClearKnowledgePoints(ctx)
 
 	case "serve":
+		if cfg.IsDefaultJWTSecret() {
+			return fmt.Errorf("拒绝启动：请通过 JWT_SECRET 环境变量设置强密钥（当前为默认密钥 %q，存在被接管风险）", config.DefaultJWTSecret)
+		}
 		port := "8080"
 		if len(args) > 2 {
 			port = args[2]
 		}
-		server := api.NewServer(pipe, kpSvc, imageSvc, reviewSvc, auditSvc, pgStore, authSvc, batchSvc, aiCheckSvc, bankSvc)
+		server := api.NewServer(pipe, kpSvc, imageSvc, reviewSvc, auditSvc, pgStore, authSvc, batchSvc, aiCheckSvc, bankSvc, cfg.CORSOrigins, cfg.RegisterEnabled)
 		addr := "127.0.0.1:" + port
 		fmt.Printf("AIgo HTTP 服务启动: http://%s\n", addr)
 		fmt.Println("API 文档:")
@@ -181,7 +191,34 @@ func run(ctx context.Context, args []string) error {
 		fmt.Println("  POST   /api/review/submit              提交审核")
 		fmt.Println("  POST   /api/review/action              执行审核")
 		fmt.Println("  GET    /api/review/task/{id}           审核任务详情")
-		return http.ListenAndServe(addr, server.Handler())
+
+		srv := &http.Server{
+			Addr:              addr,
+			Handler:           server.Handler(),
+			ReadHeaderTimeout: 10 * time.Second,  // 防慢速头攻击
+			ReadTimeout:       60 * time.Second,  // 读请求体超时
+			WriteTimeout:      20 * time.Minute,  // 写响应超时（AI 生成/生图耗时长）
+			IdleTimeout:       120 * time.Second, // 空闲连接超时
+		}
+
+		// 优雅关闭：收到 SIGINT/SIGTERM 后停止接收新请求，等现有请求完成
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			<-sigCh
+			fmt.Println("收到退出信号，正在优雅关闭...")
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := srv.Shutdown(shutdownCtx); err != nil {
+				fmt.Printf("优雅关闭超时: %v\n", err)
+			}
+		}()
+
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			return err
+		}
+		fmt.Println("服务已关闭")
+		return nil
 
 	case "import":
 		if len(args) < 3 {

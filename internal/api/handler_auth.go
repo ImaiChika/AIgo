@@ -97,9 +97,19 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
+// handleRegisterEnabled 查询当前是否开放自助注册（公开接口，供登录页控制注册入口显示）。
+func (s *Server) handleRegisterEnabled(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"enabled": s.registerEnabled})
+}
+
 // handleRegister 用户自主注册。
 // 注册后默认无任何权限，由管理员在用户管理中分配权限。
+// 受 AIGO_REGISTER_ENABLED 配置控制：默认关闭，防止公网被随意注册。
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if !s.registerEnabled {
+		writeError(w, 403, "注册功能未开放，请联系管理员创建账号")
+		return
+	}
 	var req struct {
 		Username    string `json:"username"`
 		Password    string `json:"password"`

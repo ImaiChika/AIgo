@@ -33,6 +33,8 @@ type Server struct {
 	batchSvc      *batch.Service        // 批量推理服务
 	aiCheckSvc    *aicheck.Service      // AI 检查服务
 	bankSvc       *bank.Service         // 题库服务
+	corsOrigins   []string              // 允许的跨域来源白名单（空=禁止跨域）
+	registerEnabled bool                // 是否开放用户自助注册
 }
 
 // NewServer 创建 API 服务实例，注入所有依赖。
@@ -47,18 +49,22 @@ func NewServer(
 	batchSvc *batch.Service,
 	aiCheckSvc *aicheck.Service,
 	bankSvc *bank.Service,
+	corsOrigins []string,
+	registerEnabled bool,
 ) *Server {
 	return &Server{
-		pipe:          pipe,
-		kpSvc:         kpSvc,
-		imgSvc:        imgSvc,
-		reviewSvc:     reviewSvc,
-		auditSvc:      auditSvc,
-		questionStore: questionStore,
-		authSvc:       authSvc,
-		batchSvc:      batchSvc,
-		aiCheckSvc:    aiCheckSvc,
-		bankSvc:       bankSvc,
+		pipe:            pipe,
+		kpSvc:           kpSvc,
+		imgSvc:          imgSvc,
+		reviewSvc:       reviewSvc,
+		auditSvc:        auditSvc,
+		questionStore:   questionStore,
+		authSvc:         authSvc,
+		batchSvc:        batchSvc,
+		aiCheckSvc:      aiCheckSvc,
+		bankSvc:         bankSvc,
+		corsOrigins:     corsOrigins,
+		registerEnabled: registerEnabled,
 	}
 }
 
@@ -70,6 +76,7 @@ func (s *Server) Handler() http.Handler {
 	// === 认证（公开接口，不需要 token） ===
 	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/auth/register", s.handleRegister)
+	mux.HandleFunc("GET /api/auth/register-enabled", s.handleRegisterEnabled)
 
 	// === 认证（需登录） ===
 	mux.HandleFunc("GET /api/auth/me", s.requireAuth("", s.handleMe))
@@ -101,8 +108,8 @@ func (s *Server) Handler() http.Handler {
 	// === 统计（需统计分析权限） ===
 	mux.HandleFunc("GET /api/stats", s.requireAuth(domain.PermStatsView, s.handleStats))
 
-	// === 静态文件（图片） ===
-	mux.Handle("GET /images/", http.StripPrefix("/images/", http.FileServer(http.Dir("output/images"))))
+	// === 静态文件（图片，需登录认证） ===
+	mux.Handle("GET /images/", s.requireAuthImages(http.StripPrefix("/images/", http.FileServer(http.Dir("output/images")))))
 
 	// === 操作日志 ===
 	mux.HandleFunc("GET /api/audit-logs", s.requireAuth(domain.PermAuditView, s.handleListAuditLogs))
@@ -180,8 +187,56 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/review/flows/{id}", s.requireAuth(domain.PermFlowManage, s.handleDeleteFlow))
 	mux.HandleFunc("POST /api/review/flows/{id}/revoke", s.requireAuth(domain.PermFlowManage, s.handleRevokeFlow))
 
-	// 包装中间件：CORS 跨域 + JSON Content-Type
-	return withCORS(withJSON(mux))
+	// 包装中间件：请求体大小限制 + CORS 跨域 + JSON Content-Type
+	return withBodyLimit(withCORS(s.corsOrigins, withJSON(mux)))
+}
+
+// maxRequestBody 请求体大小上限（10MB，覆盖 JSON 请求与文件上传）。
+const maxRequestBody = 10 << 20
+
+// withBodyLimit 限制请求体大小，防止无上限 io.ReadAll 耗尽内存。
+// 超限请求会被 MaxBytesReader 截断并在读取时报错，返回 400/413。
+func withBodyLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireAuthImages 图片静态文件访问认证。
+// <img> 标签无法携带 Authorization 头，因此支持 ?token= 查询参数认证；
+// 也兼容 Authorization 头。校验签名、有效期和账号启用状态。
+func (s *Server) requireAuthImages(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := r.URL.Query().Get("token")
+		if token == "" {
+			authHeader := r.Header.Get("Authorization")
+			if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
+				token = authHeader[7:]
+			}
+		}
+		if token == "" {
+			writeError(w, 401, "缺少登录凭证")
+			return
+		}
+		claims, err := s.authSvc.ValidateToken(token)
+		if err != nil {
+			writeError(w, 401, err.Error())
+			return
+		}
+		user, err := s.authSvc.GetUserByID(claims.UserID)
+		if err != nil || user == nil {
+			writeError(w, 401, "用户不存在")
+			return
+		}
+		if !user.Enabled {
+			writeError(w, 401, "账号已被禁用")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // handleListPermissions 返回全部可分配权限点元数据。

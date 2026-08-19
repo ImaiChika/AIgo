@@ -1,11 +1,12 @@
 <script setup>
-import { ref } from "vue";
+import { onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api.js";
 import { setAuth } from "../auth.js";
 
 const router = useRouter();
 const mode = ref("login"); // login | register
+const registerEnabled = ref(false);
 const username = ref("");
 const password = ref("");
 const confirmPassword = ref("");
@@ -13,6 +14,16 @@ const displayName = ref("");
 const error = ref("");
 const success = ref("");
 const loading = ref(false);
+
+onMounted(async () => {
+  try {
+    const res = await fetch("/api/auth/register-enabled");
+    const data = await res.json();
+    registerEnabled.value = !!data.enabled;
+  } catch (e) {
+    registerEnabled.value = false;
+  }
+});
 
 async function doLogin() {
   if (!username.value || !password.value) {
@@ -93,7 +104,7 @@ function switchMode(m) {
             {{ loading ? "登录中..." : "登录" }}
           </button>
         </form>
-        <p class="switch-hint">
+        <p class="switch-hint" v-if="registerEnabled">
           没有账号？
           <a href="#" @click.prevent="switchMode('register')">注册新账号</a>
         </p>
@@ -130,7 +141,7 @@ function switchMode(m) {
       </div>
 
       <div class="login-hint">
-        默认管理员：admin / admin
+        账号由系统管理员分配
       </div>
     </div>
   </div>

@@ -1,7 +1,7 @@
 <script setup>
 import { ref, onMounted, computed } from "vue";
 import { api } from "../api.js";
-import { hasPerm } from "../auth.js";
+import { hasPerm, getToken } from "../auth.js";
 
 // 权限判断
 const canDelete = computed(() => hasPerm("question:delete"));
@@ -177,7 +177,8 @@ async function selectQuestion(q) {
 function imageSrc(path) {
   if (!path) return "";
   const filename = path.split("/").pop();
-  return `/images/${filename}`;
+  const token = getToken();
+  return `/images/${filename}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
 }
 
 function openImage(src) { lightboxImage.value = src; }

@@ -3,7 +3,7 @@ AIgo 项目使用方法
 
 说明：
 本项目包含 Go 后端 + Vue 3 前端 + PostgreSQL 数据库。
-默认管理员：admin / admin
+默认管理员：admin / admin（仅演示库；新库首次启动时密码随机生成并由启动日志打印，或由 AIGO_ADMIN_PASSWORD 指定）
 
 
 一、环境要求
@@ -51,7 +51,7 @@ AIgo 项目使用方法
 
    http://127.0.0.1:5174
 
-   登录：admin / admin
+   登录：admin / admin（演示库）；新库见启动日志打印的管理员密码
 
 
 三、导入数据

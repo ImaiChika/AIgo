@@ -1,7 +1,7 @@
 <script setup>
 import { ref, onMounted, computed } from "vue";
 import { api } from "../api.js";
-import { currentUser, hasPerm } from "../auth.js";
+import { currentUser, hasPerm, getToken } from "../auth.js";
 import QuestionDetailModal from "../components/QuestionDetailModal.vue";
 
 const toast = ref("");
@@ -107,7 +107,8 @@ async function selectQuestion(q) {
 function imageSrc(path) {
   if (!path) return "";
   const filename = path.split("/").pop();
-  return `/images/${filename}`;
+  const token = getToken();
+  return `/images/${filename}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
 }
 
 function openImage(src) {

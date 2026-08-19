@@ -168,6 +168,11 @@ func (s *Service) ListImages(ctx context.Context, questionID string) ([]domain.G
 	return s.imageStore.ListImagesByQuestionID(ctx, questionID)
 }
 
+// GetImageByID 按 ID 获取候选图（权限校验用）。
+func (s *Service) GetImageByID(ctx context.Context, imageID string) (*domain.GeneratedImage, error) {
+	return s.imageStore.GetImage(ctx, imageID)
+}
+
 // ReviewImage 审核候选图（通过/驳回）。
 func (s *Service) ReviewImage(ctx context.Context, imageID string, expertID string, action domain.ImageStatus, opinion string) error {
 	img, err := s.imageStore.GetImage(ctx, imageID)

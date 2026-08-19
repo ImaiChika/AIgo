@@ -10,6 +10,7 @@ package auth
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -161,27 +162,42 @@ func (s *Service) InitBuiltinRoles(ctx context.Context) error {
 
 // ===== 账号 =====
 
-// InitAdmin 初始化默认管理员账号。如果已存在则跳过。
-func (s *Service) InitAdmin(username, password, displayName string) error {
+// InitAdmin 初始化默认管理员账号。
+// 仅在用户表完全为空（首次启动）时创建；已有任何用户（含自定义账号）时跳过，
+// 防止每次启动用默认密码重建/顶替管理员账号。
+// 传入密码不足 8 位时自动生成随机强密码（返回给调用方打印一次），避免弱口令。
+func (s *Service) InitAdmin(username, password, displayName string) (bool, string, error) {
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM users WHERE username=$1", username).Scan(&count)
+	err := s.db.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
 	if err != nil {
-		return err
+		return false, "", err
 	}
 	if count > 0 {
-		return nil // 已存在，不重复创建
+		return false, "", nil // 已有用户，不创建默认账号
+	}
+
+	if len(password) < 8 {
+		buf := make([]byte, 12)
+		if _, err := rand.Read(buf); err != nil {
+			return false, "", err
+		}
+		password = base64.RawURLEncoding.EncodeToString(buf)
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		return err
+		return false, "", err
 	}
 
+	id := fmt.Sprintf("user-%d", time.Now().UnixNano())
 	_, err = s.db.Exec(`
 		INSERT INTO users (id, username, password_hash, display_name, role, permissions, bank_ids, enabled)
 		VALUES ($1, $2, $3, $4, 'admin', '{}', '{}', true)
-	`, fmt.Sprintf("user-%d", time.Now().UnixNano()), username, string(hash), displayName)
-	return err
+	`, id, username, string(hash), displayName)
+	if err != nil {
+		return false, "", err
+	}
+	return true, password, nil
 }
 
 // GetUserByUsername 根据用户名查询用户，不存在时返回 nil。

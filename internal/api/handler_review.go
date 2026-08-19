@@ -231,6 +231,10 @@ func (s *Server) handleReviewResults(w http.ResponseWriter, r *http.Request) {
 
 	var filtered []review.ReviewResultItem
 	for _, item := range items {
+		// 题库范围过滤（与题目列表一致：受限用户只能看到其题库内的题目）
+		if !s.questionInScope(r, &item.Question, domain.PermQuestionView) {
+			continue
+		}
 		if finalStatus != "" && item.FinalStatus != finalStatus {
 			continue
 		}
@@ -318,6 +322,7 @@ func (s *Server) handleListReviewers(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetReviewTask 根据任务 ID 获取审核任务详情。
+// 校验任务对应题目的题库范围（question:view）。
 func (s *Server) handleGetReviewTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	task, err := s.reviewSvc.GetTask(r.Context(), id)
@@ -329,13 +334,21 @@ func (s *Server) handleGetReviewTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "审核任务不存在")
 		return
 	}
+	if _, status, err := s.loadScopedQuestion(r, task.QuestionID, domain.PermQuestionView); err != nil {
+		writeError(w, status, err.Error())
+		return
+	}
 	writeJSON(w, 200, task)
 }
 
 // handleGetTaskByQuestion 根据题目 ID 获取关联的审核任务。
-// 用于前端选中题目后自动加载审核状态。
+// 用于前端选中题目后自动加载审核状态。校验题库范围（question:view）。
 func (s *Server) handleGetTaskByQuestion(w http.ResponseWriter, r *http.Request) {
 	questionID := r.PathValue("questionId")
+	if _, status, err := s.loadScopedQuestion(r, questionID, domain.PermQuestionView); err != nil {
+		writeError(w, status, err.Error())
+		return
+	}
 	task, err := s.reviewSvc.GetTaskByQuestionID(r.Context(), questionID)
 	if err != nil {
 		writeError(w, 500, err.Error())
@@ -410,8 +423,22 @@ func (s *Server) handleDeleteFlow(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleReviewRecords 获取某审核任务的所有审核记录。
+// 校验任务对应题目的题库范围（question:view）。
 func (s *Server) handleReviewRecords(w http.ResponseWriter, r *http.Request) {
 	taskId := r.PathValue("taskId")
+	task, err := s.reviewSvc.GetTask(r.Context(), taskId)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	if task == nil {
+		writeError(w, 404, "审核任务不存在")
+		return
+	}
+	if _, status, err := s.loadScopedQuestion(r, task.QuestionID, domain.PermQuestionView); err != nil {
+		writeError(w, status, err.Error())
+		return
+	}
 	records, err := s.reviewSvc.ListRecords(r.Context(), taskId)
 	if err != nil {
 		writeError(w, 500, err.Error())

@@ -3,10 +3,13 @@ package api
 import (
 	"net/http"
 	"strconv"
+
+	"aigo/internal/domain"
 )
 
 // handleAICheck 批量 AI 检查题目。
 // 请求：{"question_ids": ["id1", "id2", ...]}
+// 只检查当前用户题库范围内的题目，越权题目直接剔除。
 func (s *Server) handleAICheck(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		QuestionIDs []string `json:"question_ids"`
@@ -20,7 +23,19 @@ func (s *Server) handleAICheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := s.aiCheckSvc.CheckQuestions(r.Context(), req.QuestionIDs)
+	// 剔除超出题库范围的题目
+	var allowed []string
+	for _, id := range req.QuestionIDs {
+		if q, status, err := s.loadScopedQuestion(r, id, domain.PermQuestionView); err == nil && q != nil && status == 0 {
+			allowed = append(allowed, q.ID)
+		}
+	}
+	if len(allowed) == 0 {
+		writeError(w, 403, "无权检查这些题目（超出题库范围）")
+		return
+	}
+
+	results, err := s.aiCheckSvc.CheckQuestions(r.Context(), allowed)
 	if err != nil {
 		writeError(w, 500, "AI 检查失败: "+err.Error())
 		return
@@ -32,11 +47,16 @@ func (s *Server) handleAICheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleAICheckResult 获取某题最新的 AI 检查结果。
+// handleAICheckResult 获取某题最新的 AI 检查结果。校验题库范围（question:view）。
 func (s *Server) handleAICheckResult(w http.ResponseWriter, r *http.Request) {
 	questionID := r.PathValue("questionId")
 	if questionID == "" {
 		writeError(w, 400, "缺少 questionId")
+		return
+	}
+
+	if _, status, err := s.loadScopedQuestion(r, questionID, domain.PermQuestionView); err != nil {
+		writeError(w, status, err.Error())
 		return
 	}
 

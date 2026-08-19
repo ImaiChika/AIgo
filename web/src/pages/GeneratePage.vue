@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted } from "vue";
 import { api } from "../api.js";
+import { getToken } from "../auth.js";
 import KnowledgePointPicker from "../components/KnowledgePointPicker.vue";
 
 // 知识点选择（单选，使用完善的知识点选择器：精确+模糊搜索）
@@ -256,7 +257,8 @@ function selectImage(index) {
 function imageSrc(path) {
   if (!path) return "";
   const filename = path.split("/").pop();
-  return `/images/${filename}`;
+  const token = getToken();
+  return `/images/${filename}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
 }
 
 async function loadBanks() {

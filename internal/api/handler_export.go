@@ -116,10 +116,20 @@ func (s *Server) handleDownloadExport(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, path)
 }
 
-// getQuestionsToExport 获取要导出的题目列表。
+// getQuestionsToExport 获取要导出的题目列表（按题库范围过滤）。
 func (s *Server) getQuestionsToExport(r *http.Request, ids []string, exportAll bool) ([]domain.A2Question, error) {
 	if exportAll {
-		return s.questionStore.ListQuestions(r.Context())
+		questions, err := s.questionStore.ListQuestions(r.Context())
+		if err != nil {
+			return nil, err
+		}
+		var allowed []domain.A2Question
+		for _, q := range questions {
+			if s.questionInScope(r, &q, domain.PermQuestionDownload) {
+				allowed = append(allowed, q)
+			}
+		}
+		return allowed, nil
 	}
 
 	if len(ids) > 0 {
@@ -129,7 +139,7 @@ func (s *Server) getQuestionsToExport(r *http.Request, ids []string, exportAll b
 			if err != nil {
 				return nil, err
 			}
-			if q != nil {
+			if q != nil && s.questionInScope(r, q, domain.PermQuestionDownload) {
 				questions = append(questions, *q)
 			}
 		}

@@ -1,6 +1,7 @@
 <script setup>
 import { ref, watch } from "vue";
 import { api } from "../api.js";
+import { getToken } from "../auth.js";
 
 const props = defineProps({
   question: { type: Object, default: null },
@@ -47,7 +48,8 @@ const statusClass = (status) => {
 function imageSrc(path) {
   if (!path) return "";
   const filename = path.split("/").pop();
-  return `/images/${filename}`;
+  const token = getToken();
+  return `/images/${filename}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
 }
 
 function bankLabel() {

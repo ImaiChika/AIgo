@@ -10,11 +10,22 @@ import (
 	"aigo/internal/llm"
 )
 
+// DefaultJWTSecret 开发环境兜底密钥。生产环境必须通过 JWT_SECRET 显式设置，
+// 使用默认密钥启动 serve 会被拒绝（见 Config.IsDefaultJWTSecret）。
+const DefaultJWTSecret = "aigo-jwt-secret-default"
+
 // Config 系统配置，包含千问 API 配置和数据库配置。
 type Config struct {
-	Qwen     llm.QwenConfig // 千问大模型 API 配置
-	DB       DBConfig        // 数据库配置
-	JWTSecret string        // JWT 签名密钥
+	Qwen        llm.QwenConfig // 千问大模型 API 配置
+	DB          DBConfig        // 数据库配置
+	JWTSecret   string   // JWT 签名密钥
+	CORSOrigins []string // 允许的跨域来源列表（空=禁止跨域，开发用 Vite 代理为同源）
+	RegisterEnabled bool // 是否开放用户自助注册（默认关闭，管理员可开）
+}
+
+// IsDefaultJWTSecret 判断 JWT 密钥是否为内置默认值（未显式配置）。
+func (c Config) IsDefaultJWTSecret() bool {
+	return c.JWTSecret == "" || c.JWTSecret == DefaultJWTSecret
 }
 
 // DBConfig 数据库配置。
@@ -37,8 +48,26 @@ func FromEnv() Config {
 		DB: DBConfig{
 			DSN: firstNonEmpty(os.Getenv("DB_DSN"), "postgres://localhost:5432/aigo?sslmode=disable"),
 		},
-		JWTSecret: firstNonEmpty(os.Getenv("JWT_SECRET"), "aigo-jwt-secret-default"),
+		JWTSecret: firstNonEmpty(os.Getenv("JWT_SECRET"), DefaultJWTSecret),
+		CORSOrigins:    splitComma(os.Getenv("CORS_ALLOWED_ORIGINS")),
+		RegisterEnabled: os.Getenv("AIGO_REGISTER_ENABLED") == "1" || os.Getenv("AIGO_REGISTER_ENABLED") == "true",
 	}
+}
+
+// splitComma 按逗号分割字符串列表（去空白、去空项）。
+func splitComma(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	var out []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // loadDotEnv 从 .env 文件加载环境变量。只设置尚未存在的变量，不覆盖已有值。

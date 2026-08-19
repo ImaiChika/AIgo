@@ -196,31 +196,24 @@ func (s *Server) handleListQuestions(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetQuestion 根据 ID 获取单道题目详情。
+// 校验题库范围：受限范围用户仅可访问其可见题库内的题目。
 func (s *Server) handleGetQuestion(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id") // 从 URL 路径提取题目 ID
-	q, err := s.questionStore.GetQuestion(r.Context(), id)
+	q, status, err := s.loadScopedQuestion(r, id, domain.PermQuestionView)
 	if err != nil {
-		writeError(w, 500, err.Error())
-		return
-	}
-	if q == nil {
-		writeError(w, 404, "题目不存在")
+		writeError(w, status, err.Error())
 		return
 	}
 	writeJSON(w, 200, q)
 }
 
 // handleUpdateQuestion 修改题目内容（题干、选项、答案、解析）。
-// 只更新请求中提供的字段，版本号自动递增。
+// 只更新请求中提供的字段，版本号自动递增。校验题库范围（question:edit）。
 func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	existing, err := s.questionStore.GetQuestion(r.Context(), id)
+	existing, status, err := s.loadScopedQuestion(r, id, domain.PermQuestionEdit)
 	if err != nil {
-		writeError(w, 500, err.Error())
-		return
-	}
-	if existing == nil {
-		writeError(w, 404, "题目不存在")
+		writeError(w, status, err.Error())
 		return
 	}
 
@@ -275,9 +268,15 @@ func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, existing)
 }
 
-// handleDeleteQuestion 删除题目。
+// handleDeleteQuestion 删除题目。校验题库范围（question:delete）。
 func (s *Server) handleDeleteQuestion(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+
+	// 删除前校验题库范围（删除后无法再核对）
+	if _, status, err := s.loadScopedQuestion(r, id, domain.PermQuestionDelete); err != nil {
+		writeError(w, status, err.Error())
+		return
+	}
 
 	// 记录日志（删除前记录，因为删除后就查不到了）
 	actor := auth.GetUsername(r.Context())
@@ -291,9 +290,14 @@ func (s *Server) handleDeleteQuestion(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePublishQuestion 将审核通过的题目发布到正式题库。
+// 校验题库范围（review:final）。
 func (s *Server) handlePublishQuestion(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	actor := auth.GetUsername(r.Context())
+	if _, status, err := s.loadScopedQuestion(r, id, domain.PermReviewFinal); err != nil {
+		writeError(w, status, err.Error())
+		return
+	}
 	if err := s.reviewSvc.PublishQuestion(r.Context(), id); err != nil {
 		writeError(w, 400, err.Error())
 		return
