@@ -1,0 +1,46 @@
+/* The workspace keeps its existing blue accents; navigation uses a darker
+   shade of the same palette with distinct, collapsible business sections. */
+.app-shell { grid-template-columns: 232px minmax(0, 1fr); }
+.app-shell > .sidebar {
+  position: sticky; top: 0; height: 100vh; height: 100dvh; min-height: 0;
+  display: flex; flex-direction: column; align-items: stretch;
+  gap: 24px; padding: 24px 14px 16px; border-right: 1px solid #203d59;
+  color: #e6edf7; background: #16324d; z-index: 10;
+}
+.app-shell .sidebar .brand { padding: 0 10px; }
+.app-shell .sidebar .brand-mark { width: 38px; height: 38px; font-size: 20px; }
+.app-shell .sidebar .brand strong { color: #f4f8ff; font-size: 19px; letter-spacing: -.03em; }
+.app-shell .sidebar .brand span { color: #91aac3; font-size: 11px; margin-top: 4px; }
+.app-shell .sidebar .user-info { border-color: #35516e; padding: 16px 7px 0; gap: 8px; }
+.app-shell .sidebar .user-detail strong { color: #e4eef8; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app-shell .sidebar .user-detail span { color: #8ea7bf; font-size: 10px; }
+.app-shell .sidebar .user-avatar { width: 32px; height: 32px; flex-shrink: 0; background: #315674; color: #d8ebfc; font-size: 13px; }
+.app-shell .sidebar .logout-btn { background: transparent; border-color: #3a5872; color: #a9bfd3; font-size: 11px; padding: 0 7px; min-width: 38px; height: 28px; }
+.app-shell .sidebar .logout-btn:hover { color: white; background: #294a69; }
+.app-shell .sidebar-note { display: none; }
+.workspace-heading { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.workspace-location { font-size: 11px; color: #8394a8; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+.workspace-location span { color: #b4bfcd; }
+.topbar .workspace-heading h1 { font-size: 23px; }
+.generation-mode-link { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; padding: 0 14px; border: 1px solid #c4d9ee; border-radius: 6px; color: #1472c4; background: #fff; text-decoration: none; font-size: 13px; font-weight: 500; flex-shrink: 0; }
+.generation-mode-link:hover { color: #0666bd; background: #f1f8ff; border-color: #83b4e1; }
+.generation-mode-link svg, .mobile-navigation-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.mobile-navigation-button, .mobile-navigation-close, .navigation-backdrop { display: none; }
+.generation-mode-link:focus-visible, .mobile-navigation-button:focus-visible { outline: 2px solid #1385f8; outline-offset: 3px; }
+@media(max-width: 1040px) {
+  .app-shell { grid-template-columns: minmax(0, 1fr); }
+  .app-shell > .sidebar { display: none; position: fixed; width: 264px; inset: 0 auto 0 0; z-index: 31; box-shadow: 16px 0 40px #09243c30; }
+  .app-shell.mobile-navigation-open > .sidebar { display: flex; }
+  .mobile-navigation-button { display: grid; place-items: center; padding: 8px; border: 1px solid #d6e1ec; border-radius: 5px; background: #fff; color: #426680; flex-shrink: 0; }
+  .mobile-navigation-close { display: grid; place-items: center; width: 27px; height: 27px; margin-left: auto; border: 1px solid #44637e; background: transparent; color: #bad0e1; border-radius: 4px; font-size: 20px; }
+  .navigation-backdrop { display: block; position: fixed; inset: 0; z-index: 30; background: #0b223c75; }
+  .app-shell .topbar { flex-direction: row; align-items: center; }
+  .workspace-location { font-size: 10px; }
+  .topbar .workspace-heading h1 { font-size: 20px; }
+}
+@media(max-width: 600px) {
+  .app-shell .topbar { gap: 10px; flex-wrap: wrap; }
+  .generation-mode-link { margin-left: auto; min-height: 34px; padding: 0 10px; font-size: 12px; }
+  .workspace-heading { gap: 9px; }
+  .topbar .workspace-heading h1 { font-size: 19px; }
+}

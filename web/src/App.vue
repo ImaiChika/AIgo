@@ -1,8 +1,11 @@
 <script setup>
-import { ref, computed } from "vue";
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { useRouter, useRoute } from "vue-router";
 import { currentUser, isLoggedIn, hasPerm, roleName, clearAuth, setAuth, getToken } from "./auth.js";
 import { api } from "./api.js";
+import SidebarNavigation from "./components/SidebarNavigation.vue";
+import { visibleNavigation, navigationItemActive } from "./navigation.js";
+import "./navigation-shell.css";
 
 const router = useRouter();
 const route = useRoute();
@@ -12,6 +15,7 @@ const editName = ref("");
 const profileMsg = ref("");
 
 function openProfile() {
+  mobileNavigationOpen.value = false;
   editName.value = currentUser.value?.display_name || "";
   profileMsg.value = "";
   showProfile.value = true;
@@ -32,39 +36,30 @@ async function saveProfile() {
   }
 }
 
-// 菜单按权限点显示
-const allNav = [
-  { key: "generate", icon: "✦", label: "AI出题", path: "/generate", perm: "question:generate" },
-  { key: "knowledge", icon: "⌁", label: "知识点", path: "/knowledge", perm: "" },
-  { key: "ai-check", icon: "🔍", label: "AI检查", path: "/ai-check", perm: "ai:check" },
-  { key: "review", icon: "✓", label: "单题审核", path: "/review", perm: ["review:do", "review:final"] },
-  { key: "review-decisions", icon: "⚖", label: "待决断", path: "/review-decisions", perm: "review:final" },
-  { key: "review-results", icon: "📊", label: "审核结果", path: "/review-results", perm: ["review:do", "review:final", "question:view"] },
-  { key: "bank", icon: "□", label: "题库", path: "/bank", perm: "question:view" },
-  { key: "batch", icon: "⚡", label: "批量推理", path: "/batch", perm: "batch:run" },
-  { key: "stats", icon: "📊", label: "统计分析", path: "/stats", perm: "stats:view" },
-  { key: "review-flows", icon: "⚙", label: "审核流程配置", path: "/review-flows", perm: "flow:manage" },
-  { key: "audit", icon: "📋", label: "操作日志", path: "/audit", perm: "audit:view" },
-  { key: "users", icon: "⚙", label: "用户管理", path: "/users", perm: "user:manage" },
-  { key: "roles", icon: "👥", label: "角色管理", path: "/roles", perm: "role:manage" },
-  { key: "banks", icon: "📚", label: "题库管理", path: "/banks", perm: "bank:manage" },
-];
-
-function navAllowed(n) {
-  if (!n.perm) return true;
-  if (Array.isArray(n.perm)) return n.perm.some((p) => hasPerm(p));
-  return hasPerm(n.perm);
-}
-
-const navItems = computed(() => allNav.filter(navAllowed));
-
-const activeNav = computed(() => {
-  const item = navItems.value.find((n) => n.path === route.path);
-  return item ? item.key : "generate";
+const mobileNavigationOpen = ref(false);
+const sidebar = ref(null), menuButton = ref(null);
+const activeGroup = computed(() => visibleNavigation(hasPerm).find(g => g.items.some(item => navigationItemActive(item, route.path))));
+const inGeneration = computed(() => route.matched.some(record => record.name === "generation"));
+const batchMode = computed(() => route.name === "generation-batch");
+const generationReturn = computed(() => hasPerm("question:generate") ? "/generate" : "/knowledge");
+let previousOverflow = "";
+watch(mobileNavigationOpen, async open => {
+  if (open) { previousOverflow = document.body.style.overflow; document.body.style.overflow = "hidden"; await nextTick(); sidebar.value?.querySelector("button")?.focus(); }
+  else { document.body.style.overflow = previousOverflow; menuButton.value?.focus(); }
 });
-
-function navigate(path) {
-  router.push(path);
+watch(() => route.fullPath, () => { mobileNavigationOpen.value = false; });
+const desktopLayout = window.matchMedia("(min-width: 1041px)");
+function closeDesktopDrawer() { if (desktopLayout.matches) mobileNavigationOpen.value = false; }
+onMounted(() => desktopLayout.addEventListener("change", closeDesktopDrawer));
+onBeforeUnmount(() => { desktopLayout.removeEventListener("change", closeDesktopDrawer); if (mobileNavigationOpen.value) document.body.style.overflow = previousOverflow; });
+function sidebarKeydown(event) {
+  if (!mobileNavigationOpen.value) return;
+  if (event.key === "Escape") { event.preventDefault(); mobileNavigationOpen.value = false; return; }
+  if (event.key !== "Tab") return;
+  const focusable = [...sidebar.value.querySelectorAll("button, a[href], [tabindex='0']")].filter(el => el.getClientRects().length);
+  const first = focusable[0], last = focusable.at(-1);
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
 }
 
 function logout() {
@@ -79,29 +74,19 @@ const isLoginPage = computed(() => route.path === "/login");
   <div v-if="isLoginPage">
     <router-view />
   </div>
-  <div v-else class="app-shell">
-    <aside class="sidebar">
+  <div v-else class="app-shell" :class="{ 'mobile-navigation-open': mobileNavigationOpen }">
+    <div v-if="mobileNavigationOpen" class="navigation-backdrop" aria-hidden="true" @click="mobileNavigationOpen = false"></div>
+    <aside ref="sidebar" class="sidebar" id="application-navigation" :role="mobileNavigationOpen ? 'dialog' : undefined" :aria-modal="mobileNavigationOpen || undefined" aria-label="应用导航" @keydown="sidebarKeydown">
       <div class="brand">
         <div class="brand-mark">A</div>
         <div>
           <strong>AIgo</strong>
-          <span>智能命题</span>
+          <span>命题审核平台</span>
         </div>
+        <button class="mobile-navigation-close" type="button" aria-label="关闭导航" @click="mobileNavigationOpen = false">×</button>
       </div>
 
-      <nav class="nav-list">
-        <button
-          v-for="item in navItems"
-          :key="item.key"
-          class="nav-item"
-          :class="{ active: activeNav === item.key }"
-          type="button"
-          @click="navigate(item.path)"
-        >
-          <span class="nav-icon">{{ item.icon }}</span>
-          {{ item.label }}
-        </button>
-      </nav>
+      <SidebarNavigation @navigate="mobileNavigationOpen = false" />
 
       <div class="user-info" v-if="currentUser">
         <div class="user-avatar" @click="openProfile">{{ (currentUser.display_name || currentUser.username)[0] }}</div>
@@ -109,20 +94,18 @@ const isLoginPage = computed(() => route.path === "/login");
           <strong>{{ currentUser.display_name || currentUser.username }}</strong>
           <span>{{ roleName(currentUser.role) }}</span>
         </div>
-        <button class="logout-btn" type="button" @click="logout" title="退出登录">⏻</button>
-      </div>
-
-      <div class="sidebar-note">
-        <span>当前版本</span>
-        <strong>千问出题 + AI配图 + 专家审核</strong>
+        <button class="logout-btn" type="button" @click="logout" title="退出登录">退出</button>
       </div>
     </aside>
 
-    <main class="workspace">
+    <main class="workspace" :inert="mobileNavigationOpen">
       <header class="topbar">
-        <div>
-          <h1>{{ route.meta.title || "AI智能出题工作台" }}</h1>
+        <div class="workspace-heading">
+          <button ref="menuButton" class="mobile-navigation-button" type="button" aria-label="打开导航" aria-controls="application-navigation" :aria-expanded="mobileNavigationOpen" @click="mobileNavigationOpen = true"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14" /></svg></button>
+          <div><div class="workspace-location">{{ activeGroup?.label || '命题平台' }}<template v-if="batchMode"><span>/</span>试题生成</template></div><h1>{{ route.meta.title || "命题管理" }}</h1></div>
         </div>
+        <RouterLink v-if="inGeneration && !batchMode && hasPerm('batch:run')" class="generation-mode-link" to="/generate/batch"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3h10v10H3Z M7 16h9V7 M10 19h9V10" /></svg>批量推理</RouterLink>
+        <RouterLink v-else-if="batchMode" class="generation-mode-link" :to="generationReturn"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m8 4-6 6 6 6M2 10h15" /></svg>{{ hasPerm('question:generate') ? '返回单题出题' : '返回知识点' }}</RouterLink>
       </header>
 
       <router-view />

@@ -1,6 +1,8 @@
 import { createRouter, createWebHistory } from "vue-router";
 import { isLoggedIn, hasPerm } from "./auth.js";
 import LoginPage from "./pages/LoginPage.vue";
+import GenerationWorkspace from "./pages/GenerationWorkspace.vue";
+import { permissionAllowed } from "./navigation.js";
 import GeneratePage from "./pages/GeneratePage.vue";
 import KnowledgePage from "./pages/KnowledgePage.vue";
 import ReviewPage from "./pages/ReviewPage.vue";
@@ -19,16 +21,19 @@ import ReviewDecisionsPage from "./pages/ReviewDecisionsPage.vue";
 const routes = [
   { path: "/login", component: LoginPage, meta: { public: true } },
   { path: "/", redirect: "/generate" },
-  { path: "/generate", component: GeneratePage, meta: { title: "AI出题", perm: "question:generate" } },
+  { path: "/generate", name: "generation", component: GenerationWorkspace, children: [
+    { path: "", name: "generation-single", component: GeneratePage, meta: { title: "试题生成", perm: "question:generate" } },
+    { path: "batch", name: "generation-batch", component: BatchPage, meta: { title: "批量推理", perm: "batch:run" } },
+  ] },
   { path: "/knowledge", component: KnowledgePage, meta: { title: "知识点" } },
-  { path: "/ai-check", component: AICheckPage, meta: { title: "AI检查", perm: "ai:check" } },
-  { path: "/review", component: ReviewPage, meta: { title: "单题审核", perm: ["review:do", "review:final"] } },
-  { path: "/review-decisions", component: ReviewDecisionsPage, meta: { title: "待决断", perm: "review:final" } },
-  { path: "/review-results", component: ReviewResultsPage, meta: { title: "审核结果", perm: ["review:do", "review:final", "question:view"] } },
+  { path: "/ai-check", component: AICheckPage, meta: { title: "质量检查", perm: "ai:check" } },
+  { path: "/review", component: ReviewPage, meta: { title: "待审任务", perm: ["review:do", "review:final"] } },
+  { path: "/review-decisions", component: ReviewDecisionsPage, meta: { title: "最终决断", perm: "review:final" } },
+  { path: "/review-results", component: ReviewResultsPage, meta: { title: "审核记录", perm: ["review:do", "review:final", "question:view"] } },
   { path: "/bank", component: BankPage, meta: { title: "题库", perm: "question:view" } },
-  { path: "/batch", component: BatchPage, meta: { title: "批量推理", perm: "batch:run" } },
-  { path: "/stats", component: StatsPage, meta: { title: "统计分析", perm: "stats:view" } },
-  { path: "/review-flows", component: ReviewFlowPage, meta: { title: "审核流程配置", perm: "flow:manage" } },
+  { path: "/batch", redirect: to => ({ path: "/generate/batch", query: to.query, hash: to.hash }) },
+  { path: "/stats", component: StatsPage, meta: { title: "数据统计", perm: "stats:view" } },
+  { path: "/review-flows", component: ReviewFlowPage, meta: { title: "审核流程", perm: "flow:manage" } },
   { path: "/audit", component: AuditPage, meta: { title: "操作日志", perm: "audit:view" } },
   { path: "/users", component: UsersPage, meta: { title: "用户管理", perm: "user:manage" } },
   { path: "/roles", component: RolesPage, meta: { title: "角色管理", perm: "role:manage" } },
@@ -44,16 +49,13 @@ const router = createRouter({
 router.beforeEach((to, from, next) => {
   if (!to.meta.public && !isLoggedIn.value) {
     next("/login");
-  } else if (to.meta.perm && !checkPerm(to.meta.perm)) {
+  } else if (to.name === "generation-single" && !hasPerm("question:generate") && hasPerm("batch:run")) {
+    next("/generate/batch");
+  } else if (!permissionAllowed(to.meta.perm, hasPerm)) {
     next("/knowledge"); // 无权限重定向到所有登录用户都可访问的知识点页
   } else {
     next();
   }
 });
-
-function checkPerm(perm) {
-  if (Array.isArray(perm)) return perm.some((p) => hasPerm(p));
-  return hasPerm(perm);
-}
 
 export default router;

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onActivated, onDeactivated, onBeforeUnmount } from "vue";
 import { api } from "../api.js";
 import KnowledgePointPicker from "../components/KnowledgePointPicker.vue";
 
@@ -33,7 +33,7 @@ const progressPercent = computed(() => {
 function showToast(msg) {
   toast.value = msg;
   window.clearTimeout(showToast.timer);
-  toast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
+  showToast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
 }
 
 async function loadStats() {
@@ -112,42 +112,51 @@ async function submitBatch() {
   }
 }
 
-// 轮询任务状态
-async function startPolling(jobId) {
+// A cached batch page keeps its form, but only the visible page polls. Each
+// selected job owns one polling loop; a late response cannot restart an old loop.
+let pollTimer = null;
+let pollSequence = 0;
+let pageActive = true;
+let disposed = false;
+function stopPolling() {
+  ++pollSequence;
+  clearTimeout(pollTimer);
+  pollTimer = null;
+  polling.value = false;
+}
+function startPolling(jobId) {
+  stopPolling();
+  if (!pageActive || disposed) return;
+  const sequence = pollSequence;
   polling.value = true;
   const poll = async () => {
     try {
       const job = await api.batchStatus(jobId);
-      if (currentJob.value && currentJob.value.job_id === jobId) {
-        currentJob.value = job;
-      }
-
-      // 更新历史记录
+      if (sequence !== pollSequence || !pageActive || disposed) return;
+      if (currentJob.value?.job_id === jobId) currentJob.value = job;
       const idx = jobHistory.value.findIndex(j => j.job_id === jobId);
-      if (idx >= 0) {
-        jobHistory.value[idx] = job;
-      }
+      if (idx >= 0) jobHistory.value[idx] = job;
       saveJobToStorage(job);
-
-      if (isCompleted(job.status) || job.status === "failed" || job.status === "cancelled") {
+      if (isTerminal(job.status)) {
         polling.value = false;
-        if (isCompleted(job.status)) {
-          showToast(`任务完成! 成功: ${job.completed}, 失败: ${job.failed}`);
-        } else {
-          showToast(`任务${job.status === "failed" ? "失败" : "已取消"}`);
-        }
+        showToast(isCompleted(job.status) ? `任务完成！成功请求: ${job.completed}，失败请求: ${job.failed}` : `任务${statusText(job.status)}`);
         return;
       }
-
-      // 继续轮询
-      setTimeout(poll, 10000); // 每10秒查一次
+      pollTimer = setTimeout(poll, 10000);
     } catch (e) {
+      if (sequence !== pollSequence || !pageActive || disposed) return;
       console.error("轮询失败:", e);
-      setTimeout(poll, 30000); // 失败后30秒重试
+      pollTimer = setTimeout(poll, 30000);
     }
   };
   poll();
 }
+onActivated(() => {
+  pageActive = true;
+  if (currentJob.value && isRunning(currentJob.value.status)) startPolling(currentJob.value.job_id);
+});
+onDeactivated(() => { pageActive = false; stopPolling(); });
+onBeforeUnmount(() => { disposed = true; stopPolling(); clearTimeout(showToast.timer); });
 
 // 下载并导入结果
 async function downloadResult(jobId) {
@@ -170,7 +179,9 @@ async function downloadResult(jobId) {
 async function checkStatus(jobId) {
   try {
     const job = await api.batchStatus(jobId);
+    stopPolling();
     currentJob.value = job;
+    if (isRunning(job.status)) startPolling(jobId);
     showToast(`状态: ${job.status}`);
   } catch (e) {
     showToast("查询失败: " + e.message);
@@ -202,6 +213,14 @@ function isCompleted(status) {
   return status === "completed" || status === "complete";
 }
 
+function isTerminal(status) {
+  return isCompleted(status) || ["failed", "expired", "cancelled"].includes(status);
+}
+
+function isRunning(status) {
+  return ["validating", "in_progress", "finalizing", "cancelling"].includes(status);
+}
+
 // 按名称搜索任务
 async function searchJobs() {
   if (!searchName.value.trim()) {
@@ -221,6 +240,7 @@ async function searchJobs() {
 
 // 选择任务
 function selectJob(job) {
+  stopPolling();
   currentJob.value = job;
   saveJobToStorage(job);
   searchResults.value = [];
