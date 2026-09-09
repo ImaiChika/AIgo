@@ -1,5 +1,5 @@
 // 题目答案验证脚本
-// 随机抽取指定比例的题目，调用 qwen3.5-flash API 验证答案是否正确。
+// 随机抽取指定比例的题目，调用当前配置的千问云端或本地端点验证答案。
 // 用法: go run ./cmd/verify [选项]
 //
 // 选项:
@@ -30,22 +30,22 @@ type VerifyResult struct {
 	QuestionID    string `json:"question_id"`
 	OutlineCode   string `json:"outline_code"`
 	Stem          string `json:"stem"`           // 题干前100字
-	CurrentAnswer string `json:"current_answer"`  // 当前答案
-	LLMAnswer     string `json:"llm_answer"`      // LLM 判断的答案
-	IsCorrect     bool   `json:"is_correct"`      // 是否一致
-	LLMReasoning  string `json:"llm_reasoning"`   // LLM 的判断理由
+	CurrentAnswer string `json:"current_answer"` // 当前答案
+	LLMAnswer     string `json:"llm_answer"`     // LLM 判断的答案
+	IsCorrect     bool   `json:"is_correct"`     // 是否一致
+	LLMReasoning  string `json:"llm_reasoning"`  // LLM 的判断理由
 	VerifiedAt    string `json:"verified_at"`
 }
 
 // VerifyReport 验证报告（只记录错误题目）。
 type VerifyReport struct {
-	TotalVerified  int             `json:"total_verified"`
-	CorrectCount   int             `json:"correct_count"`
-	WrongCount     int             `json:"wrong_count"`
-	UnknownCount   int             `json:"unknown_count"`  // 无法判断
-	AccuracyRate   float64         `json:"accuracy_rate"`  // 正确率
-	WrongQuestions []VerifyResult  `json:"wrong_questions"` // 答案可能错误的题目
-	GeneratedAt    string          `json:"generated_at"`
+	TotalVerified  int            `json:"total_verified"`
+	CorrectCount   int            `json:"correct_count"`
+	WrongCount     int            `json:"wrong_count"`
+	UnknownCount   int            `json:"unknown_count"`   // 无法判断
+	AccuracyRate   float64        `json:"accuracy_rate"`   // 正确率
+	WrongQuestions []VerifyResult `json:"wrong_questions"` // 答案可能错误的题目
+	GeneratedAt    string         `json:"generated_at"`
 }
 
 func main() {
@@ -64,9 +64,18 @@ func run(percent int, limit int, outputPath string) error {
 	ctx := context.Background()
 
 	// 加载配置
-	cfg := config.FromEnv()
-	if cfg.Qwen.APIKey == "" {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("配置加载失败: %w", err)
+	}
+	if err := cfg.ValidateInference(); err != nil {
+		return err
+	}
+	if cfg.Qwen.Deployment == llm.DeploymentCloud && cfg.Qwen.APIKey == "" {
 		return fmt.Errorf("缺少 DASHSCOPE_API_KEY，请在 .env 文件中配置")
+	}
+	if cfg.Qwen.BaseURL == "" || cfg.Qwen.Model == "" {
+		return fmt.Errorf("LLM 配置不完整：请设置 QWEN_BASE_URL 和 QWEN_MODEL")
 	}
 
 	// 连接数据库
@@ -108,7 +117,7 @@ func run(percent int, limit int, outputPath string) error {
 	fmt.Printf("题库总量: %d 道\n", len(questions))
 	fmt.Printf("抽样比例: %d%%\n", percent)
 	fmt.Printf("验证数量: %d 道\n", sampleCount)
-	fmt.Printf("API: %s @ %s\n", cfg.Qwen.Model, cfg.Qwen.BaseURL)
+	fmt.Printf("LLM: %s / %s @ %s\n", cfg.Qwen.Deployment, cfg.Qwen.Model, cfg.Qwen.BaseURL)
 	fmt.Println()
 	fmt.Println("开始验证...")
 
@@ -225,7 +234,7 @@ func verifyQuestion(ctx context.Context, client llm.Client, q domain.A2Question)
 	// 调用 LLM
 	raw, err := client.Complete(ctx, []llm.Message{
 		{Role: llm.RoleUser, Content: prompt},
-	}, llm.GenerateOptions{Temperature: 0.1, MaxTokens: 500})
+	}, llm.GenerateOptions{Temperature: 0.1})
 	if err != nil {
 		return result, fmt.Errorf("LLM 调用失败: %w", err)
 	}

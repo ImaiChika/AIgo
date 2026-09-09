@@ -1,0 +1,19 @@
+## 一、服务器软件
+
+| 软件 | 版本 | 用途 |
+|------|------|------|
+| Docker Engine | 最新稳定版 | 容器运行时 |
+| Docker Compose | 插件版 | 服务编排 |
+| Git | 最新 | 代码管理 |
+| Linux 内核 | 5.x+ | 操作系统 |
+| 操作系统 | Ubuntu 22.04+ / Debian 12+ | 推荐 |
+
+## 二、容器镜像版本（固定 SHA256）
+
+| 镜像 | 版本 | 用途 |
+|------|------|------|
+| postgres | postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685 | 数据库 |
+| caddy | caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648 | 反向代理/HTTPS |
+| node | node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 | 前端构建 |
+| golang | golang:1.26-alpine@sha256:28d89ee9cc0ff9fec75c82ca201e6bf7fdf9a679d4b7b24dfa04f2bb766bb468 | 后端构建 |
+| alpine | alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40 | 运行基础 |

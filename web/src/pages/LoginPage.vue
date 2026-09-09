@@ -85,7 +85,7 @@ function switchMode(m) {
       <div class="login-brand">
         <div class="brand-mark">A</div>
         <h1>AIgo</h1>
-        <p>智能命题系统</p>
+        <p>命题审核平台</p>
       </div>
 
       <div v-if="mode === 'login'">
@@ -140,9 +140,6 @@ function switchMode(m) {
         <p class="switch-hint note">注册后默认无任何权限，请联系管理员在「用户管理」中分配权限。</p>
       </div>
 
-      <div class="login-hint">
-        账号由系统管理员分配
-      </div>
     </div>
   </div>
 </template>
@@ -281,10 +278,4 @@ function switchMode(m) {
   color: #9aa5b4;
 }
 
-.login-hint {
-  margin-top: 20px;
-  text-align: center;
-  font-size: 12px;
-  color: #6e7b8f;
-}
 </style>

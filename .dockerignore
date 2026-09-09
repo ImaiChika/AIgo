@@ -1,0 +1,17 @@
+.git
+.gitignore
+.DS_Store
+.env
+aigo
+output
+8.19
+820
+824
+web/node_modules
+web/dist
+deploy/production.env
+deploy/secrets
+deploy/offsite-recovery
+**/*.dump
+**/*.log
+**/__pycache__

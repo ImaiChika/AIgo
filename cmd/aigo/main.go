@@ -21,11 +21,11 @@ import (
 	"aigo/internal/domain"
 	"aigo/internal/evaluator"
 	"aigo/internal/generator"
-	"aigo/internal/image"
 	"aigo/internal/knowledge"
 	"aigo/internal/llm"
 	"aigo/internal/pipeline"
 	"aigo/internal/review"
+	"aigo/internal/storage"
 	"aigo/internal/storage/postgres"
 
 	_ "github.com/lib/pq"
@@ -44,9 +44,15 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	cfg := config.FromEnv()
-	client := llm.NewQwenClient(cfg.Qwen)
-
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if commandRequiresInferenceConfig(args[1]) {
+		if err := cfg.ValidateInference(); err != nil {
+			return err
+		}
+	}
 	// 初始化 PostgreSQL 存储
 	pgStore, err := postgres.New(cfg.DB.DSN)
 	if err != nil {
@@ -54,19 +60,49 @@ func run(ctx context.Context, args []string) error {
 	}
 	defer pgStore.Close()
 
-	// 初始化表结构
-	schemaBytes, err := os.ReadFile("internal/storage/postgres/schema.sql")
-	if err != nil {
-		return fmt.Errorf("读取 schema 文件失败: %w", err)
+	// 迁移是独立运维动作；其他命令只做版本检查，避免服务启动时静默改库。
+	if args[1] == "migrate" {
+		applied, err := pgStore.Migrate(ctx)
+		if err != nil {
+			return err
+		}
+		if len(applied) == 0 {
+			fmt.Printf("数据库 Schema 已是最新版本 %d，无需迁移\n", postgres.LatestSchemaVersion)
+			return nil
+		}
+		for _, migration := range applied {
+			fmt.Printf("已应用数据库迁移 %d: %s\n", migration.Version, migration.Name)
+		}
+		fmt.Printf("数据库 Schema 已升级到版本 %d\n", postgres.LatestSchemaVersion)
+		return nil
 	}
-	if err := pgStore.InitSchema(string(schemaBytes)); err != nil {
-		return fmt.Errorf("初始化数据库表失败: %w", err)
+	if err := pgStore.CheckSchemaVersion(ctx); err != nil {
+		return fmt.Errorf("数据库版本检查失败（请先执行 `go run ./cmd/aigo migrate`）: %w", err)
 	}
 	fmt.Println("数据库: PostgreSQL")
+	// AI 配置密钥使用 JWT_SECRET 派生的 AES-GCM 密钥加密落库；JWT_SECRET 仍只
+	// 通过部署 Secret/环境变量注入，不把 Qwen 凭证写回代码或配置模板。
+	pgStore.SetLLMEncryptionKey(cfg.JWTSecret)
+	if err := bootstrapAIProviderConfig(ctx, pgStore, cfg); err != nil {
+		return fmt.Errorf("初始化 AI 服务配置失败: %w", err)
+	}
+	qwenResolver := databaseQwenResolver{
+		store:              pgStore,
+		generationFallback: cfg.Qwen,
+		checkFallback:      cfg.AICheck.Client,
+		batchFallback: llm.QwenConfig{
+			Deployment:  llm.DeploymentCloud,
+			APIKey:      cfg.Batch.APIKey,
+			BaseURL:     cfg.Batch.BaseURL,
+			Model:       cfg.Batch.Model,
+			HTTPTimeout: 120 * time.Second,
+		},
+	}
+	client := llm.NewDynamicQwenClient(qwenResolver, llm.PurposeGeneration, cfg.Qwen)
 
 	// 初始化认证服务（JWT 密钥从配置读取，通过 JWT_SECRET 环境变量设置）
 	authSvc := auth.NewService(pgStore.DB(), cfg.JWTSecret, 24*time.Hour)
-	// 写入内置角色模板（管理员/审题专家/命题教师，可自由修改）
+	// 写入内置角色模板（超级管理员/管理员/审题专家/命题教师）
 	if err := authSvc.InitBuiltinRoles(ctx); err != nil {
 		fmt.Printf("初始化内置角色失败: %v\n", err)
 	}
@@ -83,18 +119,14 @@ func run(ctx context.Context, args []string) error {
 	}
 	// 审核服务：依赖认证服务解析审核人（审题权限 + 题库范围）
 	reviewSvc := review.NewService(pgStore, pgStore, pgStore, authSvc)
+	// 送审强制前置：开启后仅 AI 检查通过（及人工回流状态）的题目可提交审核
+	reviewSvc.RequireAICheck = cfg.ReviewRequireAI
 
 	// 题库（分库）服务
 	bankSvc := bank.NewService(pgStore, pgStore)
 
-	// 生图服务：始终用真实生图器，无 API Key 时调用会报错
-	zimgGen := image.NewZImageGenerator(image.ZImageConfig{
-		APIKey:    cfg.Qwen.APIKey,
-		OutputDir: "output/images",
-	})
-	imageSvc := image.NewService(pgStore, pgStore, client, zimgGen)
-	fmt.Println("生图: z-image-turbo")
-	fmt.Printf("LLM: %s @ %s\n", cfg.Qwen.Model, cfg.Qwen.BaseURL)
+	llmInfo := client.Info()
+	fmt.Printf("LLM: %s / %s\n", llmInfo.Deployment, llmInfo.Model)
 
 	kpSvc := knowledge.NewService(pgStore)
 	auditSvc := audit.NewService(pgStore)
@@ -103,13 +135,39 @@ func run(ctx context.Context, args []string) error {
 	genSvc := generator.NewService(client)
 	// genSvc.Brief = true  // 精简模式：解析限制200字，节省token
 
-	// 创建批量推理服务（DashScope 批量 API，云端执行）
-	batchSvc := batch.NewService(cfg.Qwen.APIKey, cfg.Qwen.BaseURL, pgStore, pgStore)
+	// Web 服务当前使用本地模拟批量执行器：它读取当前活动 AI 配置用于展示，
+	// 但不调用外部 Files/Batches API，也不生成真实题目。CLI 的 batch-run 仍保留
+	// 原有 DashScope 执行器，避免改变既有命令行为。
+	batchCfg := batch.DashScopeConfig{
+		APIKey:         cfg.Batch.APIKey,
+		BaseURL:        cfg.Batch.BaseURL,
+		Model:          cfg.Batch.Model,
+		Profile:        cfg.Batch.Profile,
+		EnableThinking: cfg.Batch.EnableThinking,
+	}
+	var batchSvc batch.Executor
+	if args[1] == "serve" {
+		batchSvc = batch.NewSimulatedExecutor(qwenResolver, batchCfg, pgStore)
+	} else {
+		batchSvc, err = batch.NewExecutor(cfg.Batch.Backend, batchCfg, pgStore, pgStore)
+	}
+	if err != nil {
+		return err
+	}
+	batchInfo := batchSvc.Capabilities()
+	fmt.Printf("批量推理: %s / %s（可用=%v）\n", batchInfo.Backend, batchInfo.Model, batchInfo.Available)
 
-	// 创建 AI 检查服务（使用 LLM 检查题目质量）
-	aiCheckSvc := aicheck.NewService(client, pgStore, pgStore, cfg.Qwen.Model)
+	// 创建 AI 检查服务（使用 LLM 检查题目质量）。
+	// 检查端点默认与实时推理共用；配置 AIGO_AICHECK_* 后可指向独立模型/端点
+	// （如实时走云端、检查走自部署本地模型）。
+	checkClient := llm.NewDynamicQwenClient(qwenResolver, llm.PurposeAICheck, cfg.AICheck.Client)
+	aiCheckSvc := aicheck.NewService(checkClient, pgStore, pgStore, pgStore, cfg.AICheck.Client.Model)
+	aiCheckSvc.SetAutoCheckEnabled(cfg.AICheck.AutoEnabled)
+	aiCheckSvc.CheckTimeout = cfg.AICheck.Timeout
+	aiCheckSvc.MaxAttempts = cfg.AICheck.MaxAttempts
 
-	pipe := pipeline.New(genSvc, evaluator.NewService(), reviewSvc, imageSvc, kpSvc, pgStore)
+	pipe := pipeline.New(genSvc, evaluator.NewService(), reviewSvc, kpSvc, pgStore)
+	pipe.SetDraftChecker(aiCheckSvc)
 
 	// 自动加载审核流程配置（仅在数据库为空时导入，避免覆盖管理员在 UI 上的修改）
 	existingFlows, _ := reviewSvc.ListFlows(ctx)
@@ -169,14 +227,33 @@ func run(ctx context.Context, args []string) error {
 		if cfg.IsDefaultJWTSecret() {
 			return fmt.Errorf("拒绝启动：请通过 JWT_SECRET 环境变量设置强密钥（当前为默认密钥 %q，存在被接管风险）", config.DefaultJWTSecret)
 		}
-		port := "8080"
+		addr := cfg.HTTPAddr
 		if len(args) > 2 {
-			port = args[2]
+			addr = "127.0.0.1:" + args[2]
 		}
-		server := api.NewServer(pipe, kpSvc, imageSvc, reviewSvc, auditSvc, pgStore, authSvc, batchSvc, aiCheckSvc, bankSvc, cfg.CORSOrigins, cfg.RegisterEnabled)
-		addr := "127.0.0.1:" + port
+		server := api.NewServer(pipe, kpSvc, reviewSvc, auditSvc, pgStore, authSvc, batchSvc, aiCheckSvc, bankSvc, cfg.CORSOrigins, cfg.RegisterEnabled, cfg.TrustProxyHeaders)
+		handler := server.Handler()
+		if cfg.WebDistDir != "" {
+			handler, err = api.WithStaticFrontend(handler, cfg.WebDistDir)
+			if err != nil {
+				return fmt.Errorf("启用前端静态托管失败: %w", err)
+			}
+			fmt.Printf("前端静态资源: %s\n", cfg.WebDistDir)
+		}
 		fmt.Printf("AIgo HTTP 服务启动: http://%s\n", addr)
+
+		// 启动 AI 检查后台 worker：执行生成/批量导入/编辑自动触发的质量检查
+		workerCtx, stopWorkers := context.WithCancel(context.Background())
+		defer stopWorkers()
+		if cfg.AICheck.AutoEnabled {
+			aiCheckSvc.StartWorkers(workerCtx, cfg.AICheck.Concurrency)
+		}
+		fmt.Printf("AI 质量检查: 自动触发=%v 并发=%d 模型=%s 送审强制前置=%v\n",
+			cfg.AICheck.AutoEnabled, cfg.AICheck.Concurrency, cfg.AICheck.Client.Model, cfg.ReviewRequireAI)
+
 		fmt.Println("API 文档:")
+		fmt.Println("  GET    /health/live                 进程存活检查")
+		fmt.Println("  GET    /health/ready                数据库与关键Schema就绪检查")
 		fmt.Println("  GET    /api/stats                    统计信息")
 		fmt.Println("  POST   /api/questions/generate        生成题目")
 		fmt.Println("  GET    /api/questions                  列出题目")
@@ -184,20 +261,16 @@ func run(ctx context.Context, args []string) error {
 		fmt.Println("  GET    /api/knowledge-points           列出知识点")
 		fmt.Println("  GET    /api/knowledge-points/search?q= 搜索知识点")
 		fmt.Println("  POST   /api/knowledge-points/import    导入知识点(文件上传)")
-		fmt.Println("  POST   /api/images/prompt              生成生图提示词")
-		fmt.Println("  POST   /api/images/generate            生成候选图")
-		fmt.Println("  GET    /api/images/{questionId}        列出候选图")
-		fmt.Println("  POST   /api/images/review              审核图片")
 		fmt.Println("  POST   /api/review/submit              提交审核")
 		fmt.Println("  POST   /api/review/action              执行审核")
 		fmt.Println("  GET    /api/review/task/{id}           审核任务详情")
 
 		srv := &http.Server{
 			Addr:              addr,
-			Handler:           server.Handler(),
+			Handler:           handler,
 			ReadHeaderTimeout: 10 * time.Second,  // 防慢速头攻击
 			ReadTimeout:       60 * time.Second,  // 读请求体超时
-			WriteTimeout:      20 * time.Minute,  // 写响应超时（AI 生成/生图耗时长）
+			WriteTimeout:      20 * time.Minute,  // 写响应超时（AI 生成耗时较长）
 			IdleTimeout:       120 * time.Second, // 空闲连接超时
 		}
 
@@ -207,6 +280,7 @@ func run(ctx context.Context, args []string) error {
 		go func() {
 			<-sigCh
 			fmt.Println("收到退出信号，正在优雅关闭...")
+			stopWorkers()
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -240,6 +314,48 @@ func run(ctx context.Context, args []string) error {
 			return fmt.Errorf("用法: aigo eval-id <题目ID>")
 		}
 		return pipe.EvaluateByID(ctx, args[2])
+
+	case "ai-check":
+		// AI 质量检查（LLM 评分）。
+		// 用法: aigo ai-check --all-drafts            检查全部未检查草稿（存量补查）
+		//       aigo ai-check <题目ID> [题目ID...]    检查指定题目
+		var ids []string
+		if len(args) >= 3 && args[2] == "--all-drafts" {
+			questions, err := pgStore.ListQuestions(ctx)
+			if err != nil {
+				return err
+			}
+			for _, q := range questions {
+				if q.Status == domain.StatusAIDraft || q.Status == domain.StatusAutoChecked {
+					ids = append(ids, q.ID)
+				}
+			}
+			fmt.Printf("待检查草稿: %d 道\n", len(ids))
+		} else {
+			ids = args[2:]
+		}
+		if len(ids) == 0 {
+			return fmt.Errorf("用法: aigo ai-check --all-drafts | aigo ai-check <题目ID>...")
+		}
+		results, err := aiCheckSvc.CheckQuestions(ctx, ids)
+		if err != nil {
+			return err
+		}
+		pass, issues, reject, failed := 0, 0, 0, 0
+		for _, r := range results {
+			switch r.Verdict {
+			case "pass":
+				pass++
+			case "issues_found":
+				issues++
+			case "reject":
+				reject++
+			default:
+				failed++
+			}
+		}
+		fmt.Printf("检查完成: 通过 %d, 有问题 %d, 驳回 %d, 失败 %d\n", pass, issues, reject, failed)
+		return nil
 
 	// ===== 知识点管理 =====
 	case "kp-import":
@@ -357,9 +473,9 @@ func run(ctx context.Context, args []string) error {
 		}
 		return pipe.PublishQuestion(ctx, args[2])
 
-	// ===== 批量推理（DashScope 批量 API，云端执行）=====
+	// ===== 批量推理（执行器可替换；当前实现保留 DashScope）=====
 	case "batch-run":
-		// 提交批量任务到 DashScope 云端
+		// 提交批量任务到当前执行器
 		// 用法: aigo batch-run [选项]
 		//   --limit N          只处理前 N 个知识点
 		//   --skip-existing    跳过已有题目的知识点
@@ -411,9 +527,17 @@ func run(ctx context.Context, args []string) error {
 		if ids != "" {
 			for _, id := range strings.Split(ids, ",") {
 				id = strings.TrimSpace(id)
-				if p, err := kpSvc.GetByID(ctx, id); err == nil && p != nil {
-					points = append(points, *p)
+				p, err := kpSvc.ResolveForGeneration(ctx, "", id, "")
+				if err != nil {
+					p, err = kpSvc.ResolveForGeneration(ctx, "", "", id)
 				}
+				if err != nil {
+					return err
+				}
+				if len(points) > 0 && points[0].VersionID != p.VersionID {
+					return fmt.Errorf("一次批量任务只能使用一个大纲版本")
+				}
+				points = append(points, *p)
 			}
 		} else {
 			all, err := kpSvc.ListAll(ctx)
@@ -426,15 +550,10 @@ func run(ctx context.Context, args []string) error {
 		// 跳过已有题目
 		if skipExisting {
 			questions, _ := pgStore.ListQuestions(ctx)
-			existing := make(map[string]bool)
-			for _, q := range questions {
-				if q.OutlineCode != "" {
-					existing[q.OutlineCode] = true
-				}
-			}
+			existing := domain.ExistingKnowledgeKeys(questions)
 			var filtered []domain.KnowledgePoint
 			for _, p := range points {
-				if !existing[p.OutlineCode] {
+				if !existing[domain.KnowledgePointKey(p)] {
 					filtered = append(filtered, p)
 				}
 			}
@@ -466,7 +585,11 @@ func run(ctx context.Context, args []string) error {
 			return fmt.Errorf("没有符合条件的知识点")
 		}
 
-		fmt.Printf("DashScope 批量 API: %s\n", batchSvc.GetBaseURLs())
+		batchInfo := batchSvc.Capabilities()
+		if !batchInfo.Available {
+			return fmt.Errorf("批量生成不可用: %s", batchInfo.Message)
+		}
+		fmt.Printf("批量执行器: %s / %s\n", batchInfo.Backend, batchInfo.Model)
 		fmt.Printf("知识点: %d 个, 每点 %d 题\n", len(points), countPerPoint)
 		fmt.Println("正在提交任务...")
 
@@ -479,7 +602,7 @@ func run(ctx context.Context, args []string) error {
 		fmt.Printf("\n任务已提交！\n")
 		fmt.Printf("job_id: %s\n", jobID)
 		fmt.Printf("请求数: %d\n", count)
-		fmt.Println("\n任务在 DashScope 云端执行，关闭电脑不影响。")
+		fmt.Printf("\n%s。\n", batchInfo.Message)
 		fmt.Println("使用以下命令查看状态和下载结果：")
 		fmt.Printf("  go run ./cmd/aigo batch-status %s\n", jobID)
 		fmt.Printf("  go run ./cmd/aigo batch-download %s\n", jobID)
@@ -513,21 +636,11 @@ func run(ctx context.Context, args []string) error {
 			return fmt.Errorf("用法: aigo batch-download <job_id 或 output_file_id>")
 		}
 
-		// 判断是 job_id 还是 output_file_id
+		// 新路径按 AIgo job_id 导入；仍兼容历史 output_file_id 参数。
 		id := args[2]
-		var outputFileID string
-
-		// 先尝试作为 job_id 查询
-		job, err := batchSvc.GetJobStatus(ctx, id)
-		if err == nil && job.OutputFileID != "" {
-			outputFileID = job.OutputFileID
+		job, statusErr := batchSvc.GetJobStatus(ctx, id)
+		if statusErr == nil {
 			fmt.Printf("任务状态: %s\n", job.Status)
-			if job.Status != "completed" && job.Status != "complete" {
-				return fmt.Errorf("任务尚未完成，当前状态: %s", job.Status)
-			}
-		} else {
-			// 直接作为 output_file_id 使用
-			outputFileID = id
 		}
 
 		// 获取知识点列表
@@ -536,11 +649,18 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 
-		result, err := batchSvc.DownloadAndImport(ctx, outputFileID, allKPs)
+		var result *batch.ImportResult
+		if statusErr == nil {
+			result, err = batchSvc.ImportResults(ctx, id, allKPs)
+		} else if direct, ok := batchSvc.(batch.DirectOutputImporter); ok {
+			result, err = direct.DownloadAndImport(ctx, id, allKPs)
+		} else {
+			return statusErr
+		}
 		if err != nil {
 			return err
 		}
-		fmt.Printf("已导入 %d 道题目（成功 %d, 失败 %d）\n", result.Saved+result.Failed, result.Saved, result.Failed)
+		fmt.Printf("导入完成：成功入库 %d 道题目，失败请求 %d 个\n", result.Saved, result.Failed)
 		for _, item := range result.Items {
 			if item.Status == "ok" {
 				fmt.Printf("  ✅ %s: 导入 %d 题\n", item.OutlineCode, item.Count)
@@ -555,53 +675,14 @@ func run(ctx context.Context, args []string) error {
 		fmt.Println("提示：旧版 batch 命令已废弃，请使用 batch-run 命令：")
 		fmt.Println("  go run ./cmd/aigo batch-run [选项]")
 		fmt.Println("")
-		fmt.Println("batch-run 使用 DashScope 批量 API，云端执行，不会超时。")
+		fmt.Println("batch-run 使用当前部署配置的批量执行器。")
 		fmt.Println("详见：go run ./cmd/aigo help")
 		return nil
 
 	case "batch-urls":
-		fmt.Printf("DashScope 批量 API: %s\n", batchSvc.GetBaseURLs())
+		batchInfo := batchSvc.Capabilities()
+		fmt.Printf("批量执行器: %s / %s @ %s（可用=%v）\n", batchInfo.Backend, batchInfo.Model, batchInfo.Endpoint, batchInfo.Available)
 		return nil
-
-	// ===== 图片配图 =====
-	case "img-prompt":
-		if len(args) < 3 {
-			return fmt.Errorf("用法: aigo img-prompt <题目ID>")
-		}
-		return pipe.GenerateImagePrompt(ctx, args[2])
-
-	case "img-generate":
-		if len(args) < 3 {
-			return fmt.Errorf("用法: aigo img-generate <题目ID> [数量3-5]")
-		}
-		count := 3
-		if len(args) > 3 {
-			fmt.Sscanf(args[3], "%d", &count)
-		}
-		return pipe.GenerateImages(ctx, args[2], count)
-
-	case "img-list":
-		if len(args) < 3 {
-			return fmt.Errorf("用法: aigo img-list <题目ID>")
-		}
-		return pipe.ListImages(ctx, args[2])
-
-	case "img-review":
-		if len(args) < 5 {
-			return fmt.Errorf(`用法: aigo img-review <图片ID> <专家ID> <approved|rejected> [意见]`)
-		}
-		return pipe.ReviewImage(ctx, args[2], args[3], domain.ImageStatus(args[4]), func() string {
-			if len(args) > 5 {
-				return args[5]
-			}
-			return ""
-		}())
-
-	case "img-show":
-		if len(args) < 3 {
-			return fmt.Errorf("用法: aigo img-show <题目ID>")
-		}
-		return pipe.GetImagePrompt(ctx, args[2])
 
 	case "show":
 		if len(args) < 3 {
@@ -624,10 +705,108 @@ func run(ctx context.Context, args []string) error {
 	}
 }
 
+func commandRequiresInferenceConfig(command string) bool {
+	switch command {
+	case "serve", "doctor", "generate", "generate-all", "batch-run", "ai-check":
+		return true
+	default:
+		return false
+	}
+}
+
+// databaseQwenResolver 将数据库中的活动配置适配成 llm 所需的实时配置。
+// 批量推理仍使用 cfg.Batch 的独立配置，不经过这里。
+type databaseQwenResolver struct {
+	store              storage.AIProviderConfigStore
+	generationFallback llm.QwenConfig
+	checkFallback      llm.QwenConfig
+	batchFallback      llm.QwenConfig
+}
+
+func (r databaseQwenResolver) ResolveQwenConfig(ctx context.Context, purpose llm.ConfigPurpose) (llm.QwenConfig, bool, error) {
+	fallback := r.generationFallback
+	if purpose == llm.PurposeAICheck {
+		fallback = r.checkFallback
+	} else if purpose == llm.PurposeBatch {
+		fallback = r.batchFallback
+	}
+	if r.store == nil {
+		return fallback, false, nil
+	}
+	config, err := r.store.GetActiveAIProviderConfig(ctx)
+	if err != nil {
+		return fallback, false, err
+	}
+	if config == nil {
+		return fallback, false, nil
+	}
+	model := config.GenerationModel
+	baseURL := config.BaseURL
+	apiKey := config.APIKey
+	if purpose == llm.PurposeAICheck {
+		model = config.CheckModel
+	} else if purpose == llm.PurposeBatch {
+		model = config.BatchModel
+		baseURL = config.BatchBaseURL
+		apiKey = config.BatchAPIKey
+	}
+	if strings.TrimSpace(model) == "" {
+		model = fallback.Model
+	}
+	return llm.QwenConfig{
+		Deployment:     llm.DeploymentMode(config.Deployment),
+		APIKey:         apiKey,
+		BaseURL:        baseURL,
+		Model:          model,
+		EnableThinking: fallback.EnableThinking,
+		HTTPTimeout:    fallback.HTTPTimeout,
+	}, true, nil
+}
+
+// bootstrapAIProviderConfig 只在数据库还没有任何手动配置时把旧环境配置导入
+// 一次。导入后实际请求优先使用数据库配置，保留环境变量仅作为兼容回退。
+func bootstrapAIProviderConfig(ctx context.Context, store storage.AIProviderConfigStore, cfg config.Config) error {
+	configs, err := store.ListAIProviderConfigs(ctx)
+	if err != nil {
+		return err
+	}
+	if len(configs) > 0 {
+		return nil
+	}
+	// Config.Load 会提供云端默认地址和模型，因此额外判断原始环境变量，避免
+	// 没有任何凭证/部署参数的新服务器自动生成一条空的伪配置。
+	explicitEnv := strings.TrimSpace(cfg.Qwen.APIKey) != "" ||
+		strings.TrimSpace(os.Getenv("QWEN_DEPLOYMENT")) != "" ||
+		strings.TrimSpace(os.Getenv("QWEN_BASE_URL")) != "" ||
+		strings.TrimSpace(os.Getenv("QWEN_MODEL")) != ""
+	if !explicitEnv {
+		return nil
+	}
+	checkModel := strings.TrimSpace(cfg.AICheck.Client.Model)
+	if checkModel == "" {
+		checkModel = cfg.Qwen.Model
+	}
+	return store.SaveAIProviderConfig(ctx, domain.AIProviderConfig{
+		ID:              "qwen-env-bootstrap",
+		Name:            "默认千问配置",
+		Deployment:      string(cfg.Qwen.Deployment),
+		BaseURL:         cfg.Qwen.BaseURL,
+		APIKey:          cfg.Qwen.APIKey,
+		GenerationModel: cfg.Qwen.Model,
+		CheckModel:      checkModel,
+		BatchAPIKey:     cfg.Batch.APIKey,
+		BatchBaseURL:    cfg.Batch.BaseURL,
+		BatchModel:      cfg.Batch.Model,
+		Active:          true,
+		Source:          "env-bootstrap",
+	})
+}
+
 func printUsage() {
 	fmt.Print(`AIgo - AI医学A2型试题生成与评估系统
 
 基础命令:
+  go run ./cmd/aigo migrate                       将数据库迁移到当前程序版本
   go run ./cmd/aigo doctor                        检查框架状态
   go run ./cmd/aigo import <file.xlsx>            从 xlsx 导入题目
   go run ./cmd/aigo list                          列出题库摘要
@@ -635,6 +814,10 @@ func printUsage() {
   go run ./cmd/aigo generate                      调 API 生成新题(需 Key)
   go run ./cmd/aigo evaluate                      评估最后一道题
   go run ./cmd/aigo eval-id <题目ID>              评估指定题目
+
+AI 质量检查（LLM 评分；serve 模式下生成/导入/编辑后自动执行）:
+  go run ./cmd/aigo ai-check --all-drafts         检查全部未检查草稿(存量补查)
+  go run ./cmd/aigo ai-check <题目ID>...          检查指定题目
 
 批量生成与导出:
   go run ./cmd/aigo generate-all [每知识点题数]    遍历所有知识点生成题目(默认1)
@@ -657,7 +840,7 @@ func printUsage() {
     --count N          每个知识点生成几道题（默认1）
   go run ./cmd/aigo batch-urls                    显示批量推理 URL
 
-批量推理（DashScope 批量 API，云端执行，5折优惠）:
+批量推理（执行器由部署配置决定；当前支持 DashScope）:
   go run ./cmd/aigo batch-run [选项]              提交批量任务到云端
     --limit N          只处理前 N 个知识点
     --skip-existing    跳过已有题目的知识点（默认开启）
@@ -684,16 +867,17 @@ func printUsage() {
   go run ./cmd/aigo records <任务ID>              查看审核记录
   go run ./cmd/aigo publish <题目ID>              发布审核通过的题目
 
-图片配图:
-  go run ./cmd/aigo img-prompt <题目ID>           为题目生成结构化生图提示词(需Key)
-  go run ./cmd/aigo img-generate <题目ID> [数量]   生成候选图(3-5张)
-  go run ./cmd/aigo img-list <题目ID>             查看候选图列表
-  go run ./cmd/aigo img-review <图片ID> <专家ID> <approved|rejected> [意见]
-  go run ./cmd/aigo img-show <题目ID>             查看题目生图提示词
-
 Environment:
-  DASHSCOPE_API_KEY   阿里云百炼/千问 API Key
-  QWEN_BASE_URL       DashScope API 地址 (默认 https://dashscope.aliyuncs.com/api/v1)
-  QWEN_MODEL          模型名称 (默认 qwen3.5-flash)
+	QWEN_DEPLOYMENT     实时推理部署方式: cloud（默认）/ local
+	QWEN_BASE_URL       实时 OpenAI-compatible base URL
+	QWEN_MODEL          云端模型 ID 或本地 served-model-name
+	QWEN_API_KEY        云端/自建网关实时推理凭证
+	QWEN_LOCAL_API_KEY  本地实时端点独立凭证；无鉴权时可留空
+	DASHSCOPE_API_KEY   百炼凭证（云端实时、云端批量）
+	QWEN_BATCH_BACKEND  auto（默认）/ dashscope / local（预留）/ disabled
+		QWEN_BATCH_API_KEY  独立百炼 Batch 凭证（可选）
+		AIGO_HTTP_ADDR       HTTP 监听地址（默认 127.0.0.1:8080）
+		AIGO_WEB_DIST_DIR    Vite 生产构建目录（空=仅提供 API）
+		AIGO_ENV_FILE        外部 dotenv 路径（-=禁用 dotenv）
 `)
 }

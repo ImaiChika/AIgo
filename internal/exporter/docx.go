@@ -86,8 +86,7 @@ h1 {
 
 	for i, q := range questions {
 		b.WriteString("<div class='question'>\n")
-		b.WriteString(fmt.Sprintf("<p><strong>%d．</strong></p>\n", i+1))
-		b.WriteString(fmt.Sprintf("<div class='stem'>%s</div>\n", escapeHTML(q.ClinicalStem)))
+		b.WriteString(fmt.Sprintf("<div class='stem'><strong>%d．</strong>%s</div>\n", i+1, escapeHTML(q.ClinicalStem)))
 
 		for _, opt := range q.Options {
 			b.WriteString(fmt.Sprintf("<div class='option'>%s．%s</div>\n", opt.Label, escapeHTML(opt.Text)))
@@ -96,28 +95,29 @@ h1 {
 		b.WriteString(fmt.Sprintf("<div class='answer'>答案：%s</div>\n", q.Answer))
 
 		if q.Explanation != "" {
-			b.WriteString(fmt.Sprintf("<div class='explanation'>解析：%s</div>\n", escapeHTML(q.Explanation)))
+			b.WriteString(fmt.Sprintf("<div class='explanation'>说明：%s</div>\n", escapeHTML(q.Explanation)))
 		}
 
 		b.WriteString("<div class='meta'>")
 		if q.OutlineCode != "" {
-			b.WriteString(fmt.Sprintf("大纲代码：%s | ", q.OutlineCode))
+			b.WriteString(fmt.Sprintf("大纲代码：%s<br>", q.OutlineCode))
 		}
 		if q.Difficulty != "" {
-			b.WriteString(fmt.Sprintf("预估难度：%s | ", q.Difficulty))
+			b.WriteString(fmt.Sprintf("预估难度：%s<br>", q.Difficulty))
 		}
 		if q.CognitiveLevel != "" {
-			b.WriteString(fmt.Sprintf("认知层次：%s | ", q.CognitiveLevel))
+			b.WriteString(fmt.Sprintf("认知层次：%s<br>", q.CognitiveLevel))
 		}
 		if q.ExamPoints != "" {
-			b.WriteString(fmt.Sprintf("考核要点：%s | ", q.ExamPoints))
+			b.WriteString(fmt.Sprintf("考核要点：%s<br>", q.ExamPoints))
 		}
 		if q.Profession != "" {
-			b.WriteString(fmt.Sprintf("专业：%s | ", q.Profession))
+			b.WriteString(fmt.Sprintf("专业：%s<br>", q.Profession))
 		}
 		if q.System != "" {
-			b.WriteString(fmt.Sprintf("系统：%s", q.System))
+			b.WriteString(fmt.Sprintf("系统：%s<br>", q.System))
 		}
+		b.WriteString("命题人：朝阳医院AI")
 		b.WriteString("</div>\n")
 		b.WriteString("</div>\n")
 	}

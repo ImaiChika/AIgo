@@ -1,0 +1,31 @@
+{$AIGO_SITE_ADDRESS} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+
+	reverse_proxy app:8080 {
+		header_up X-AIgo-Client-IP {http.request.remote.host}
+		health_uri /health/ready
+		health_interval 15s
+		health_timeout 3s
+		fail_duration 30s
+		max_fails 2
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+# 未匹配部署域名/IP 的明文 HTTP 请求不得返回虚假的 200，也不得转发到应用。
+http:// {
+	respond "Misdirected Request" 421
+}

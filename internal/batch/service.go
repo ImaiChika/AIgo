@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -25,42 +26,117 @@ import (
 
 // Service 批量推理服务。
 type Service struct {
-	apiKey        string
-	baseURL       string               // https://dashscope.aliyuncs.com/compatible-mode/v1
-	questionStore storage.QuestionStore
-	batchJobStore storage.BatchJobStore // 批量任务持久化存储
-	httpClient    *http.Client
+	apiKey         string
+	baseURL        string // https://dashscope.aliyuncs.com/compatible-mode/v1
+	model          string // 云端批量模型，禁止在 JSONL 中硬编码
+	profile        string // 脱敏端点配置档名称，用于审计
+	enableThinking bool   // 是否为批量请求开启思考模式
+	questionStore  storage.QuestionStore
+	batchJobStore  storage.BatchJobStore // 批量任务持久化存储
+	httpClient     *http.Client
 }
 
-// NewService 创建批量推理服务。
+// DashScopeConfig 配置百炼 Files + Batches 执行器。
+type DashScopeConfig struct {
+	APIKey         string
+	BaseURL        string
+	Model          string
+	Profile        string
+	EnableThinking bool
+}
+
+// NewService 保留旧构造函数兼容，默认使用 qwen3.5-flash 和思考模式。
 func NewService(apiKey, baseURL string, questionStore storage.QuestionStore, batchJobStore storage.BatchJobStore) *Service {
-	return &Service{
-		apiKey:        apiKey,
-		baseURL:       strings.TrimRight(baseURL, "/"),
-		questionStore: questionStore,
-		batchJobStore: batchJobStore,
-		httpClient:    &http.Client{Timeout: 120 * time.Second},
+	return NewDashScopeService(DashScopeConfig{
+		APIKey:         apiKey,
+		BaseURL:        baseURL,
+		Model:          "qwen3.5-flash",
+		Profile:        "dashscope-default",
+		EnableThinking: true,
+	}, questionStore, batchJobStore)
+}
+
+// NewDashScopeService 创建百炼批量执行器。
+func NewDashScopeService(cfg DashScopeConfig, questionStore storage.QuestionStore, batchJobStore storage.BatchJobStore) *Service {
+	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
+	if baseURL == "" {
+		baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 	}
+	model := strings.TrimSpace(cfg.Model)
+	if model == "" {
+		model = "qwen3.5-flash"
+	}
+	profile := strings.TrimSpace(cfg.Profile)
+	if profile == "" {
+		profile = "dashscope-default"
+	}
+	return &Service{
+		apiKey:         strings.TrimSpace(cfg.APIKey),
+		baseURL:        baseURL,
+		model:          model,
+		profile:        profile,
+		enableThinking: cfg.EnableThinking,
+		questionStore:  questionStore,
+		batchJobStore:  batchJobStore,
+		httpClient:     &http.Client{Timeout: 120 * time.Second},
+	}
+}
+
+// Capabilities 返回脱敏后的执行器能力。
+func (s *Service) Capabilities() Capabilities {
+	available := s.apiKey != "" && s.baseURL != "" && s.model != ""
+	message := "使用百炼 Files + Batches 异步执行，任务可在服务关闭后继续运行"
+	if !available {
+		message = "DashScope 批量执行器缺少 API Key、模型或端点配置"
+	}
+	return Capabilities{
+		Backend:       "dashscope",
+		Available:     available,
+		ExecutionMode: "remote_file_batch",
+		Model:         s.model,
+		Message:       message,
+		Endpoint:      s.baseURL,
+	}
+}
+
+func (s *Service) ensureAvailable() error {
+	info := s.Capabilities()
+	if !info.Available {
+		return fmt.Errorf("%w: %s", ErrUnavailable, info.Message)
+	}
+	return nil
 }
 
 // BatchJob 批量任务状态。
 type BatchJob struct {
 	JobID        string `json:"job_id"`
-	JobName      string `json:"job_name"`      // 自定义任务名称
-	Status       string `json:"status"`        // validating/in_progress/completed/failed/cancelled
+	OwnerID      string `json:"-"` // 提交任务的用户，仅服务端隔离使用
+	Backend      string `json:"backend,omitempty"`
+	Model        string `json:"model,omitempty"`
+	JobName      string `json:"job_name"` // 自定义任务名称
+	Status       string `json:"status"`   // validating/in_progress/finalizing/completed/expired/cancelling/cancelled
 	TotalCount   int    `json:"total_count"`
 	Completed    int    `json:"completed"`
 	Failed       int    `json:"failed"`
 	OutputFileID string `json:"output_file_id"`
 	CreatedAt    int64  `json:"created_at"`
 	Error        string `json:"error,omitempty"`
+	// ImportedAt 非空表示结果已入库（导入幂等）；前端据此决定是否触发自动导入。
+	ImportedAt string `json:"imported_at,omitempty"`
+	// Tracked 表示该任务在本地 batch_jobs 有记录（导入幂等可用）。
+	// 仅云端列表补齐的历史任务没有本地记录，结果多半早已按旧流程入库，
+	// 前端不得对它们自动导入，否则会把历史结果重复写进题库。
+	Tracked bool `json:"tracked,omitempty"`
 }
 
 // ImportResult 导入结果详情。
 type ImportResult struct {
-	Saved  int            `json:"saved"`  // 成功导入数
-	Failed int            `json:"failed"` // 失败数
-	Items  []ImportItem   `json:"items"`  // 每条导入详情
+	Saved       int          `json:"saved"`        // 实际成功入库题目数
+	Failed      int          `json:"failed"`       // 失败请求/JSONL 行数（不是题目数）
+	Items       []ImportItem `json:"items"`        // 每条导入详情
+	QuestionIDs []string     `json:"question_ids"` // 本次入库的题目 ID，用于触发 AI 自动检查
+	Simulated   bool         `json:"simulated,omitempty"`
+	Message     string       `json:"message,omitempty"`
 }
 
 // ImportItem 单条导入结果。
@@ -75,6 +151,9 @@ type ImportItem struct {
 // 返回 job_id，可用于后续查询状态和下载结果。
 // jobName 为自定义任务名称，显示在 DashScope 控制台。
 func (s *Service) GenerateAndSubmit(ctx context.Context, points []domain.KnowledgePoint, countPerPoint int, jobName string) (string, int, error) {
+	if err := s.ensureAvailable(); err != nil {
+		return "", 0, err
+	}
 	if len(points) == 0 {
 		return "", 0, fmt.Errorf("知识点列表为空")
 	}
@@ -112,11 +191,15 @@ func (s *Service) GenerateAndSubmit(ctx context.Context, points []domain.Knowled
 	if s.batchJobStore != nil {
 		pointsJSON, _ := json.Marshal(points)
 		if err := s.batchJobStore.SaveBatchJob(ctx, storage.BatchJobRecord{
-			ID:         jobID,
-			JobName:    jobName,
-			Status:     "validating",
-			TotalCount: count,
-			PointsJSON: string(pointsJSON),
+			ID:             jobID,
+			OwnerID:        storage.QuestionChangeFromContext(ctx).OwnerID,
+			Backend:        "dashscope",
+			BackendProfile: s.profile,
+			Model:          s.model,
+			JobName:        jobName,
+			Status:         "validating",
+			TotalCount:     count,
+			PointsJSON:     string(pointsJSON),
 		}); err != nil {
 			// DB 写入失败不阻塞提交，但记录警告（任务已在 DashScope 云端）
 			fmt.Printf("⚠ 警告: 任务 %s 已提交到 DashScope，但本地保存失败: %v\n", jobID, err)
@@ -131,6 +214,13 @@ func (s *Service) GenerateAndSubmit(ctx context.Context, points []domain.Knowled
 
 // GetJobStatus 查询批量任务状态。
 func (s *Service) GetJobStatus(ctx context.Context, jobID string) (*BatchJob, error) {
+	if err := s.ensureAvailable(); err != nil {
+		return nil, err
+	}
+	var stored *storage.BatchJobRecord
+	if s.batchJobStore != nil {
+		stored, _ = s.batchJobStore.GetBatchJob(ctx, jobID)
+	}
 	url := fmt.Sprintf("%s/batches/%s", s.baseURL, jobID)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -167,12 +257,28 @@ func (s *Service) GetJobStatus(ctx context.Context, jobID string) (*BatchJob, er
 	}
 
 	jobName := ""
+	model := ""
+	profile := ""
 	if result.Metadata != nil {
 		jobName = result.Metadata["ds_name"]
+		model = result.Metadata["aigo_model"]
+		profile = result.Metadata["aigo_profile"]
 	}
-
+	if stored != nil {
+		if jobName == "" {
+			jobName = stored.JobName
+		}
+		if model == "" {
+			model = stored.Model
+		}
+		if profile == "" {
+			profile = stored.BackendProfile
+		}
+	}
 	job := &BatchJob{
 		JobID:        result.ID,
+		Backend:      "dashscope",
+		Model:        model,
 		JobName:      jobName,
 		Status:       result.Status,
 		TotalCount:   result.RequestCounts.Total,
@@ -181,16 +287,25 @@ func (s *Service) GetJobStatus(ctx context.Context, jobID string) (*BatchJob, er
 		OutputFileID: result.OutputFileID,
 		CreatedAt:    result.CreatedAt,
 	}
+	if stored != nil {
+		job.OwnerID = stored.OwnerID
+		job.ImportedAt = stored.ImportedAt
+		job.Tracked = true
+	}
 
 	// 更新数据库
 	if s.batchJobStore != nil {
 		if err := s.batchJobStore.UpdateBatchJob(ctx, storage.BatchJobRecord{
-			ID:           result.ID,
-			Status:       result.Status,
-			TotalCount:   result.RequestCounts.Total,
-			Completed:    result.RequestCounts.Completed,
-			Failed:       result.RequestCounts.Failed,
-			OutputFileID: result.OutputFileID,
+			ID:             result.ID,
+			OwnerID:        job.OwnerID,
+			Backend:        "dashscope",
+			BackendProfile: profile,
+			Model:          model,
+			Status:         result.Status,
+			TotalCount:     result.RequestCounts.Total,
+			Completed:      result.RequestCounts.Completed,
+			Failed:         result.RequestCounts.Failed,
+			OutputFileID:   result.OutputFileID,
 		}); err != nil {
 			fmt.Printf("⚠ 警告: 更新任务 %s 本地状态失败: %v\n", result.ID, err)
 		}
@@ -199,8 +314,85 @@ func (s *Service) GetJobStatus(ctx context.Context, jobID string) (*BatchJob, er
 	return job, nil
 }
 
-// DownloadAndImport 下载结果并导入题库，返回详细导入结果。
+// ImportResults 按 AIgo 任务 ID 获取并导入结果，不向上层泄漏 provider file ID。
+// 导入幂等：任务结果只允许入库一次。已导入的任务直接重放上次结果，
+// 并发/重复触发由存储层抢占标记兜底，不会产生重复题目。
+func (s *Service) ImportResults(ctx context.Context, jobID string, points []domain.KnowledgePoint) (*ImportResult, error) {
+	if s.batchJobStore != nil {
+		stored, err := s.batchJobStore.GetBatchJob(ctx, jobID)
+		if err != nil {
+			return nil, fmt.Errorf("读取任务记录失败: %w", err)
+		}
+		if stored != nil {
+			if stored.ImportedAt != "" {
+				// 已导入过：优先重放上次导入结果，避免重新下载和重复入库
+				if stored.ImportResult != "" {
+					var replay ImportResult
+					if json.Unmarshal([]byte(stored.ImportResult), &replay) == nil {
+						return &replay, nil
+					}
+				}
+				return nil, fmt.Errorf("该任务的结果已于 %s 导入过，不能重复导入", stored.ImportedAt)
+			}
+			claimed, err := s.batchJobStore.ClaimBatchJobImport(ctx, jobID)
+			if err != nil {
+				return nil, fmt.Errorf("标记导入状态失败: %w", err)
+			}
+			if !claimed {
+				return nil, fmt.Errorf("该任务的结果已导入过或正在导入，不能重复导入")
+			}
+			// Stored submission snapshots are authoritative even if the syllabus has since
+			// been edited, replaced or deleted. Legacy direct imports retain their explicit input.
+			if stored.PointsJSON != "" {
+				if err := json.Unmarshal([]byte(stored.PointsJSON), &points); err != nil {
+					_ = s.batchJobStore.ReleaseBatchJobImport(ctx, jobID)
+					return nil, fmt.Errorf("任务知识点快照无效: %w", err)
+				}
+			}
+		}
+	}
+	result, err := s.importJobResult(ctx, jobID, points)
+	if err != nil {
+		// 下载/状态校验等前置失败尚未写入任何题目，释放标记以便重试
+		if s.batchJobStore != nil {
+			_ = s.batchJobStore.ReleaseBatchJobImport(ctx, jobID)
+		}
+		return nil, err
+	}
+	if s.batchJobStore != nil {
+		if payload, mErr := json.Marshal(result); mErr == nil {
+			if saveErr := s.batchJobStore.SaveBatchJobImportResult(ctx, jobID, string(payload)); saveErr != nil {
+				fmt.Printf("⚠ 警告: 保存任务 %s 导入结果失败: %v\n", jobID, saveErr)
+			}
+		}
+	}
+	return result, nil
+}
+
+// importJobResult 校验任务状态后下载结果并导入题库（不做幂等控制，见 ImportResults）。
+func (s *Service) importJobResult(ctx context.Context, jobID string, points []domain.KnowledgePoint) (*ImportResult, error) {
+	job, err := s.GetJobStatus(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if job.Status != "completed" && job.Status != "complete" {
+		return nil, fmt.Errorf("%w，当前状态: %s", ErrNotReady, job.Status)
+	}
+	if job.OutputFileID == "" {
+		return nil, errors.New("任务没有输出文件")
+	}
+	if len(points) == 0 {
+		return nil, fmt.Errorf("任务缺少知识点快照，无法安全关联导入结果")
+	}
+	return s.DownloadAndImport(ctx, job.OutputFileID, points)
+}
+
+// DownloadAndImport 按 DashScope output_file_id 下载结果并导入题库。
+// 仅为历史 CLI 兼容保留；新路径应使用 ImportResults(jobID)。
 func (s *Service) DownloadAndImport(ctx context.Context, outputFileID string, points []domain.KnowledgePoint) (*ImportResult, error) {
+	if err := s.ensureAvailable(); err != nil {
+		return nil, err
+	}
 	// 1. 下载结果文件
 	fmt.Println("正在下载结果...")
 	url := fmt.Sprintf("%s/files/%s/content", s.baseURL, outputFileID)
@@ -221,15 +413,24 @@ func (s *Service) DownloadAndImport(ctx context.Context, outputFileID string, po
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		message := strings.TrimSpace(string(bodyBytes))
+		if len(message) > 500 {
+			message = message[:500]
+		}
+		return nil, fmt.Errorf("下载批量结果失败: HTTP %d %s", resp.StatusCode, message)
+	}
 
 	// 2. 建立知识点映射
 	kpMap := make(map[string]domain.KnowledgePoint)
 	for _, kp := range points {
-		kpMap[kp.OutlineCode] = kp
+		kpMap[batchPointID(kp)] = kp
 	}
 
 	// 3. 解析并导入
 	scanner := bufio.NewScanner(bytes.NewReader(bodyBytes))
+	// 百炼允许单行请求接近 1MB；默认 64KB Scanner 缓冲会把长题误判为文件结束。
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	result := &ImportResult{}
 
 	for scanner.Scan() {
@@ -274,9 +475,14 @@ func (s *Service) DownloadAndImport(ctx context.Context, outputFileID string, po
 		// 查找知识点
 		kp, ok := kpMap[resp.CustomID]
 		if !ok {
-			kp = domain.KnowledgePoint{OutlineCode: resp.CustomID}
+			item.Status = "failed"
+			item.Error = "结果无法匹配提交时的知识点快照"
+			result.Items = append(result.Items, item)
+			result.Failed++
+			continue
 		}
 
+		item.OutlineCode = kp.OutlineCode
 		// 解析题目
 		content := strings.TrimSpace(resp.Response.Body.Choices[0].Message.Content)
 		if content == "" {
@@ -304,12 +510,24 @@ func (s *Service) DownloadAndImport(ctx context.Context, outputFileID string, po
 
 		// 保存到数据库
 		savedCount := 0
+		// 生成者记录为提交批量任务的用户（handler 已把 actor 塞入 ctx）；CLI 路径无用户时兜底 "batch"
+		batchActor := strings.TrimSpace(storage.QuestionChangeFromContext(ctx).Actor)
+		if batchActor == "" {
+			batchActor = "batch"
+		}
 		for _, q := range questions {
 			question := buildQuestion(q, kp)
-			if err := s.questionStore.SaveQuestion(ctx, question); err != nil {
+			question.NormalizeGeneratedA2()
+			if err := question.ValidateGeneratedA2(); err != nil {
+				fmt.Printf("[import] 题目未通过A2专家规范，跳过: %v\n", err)
+				continue
+			}
+			questionCtx := storage.WithQuestionChange(ctx, storage.QuestionChange{Actor: batchActor, OwnerID: storage.QuestionChangeFromContext(ctx).OwnerID, ChangeType: "batch_generate", ChangeNote: "批量推理生成题目"})
+			if err := s.questionStore.SaveQuestion(questionCtx, question); err != nil {
 				fmt.Printf("[import] 保存题目失败: %v\n", err)
 				continue
 			}
+			result.QuestionIDs = append(result.QuestionIDs, question.ID)
 			savedCount++
 		}
 
@@ -323,6 +541,9 @@ func (s *Service) DownloadAndImport(ctx context.Context, outputFileID string, po
 			result.Failed++
 		}
 		result.Items = append(result.Items, item)
+	}
+	if err := scanner.Err(); err != nil {
+		return result, fmt.Errorf("扫描批量结果失败: %w", err)
 	}
 
 	fmt.Printf("导入完成: 成功 %d, 失败 %d\n", result.Saved, result.Failed)
@@ -351,6 +572,8 @@ func (s *Service) WaitForCompletion(ctx context.Context, jobID string, interval,
 			return job, nil
 		case "failed":
 			return job, fmt.Errorf("任务失败")
+		case "expired":
+			return job, fmt.Errorf("任务已过期")
 		case "cancelled":
 			return job, fmt.Errorf("任务已取消")
 		}
@@ -372,21 +595,20 @@ func (s *Service) generateJSONL(points []domain.KnowledgePoint, countPerPoint in
 
 	count := 0
 	for _, kp := range points {
-		prompt := buildPrompt(kp, countPerPoint)
+		prompt := generator.BuildPrompt(kp, countPerPoint)
 
 		req := map[string]interface{}{
-			"custom_id": kp.OutlineCode,
+			"custom_id": batchPointID(kp),
 			"method":    "POST",
 			"url":       "/v1/chat/completions",
 			"body": map[string]interface{}{
-				"model": "qwen3.5-flash",
+				"model": s.model,
 				"messages": []map[string]string{
-					{"role": "system", "content": getSystemPrompt()},
+					{"role": "system", "content": generator.GetSystemPrompt()},
 					{"role": "user", "content": prompt},
 				},
-				"temperature":    0.4,
-				"max_tokens":     16000, // 从8000增大到16000，避免生成内容被截断
-				"enable_thinking": true,
+				"temperature":     0.4,
+				"enable_thinking": s.enableThinking,
 			},
 		}
 
@@ -421,12 +643,6 @@ func (s *Service) uploadFile(ctx context.Context, filePath string) (string, erro
 	writer.Close()
 
 	url := fmt.Sprintf("%s/files", s.baseURL)
-	fmt.Printf("  上传URL: %s\n", url)
-	if len(s.apiKey) >= 10 {
-		fmt.Printf("  API Key: %s...%s\n", s.apiKey[:6], s.apiKey[len(s.apiKey)-4:])
-	} else {
-		fmt.Printf("  API Key: （未配置或长度异常）\n")
-	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, &buf)
 	if err != nil {
@@ -470,11 +686,13 @@ func (s *Service) uploadFile(ctx context.Context, filePath string) (string, erro
 func (s *Service) submitJob(ctx context.Context, fileID string, jobName string) (string, error) {
 	url := fmt.Sprintf("%s/batches", s.baseURL)
 	body := map[string]interface{}{
-		"input_file_id":    fileID,
-		"endpoint":         "/v1/chat/completions",
+		"input_file_id":     fileID,
+		"endpoint":          "/v1/chat/completions",
 		"completion_window": "24h",
 		"metadata": map[string]string{
-			"ds_name": jobName,
+			"ds_name":      jobName,
+			"aigo_model":   s.model,
+			"aigo_profile": s.profile,
 		},
 	}
 	payload, _ := json.Marshal(body)
@@ -507,100 +725,6 @@ func (s *Service) submitJob(ctx context.Context, fileID string, jobName string) 
 	return result.ID, nil
 }
 
-// buildPrompt 构建完整 prompt（与项目一致，不可删减）。
-func buildPrompt(kp domain.KnowledgePoint, count int) string {
-	var b strings.Builder
-	b.WriteString("请根据以下考试大纲知识点，生成国家执业医师考试A2型单选题。\n\n")
-	b.WriteString("【知识点信息】\n")
-	b.WriteString(fmt.Sprintf("大纲代码：%s\n", kp.OutlineCode))
-	b.WriteString(fmt.Sprintf("分类：%s\n", kp.Category))
-	b.WriteString(fmt.Sprintf("专业/系统：%s\n", kp.Subject))
-	if kp.Unit != "" {
-		b.WriteString(fmt.Sprintf("单元：%s\n", kp.Unit))
-	}
-	if kp.SubItem != "" {
-		b.WriteString(fmt.Sprintf("细目：%s\n", kp.SubItem))
-	}
-	b.WriteString(fmt.Sprintf("要点：%s\n", kp.Topic))
-	b.WriteString(fmt.Sprintf("数量：%d道\n\n", count))
-	b.WriteString("【输出格式】\n")
-	b.WriteString("输出一个JSON数组，每个元素包含以下字段：\n")
-	b.WriteString(`{
-  "clinical_stem": "临床情境题干（按病历顺序书写）",
-  "options": [
-    {"label": "A", "text": "选项文本"},
-    {"label": "B", "text": "选项文本"},
-    {"label": "C", "text": "选项文本"},
-    {"label": "D", "text": "选项文本"},
-    {"label": "E", "text": "选项文本"}
-  ],
-  "answer": "正确答案标签",
-  "explanation": "完整解析：说明正确答案依据和干扰项错误原因",
-  "difficulty": "0.65",
-  "cognitive_level": "记忆/理解/简单应用/综合应用 选一",
-  "exam_points": "考核要点，如：诊断与鉴别诊断，临床表现"
-}`)
-	b.WriteString("\n\n只输出JSON数组，不要输出其他任何内容。")
-	return b.String()
-}
-
-// getSystemPrompt 返回完整系统提示词（与项目一致，不可删减）。
-func getSystemPrompt() string {
-	return `你是医学考试命题助手，负责生成国家执业医师考试A2型单选题。
-
-【一、命题总原则】
-1. 以《考试大纲》为依据，以人卫社统编教材为内容基础
-2. 执业医师命题以本科生毕业后培训一年的水平为标准
-3. 所命试题应是新编原创试题，采用新的素材或临床情景，避免照搬书本现成实例
-
-【二、A2型题格式】
-题干按病历书写顺序：一般情况→主诉→现病史→既往史→查体→辅助检查→提问
-- 一般情况：男/女，年龄
-- 主诉：主要症状或体征+时间
-- 现病史：发病诱因、症状特点、伴随症状、诊治经过
-- 既往史：根据病例需要编写
-- 查体：按生命征→一般情况→头颈→肺→心→腹→脊柱→四肢→神经系统顺序
-- 辅助检查：常用检查执业医师以英文表示
-- 提问：该患者最可能的诊断是 / 最有价值的检查是 / 治疗原则是
-
-【三、内容要求】
-1. 试题内容科学、正确
-2. 正确答案唯一、且无学术上的争议
-3. 内容取样有较好的代表性，避免出偏题、怪题
-4. 试题必须有明确的主题，题干和备选答案必须围绕同一知识点，避免在一道题中考查多个知识点
-5. 避免存在性别、种族、地域、文化的不公平或歧视
-6. 必须使用规范的医学术语，名词术语、药物名称、化验数值和计量单位须准确、规范
-
-【四、题干要求】
-1. 题干叙述简明扼要，包含回答问题所必需的全部要素
-2. 题干提出的问题具体明确，使应试者一看到题干就能明确要考察的知识点和具体内容
-3. 题干中不能包括备选答案或对回答问题有所暗示
-4. 题干尽量以叙述式书写
-
-【五、备选答案要求】
-1. 备选答案之间不能有相互重叠、相互依赖的内容
-2. 备选答案应在性质上、类别上相同，在逻辑、语法和内容长短上也应基本一致
-3. 备选答案中避免无意义或无用的干扰答案
-4. 不使用"以上都是"和"以上都不是"作为备选答案
-5. 备选答案与题干符合逻辑性
-6. 备选答案按逻辑顺序排列
-7. 备选答案中的相同表述，统一合理地放到题干中
-
-【六、文字要求】
-1. 试题所用文字简明、扼要，避免生僻、艰涩、洋化用语
-2. 避免暗示或模糊性用语，杜绝错别字
-3. 尽量避免使用否定式，必须使用否定句时用黑体加粗强调否定词，杜绝使用双重否定
-
-【七、输出要求】
-- 严格输出JSON数组，不要输出任何其他文字
-- 选项五选一
-- 每道题必须包含完整解析，说明正确答案依据和干扰项错误原因
-- 难度以0-1之间两位小数表示（0.05的倍数），如0.65
-- 认知层次：记忆/理解/简单应用/综合应用 选一
-- 考核要点标注具体，如：诊断与鉴别诊断，临床表现，辅助检查
-- 大纲代码标到最后一级`
-}
-
 // buildQuestion 从 map 构建 A2Question。
 func buildQuestion(item map[string]interface{}, kp domain.KnowledgePoint) domain.A2Question {
 	idPrefix := generator.SanitizeIDPrefix(kp.OutlineCode)
@@ -610,11 +734,12 @@ func buildQuestion(item map[string]interface{}, kp domain.KnowledgePoint) domain
 	if idPrefix == "" {
 		idPrefix = "custom"
 	}
+	profession, system := generator.QuestionMetadataForKnowledgePoint(kp, "")
 	q := domain.A2Question{
 		ID:              fmt.Sprintf("q-%s-%d", idPrefix, time.Now().UnixNano()),
 		OutlineCode:     kp.OutlineCode,
-		Profession:      kp.Subject,
-		System:          kp.Category,
+		Profession:      profession,
+		System:          system,
 		KnowledgePoints: []domain.KnowledgePoint{kp},
 		Status:          domain.StatusAIDraft,
 		Version:         1,
@@ -656,6 +781,9 @@ func buildQuestion(item map[string]interface{}, kp domain.KnowledgePoint) domain
 // ListJobs 查询批量任务列表。
 // 合并本地数据库和 DashScope 云端的任务列表，确保所有任务都能看到。
 func (s *Service) ListJobs(ctx context.Context, name, status string, limit int) ([]BatchJob, error) {
+	if err := s.ensureAvailable(); err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 50
 	}
@@ -674,14 +802,26 @@ func (s *Service) ListJobs(ctx context.Context, name, status string, limit int) 
 		}
 		if err == nil {
 			for _, j := range localJobs {
+				backend := j.Backend
+				if backend == "" {
+					backend = "dashscope"
+				}
+				if backend != "dashscope" {
+					continue // 共享任务表中其他 provider 的记录由对应 adapter 返回
+				}
 				jobMap[j.ID] = BatchJob{
 					JobID:        j.ID,
+					OwnerID:      j.OwnerID,
+					Backend:      backend,
+					Model:        j.Model,
 					JobName:      j.JobName,
 					Status:       j.Status,
 					TotalCount:   j.TotalCount,
 					Completed:    j.Completed,
 					Failed:       j.Failed,
 					OutputFileID: j.OutputFileID,
+					ImportedAt:   j.ImportedAt,
+					Tracked:      true,
 				}
 			}
 		}
@@ -727,8 +867,10 @@ func (s *Service) ListJobs(ctx context.Context, name, status string, limit int) 
 		} else {
 			for _, item := range result.Data {
 				jobName := ""
+				model := ""
 				if item.Metadata != nil {
 					jobName = item.Metadata["ds_name"]
+					model = item.Metadata["aigo_model"]
 				}
 
 				// 按名称过滤
@@ -745,10 +887,15 @@ func (s *Service) ListJobs(ctx context.Context, name, status string, limit int) 
 					existing.Failed = item.RequestCounts.Failed
 					existing.OutputFileID = item.OutputFileID
 					existing.CreatedAt = item.CreatedAt
+					if model != "" {
+						existing.Model = model
+					}
 					jobMap[item.ID] = existing
 				} else {
 					jobMap[item.ID] = BatchJob{
 						JobID:        item.ID,
+						Backend:      "dashscope",
+						Model:        model,
 						JobName:      jobName,
 						Status:       item.Status,
 						TotalCount:   item.RequestCounts.Total,
@@ -775,7 +922,10 @@ func (s *Service) ListJobs(ctx context.Context, name, status string, limit int) 
 	return jobs, nil
 }
 
-// GetBaseURLs 返回当前使用的 URL（用于调试）。
-func (s *Service) GetBaseURLs() string {
-	return s.baseURL
+// Preserve old provider IDs for legacy jobs; versioned jobs use globally unique IDs.
+func batchPointID(p domain.KnowledgePoint) string {
+	if p.OutlineCode != "" && (p.VersionID == "" || p.VersionID == domain.LegacyKnowledgeVersion) {
+		return p.OutlineCode
+	}
+	return p.ID
 }

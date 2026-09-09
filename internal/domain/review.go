@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // QuestionStatus 题目生命周期状态。
 type QuestionStatus string
@@ -12,11 +15,24 @@ const (
 	StatusConflict         QuestionStatus = "conflict"          // 本轮票数冲突，待最终把关人决断
 	StatusRevisionRequired QuestionStatus = "revision_required" // 需要修改
 	StatusRejected         QuestionStatus = "rejected"          // 驳回
-	StatusApproved         QuestionStatus = "approved"          // 审核通过
+	StatusApproved         QuestionStatus = "approved"          // 审核动作/结论：通过（不能作为题目或任务终态）
 	StatusAIReviewed       QuestionStatus = "ai_reviewed"       // AI 检查通过
-	StatusPublished        QuestionStatus = "published"         // 进入正式题库
+	StatusPublished        QuestionStatus = "published"         // 题目/任务唯一成功终态，前端显示“已通过”
 	StatusArchived         QuestionStatus = "archived"          // 归档
 )
+
+// CanonicalLifecycleStatus 将旧版生命周期状态 approved 收口为 published。
+// 仅用于题目和审核任务状态；审核动作与审核记录中的 approved 必须保留。
+func CanonicalLifecycleStatus(status QuestionStatus) QuestionStatus {
+	if status == StatusApproved {
+		return StatusPublished
+	}
+	return status
+}
+
+func IsPassedLifecycleStatus(status QuestionStatus) bool {
+	return CanonicalLifecycleStatus(status) == StatusPublished
+}
 
 // Expert 专家信息。
 type Expert struct {
@@ -35,15 +51,15 @@ type Expert struct {
 // BankID 限定该流程适用的题库（空=通用）；FinalReviewerIDs 为最终把关管理员列表。
 // VoteRule 投票规则："" = 达到通过票数即过轮（默认）；"veto" = 一票否决（任一驳回直接驳回）。
 type ReviewFlowConfig struct {
-	ID               string        `json:"id"`                // 流程唯一标识
-	Name             string        `json:"name"`              // 流程名称
-	Description      string        `json:"description,omitempty"` // 描述
-	Subject          string        `json:"subject"`           // 适用专业（兼容旧字段）
-	BankID           string        `json:"bank_id,omitempty"` // 适用题库（空=通用）
+	ID               string        `json:"id"`                           // 流程唯一标识
+	Name             string        `json:"name"`                         // 流程名称
+	Description      string        `json:"description,omitempty"`        // 描述
+	Subject          string        `json:"subject"`                      // 适用专业（兼容旧字段）
+	BankID           string        `json:"bank_id,omitempty"`            // 适用题库（空=通用）
 	FinalReviewerIDs []string      `json:"final_reviewer_ids,omitempty"` // 最终把关管理员（空=任意有最终把关权限者）
-	VoteRule         string        `json:"vote_rule,omitempty"` // 投票规则（""/veto）
-	Rounds           []RoundConfig `json:"rounds"`            // 各轮配置
-	CreatedAt        time.Time     `json:"created_at"`        // 创建时间
+	VoteRule         string        `json:"vote_rule,omitempty"`          // 投票规则（""/veto）
+	Rounds           []RoundConfig `json:"rounds"`                       // 各轮配置
+	CreatedAt        time.Time     `json:"created_at"`                   // 创建时间
 }
 
 // RoundConfig 单轮审核配置。
@@ -60,16 +76,21 @@ type RoundConfig struct {
 
 // ReviewTask 审核任务。
 // 一道题提交到审核流程后生成一个任务，跟踪各轮审核进度。
+// Attempt 为当前提交批次号：仅退回修改后重新送审时递增（驳回为锁定终态），
+// 历史批次的审核记录永久留痕，决断对比视图只展示当前批次。
 type ReviewTask struct {
 	ID                 string         `json:"id"`                       // 任务唯一标识
 	QuestionID         string         `json:"question_id"`              // 关联的题目 ID
 	FlowID             string         `json:"flow_id"`                  // 使用的审核流程 ID
+	SubmissionBankID   string         `json:"submission_bank_id"`       // 本批次提交时选定的分类子题库快照
 	CurrentRound       int            `json:"current_round"`            // 当前轮次
 	Status             QuestionStatus `json:"status"`                   // 任务状态
 	AssignedTo         []string       `json:"assigned_to"`              // 当前轮审核人 ID
 	FinalReviewerIDs   []string       `json:"final_reviewer_ids"`       // 最终把关管理员快照
 	FinalDecision      *ExpertReview  `json:"final_decision,omitempty"` // 最终把关决断
 	QuestionPrevStatus QuestionStatus `json:"question_prev_status"`     // 提交前题目状态（撤销时恢复用）
+	QuestionVersion    int            `json:"question_version"`         // 提交时绑定的题目内容版本
+	Attempt            int            `json:"attempt"`                  // 当前提交批次号（从1起）
 	RoundResults       []RoundResult  `json:"round_results"`            // 各轮审核结果
 	CreatedAt          time.Time      `json:"created_at"`               // 创建时间
 	UpdatedAt          time.Time      `json:"updated_at"`               // 更新时间
@@ -87,10 +108,68 @@ type RoundResult struct {
 
 // ExpertReview 单位专家的审核结果。
 type ExpertReview struct {
-	ExpertID   string         `json:"expert_id"`   // 审核人 ID
-	Conclusion QuestionStatus `json:"conclusion"`  // 审核结论
-	Opinion    string         `json:"opinion"`     // 审核意见
-	ReviewedAt time.Time      `json:"reviewed_at"` // 审核时间
+	ExpertID   string         `json:"expert_id"`             // 审核人 ID
+	ExpertName string         `json:"expert_name,omitempty"` // 审核人显示名快照
+	Conclusion QuestionStatus `json:"conclusion"`            // 审核结论
+	Opinion    string         `json:"opinion"`               // 审核意见（结构化评语的拼接文本，兼容旧展示）
+	Comment    *ReviewComment `json:"comment,omitempty"`     // 结构化评语
+	ReviewedAt time.Time      `json:"reviewed_at"`           // 审核时间
+}
+
+// ReviewComment 结构化评语：按题目部位分栏填写，便于多位专家横向对比。
+// 通过时可不填；驳回/需修改时至少一栏非空（由审核服务强制校验）。
+type ReviewComment struct {
+	Stem    string `json:"stem,omitempty"`    // 题干部分意见
+	Options string `json:"options,omitempty"` // 选项部分意见
+	Answer  string `json:"answer,omitempty"`  // 答案与解析部分意见
+	Other   string `json:"other,omitempty"`   // 其他意见
+}
+
+// IsEmpty 判断结构化评语是否全部为空白。
+func (c *ReviewComment) IsEmpty() bool {
+	if c == nil {
+		return true
+	}
+	return strings.TrimSpace(c.Stem) == "" &&
+		strings.TrimSpace(c.Options) == "" &&
+		strings.TrimSpace(c.Answer) == "" &&
+		strings.TrimSpace(c.Other) == ""
+}
+
+// SectionLabels 结构化评语各栏的中文标签（顺序即展示顺序）。
+var SectionLabels = []struct {
+	Key  string
+	Name string
+}{
+	{"stem", "题干"},
+	{"options", "选项"},
+	{"answer", "答案与解析"},
+	{"other", "其他"},
+}
+
+// Flatten 把结构化评语拼接为纯文本，用于旧版自由文本意见字段的兼容展示。
+func (c *ReviewComment) Flatten() string {
+	if c.IsEmpty() {
+		return ""
+	}
+	parts := make([]string, 0, len(SectionLabels))
+	for _, s := range SectionLabels {
+		v := ""
+		switch s.Key {
+		case "stem":
+			v = strings.TrimSpace(c.Stem)
+		case "options":
+			v = strings.TrimSpace(c.Options)
+		case "answer":
+			v = strings.TrimSpace(c.Answer)
+		case "other":
+			v = strings.TrimSpace(c.Other)
+		}
+		if v != "" {
+			parts = append(parts, "【"+s.Name+"】"+v)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // FlowsConfigFile 审核流程配置文件结构，对应 review_flows.json。
@@ -99,15 +178,19 @@ type FlowsConfigFile struct {
 }
 
 // ReviewRecord 审核记录，每轮审核留痕，不可修改。
+// Attempt 标记记录所属的提交批次，跨批次留痕互不混淆。
 type ReviewRecord struct {
-	ID          string         `json:"id"`            // 记录唯一标识
-	TaskID      string         `json:"task_id"`       // 关联的审核任务 ID
-	QuestionID  string         `json:"question_id"`   // 关联的题目 ID
-	RoundNumber int            `json:"round_number"`  // 第几轮
-	ExpertID    string         `json:"expert_id"`     // 审核人 ID
-	Conclusion  QuestionStatus `json:"review_status"` // 审核结论
-	Opinion     string         `json:"opinion"`       // 审核意见
-	CreatedAt   time.Time      `json:"created_at"`    // 审核时间
+	ID          string         `json:"id"`                // 记录唯一标识
+	TaskID      string         `json:"task_id"`           // 关联的审核任务 ID
+	QuestionID  string         `json:"question_id"`       // 关联的题目 ID
+	RoundNumber int            `json:"round_number"`      // 第几轮
+	Attempt     int            `json:"attempt"`           // 所属提交批次号
+	ExpertID    string         `json:"expert_id"`         // 审核人 ID
+	ExpertName  string         `json:"expert_name"`       // 审核人显示名快照
+	Conclusion  QuestionStatus `json:"review_status"`     // 审核结论
+	Opinion     string         `json:"opinion"`           // 审核意见（结构化评语的拼接文本，兼容旧展示）
+	Comment     *ReviewComment `json:"comment,omitempty"` // 结构化评语（历史记录可能为空）
+	CreatedAt   time.Time      `json:"created_at"`        // 审核时间
 }
 
 // AuditLog 操作日志，记录所有对题库的变更操作。
@@ -149,4 +232,41 @@ type ReviewIssue struct {
 	Field    string `json:"field"`    // "stem" / "options" / "answer" / "explanation"
 	Severity string `json:"severity"` // "error" / "warning" / "info"
 	Message  string `json:"message"`
+}
+
+// AI 检查任务状态：持久化队列的生命周期。
+const (
+	AICheckTaskPending   = "pending"   // 待执行（含等待退避重试）
+	AICheckTaskRunning   = "running"   // 执行中（持有租约）
+	AICheckTaskSucceeded = "succeeded" // 已完成（结果见 ai_review_results）
+	AICheckTaskExhausted = "exhausted" // 重试耗尽，最终失败
+)
+
+// AICheckTask AI 检查任务记录（持久化队列，见 ai_check_tasks 表）。
+// 任务是"过程"，检查结论落在 AIReviewResult；题目粒度的重试与进度以任务为准。
+type AICheckTask struct {
+	ID              string    `json:"id"`
+	QuestionID      string    `json:"question_id"`
+	QuestionVersion int       `json:"question_version"` // 入队时题目版本（观测用）
+	Status          string    `json:"status"`           // pending / running / succeeded / exhausted
+	Attempts        int       `json:"attempts"`         // 已执行次数（抢占时递增）
+	MaxAttempts     int       `json:"max_attempts"`     // 最大执行次数，超过即 exhausted
+	LastError       string    `json:"last_error,omitempty"`
+	LeasedUntil     time.Time `json:"leased_until,omitempty"` // running 租约到期时间；pending 态复用为退避重试时间
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// AICheckDiscard AI 检查淘汰记录：首次检查不通过的题目自动删除后保留的淘汰原因，
+// 供生成页向出题人展示"本次生成具体情况"。题目本身已物理删除，不入题库。
+type AICheckDiscard struct {
+	ID          string        `json:"id"`
+	QuestionID  string        `json:"question_id"`
+	Verdict     string        `json:"verdict"` // issues_found / reject
+	Scores      ReviewScores  `json:"scores"`
+	Issues      []ReviewIssue `json:"issues"`
+	Suggestion  string        `json:"suggestion"`
+	Model       string        `json:"model"`
+	StemSummary string        `json:"stem_summary"` // 题干摘要（题目已删除，供辨认）
+	CreatedAt   time.Time     `json:"created_at"`
 }

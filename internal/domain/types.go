@@ -1,5 +1,5 @@
 // Package domain 定义 AIgo 系统的核心领域类型。
-// 包括题目、知识点、选项、多模态素材、生成请求、评估报告等数据结构。
+// 包括题目、知识点、选项、生成请求、评估报告等数据结构。
 package domain
 
 import "time"
@@ -15,7 +15,11 @@ const (
 
 // KnowledgePoint 知识点，对应考试大纲中的一个考点。
 type KnowledgePoint struct {
-	ID          string   `json:"id"`           // 知识点唯一标识（大纲代码）
+	ID          string   `json:"id"` // 跨版本唯一标识，不等同于大纲代码
+	VersionID   string   `json:"version_id,omitempty"`
+	VersionName string   `json:"version_name,omitempty"` // 出题时随知识点一起保存快照
+	VersionYear int      `json:"version_year,omitempty"`
+	Revision    int      `json:"revision,omitempty"`
 	Category    string   `json:"category"`     // 分类：基础医学 / 临床综合
 	Subject     string   `json:"subject"`      // 专业/系统，如"病理"、"呼吸系统"
 	Unit        string   `json:"unit"`         // 单元，如"二、局部血液循环障碍"
@@ -35,7 +39,6 @@ type A2Question struct {
 	Explanation     string           `json:"explanation"`      // 答案解析
 	SourceRefs      []SourceRef      `json:"source_refs"`      // 解析来源引用（可选）
 	KnowledgePoints []KnowledgePoint `json:"knowledge_points"` // 关联的知识点
-	MediaRefs       []MediaRef       `json:"media_refs"`       // 关联的多模态素材（图片、影像等）
 	Difficulty      Difficulty       `json:"difficulty"`       // 难度等级（0-1，如"0.65"）
 	CognitiveLevel  string           `json:"cognitive_level"`  // 认知层次：记忆/理解/简单应用/综合应用
 	ExamPoints      string           `json:"exam_points"`      // 考核要点，如"诊断与鉴别诊断，临床表现"
@@ -45,8 +48,33 @@ type A2Question struct {
 	BankIDs         []string         `json:"bank_ids"`         // 所属题库列表（一道题可属于多个题库，空=未分类）
 	Status          QuestionStatus   `json:"status"`           // 审核状态
 	Version         int              `json:"version"`          // 版本号，每次修改递增
+	CreatedBy       string           `json:"-"`                // 生成者（仅审计/内部追溯，题目接口不向前端暴露）
+	OwnerID         string           `json:"-"`                // 个人题库归属用户 ID（仅服务端范围过滤）
 	CreatedAt       time.Time        `json:"created_at"`       // 创建时间
 	UpdatedAt       time.Time        `json:"updated_at"`       // 最后更新时间
+}
+
+// QuestionShareStatus 是个人题目进入全局题库的单次申请状态。
+// 状态同时决定全局题库分层：pending=待审核、approved=正式、rejected=淘汰。
+type QuestionShareStatus string
+
+const (
+	QuestionSharePending  QuestionShareStatus = "pending"
+	QuestionShareApproved QuestionShareStatus = "approved"
+	QuestionShareRejected QuestionShareStatus = "rejected"
+)
+
+// QuestionShareRequest 个人题目分享申请。一个 question_id 只能有一条记录，
+// 申请一旦审批即结束，不能重复申请或重新提交。
+type QuestionShareRequest struct {
+	ID         string              `json:"id"`
+	QuestionID string              `json:"question_id"`
+	OwnerID    string              `json:"-"`
+	Status     QuestionShareStatus `json:"status"`
+	ReviewedBy string              `json:"-"`
+	ReviewNote string              `json:"review_note,omitempty"`
+	CreatedAt  time.Time           `json:"created_at"`
+	ReviewedAt *time.Time          `json:"reviewed_at,omitempty"`
 }
 
 // Option 题目选项。
@@ -62,30 +90,11 @@ type SourceRef struct {
 	Note  string `json:"note,omitempty"` // 备注（可选）
 }
 
-// MediaKind 多模态素材类型。
-type MediaKind string
-
-const (
-	MediaKindImage       MediaKind = "image"        // 普通图片
-	MediaKindMedicalScan MediaKind = "medical_scan" // 医学影像（CT、MRI等）
-	MediaKindDocument    MediaKind = "document"     // 文档
-)
-
-// MediaRef 多模态素材引用。
-type MediaRef struct {
-	ID          string            `json:"id"`                    // 素材唯一标识
-	Kind        MediaKind         `json:"kind"`                  // 素材类型
-	URI         string            `json:"uri"`                   // 素材地址（本地路径或URL）
-	Description string            `json:"description,omitempty"` // 素材描述
-	Metadata    map[string]string `json:"metadata,omitempty"`    // 附加元数据
-}
-
 // GenerationRequest 题目生成请求，发送给千问大模型。
 type GenerationRequest struct {
 	Subject         string           `json:"subject"`          // 专业或科目
 	Difficulty      Difficulty       `json:"difficulty"`       // 期望难度
 	KnowledgePoints []KnowledgePoint `json:"knowledge_points"` // 关联知识点
-	MediaRefs       []MediaRef       `json:"media_refs"`       // 可选的多模态素材
 	Count           int              `json:"count"`            // 生成数量
 }
 

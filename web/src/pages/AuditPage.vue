@@ -69,6 +69,7 @@ function actionText(action) {
     review: "审核",
     publish: "发布",
     import: "导入",
+    export: "导出",
     submit: "提交审核",
     resubmit: "重新提交",
     flow_create: "建流程",
@@ -78,14 +79,17 @@ function actionText(action) {
     expert_update: "改专家",
     expert_delete: "删专家",
     user_create: "建账号",
+    user_register: "自主注册",
+    auth_login_failed: "登录失败",
+    auth_rate_limited: "登录限速",
   };
   return map[action] || action;
 }
 
 function actionClass(action) {
-  if (action === "create" || action === "import" || action === "expert_create" || action === "user_create") return "action-create";
+  if (action === "create" || action === "import" || action === "export" || action === "expert_create" || action === "user_create") return "action-create";
   if (action === "update" || action === "flow_update" || action === "expert_update") return "action-update";
-  if (action === "delete" || action === "flow_delete" || action === "expert_delete") return "action-delete";
+  if (action === "delete" || action === "flow_delete" || action === "expert_delete" || action === "auth_login_failed" || action === "auth_rate_limited") return "action-delete";
   if (action === "review" || action === "submit" || action === "resubmit") return "action-review";
   if (action === "publish") return "action-publish";
   if (action === "flow_create") return "action-flow";

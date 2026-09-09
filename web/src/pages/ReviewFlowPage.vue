@@ -7,6 +7,7 @@ const flows = ref([]);
 const reviewers = ref([]); // 有审题权限的用户（流程选审核人用）
 const users = ref([]); // 用户账号列表（把关人名映射）
 const banks = ref([]); // 题库列表
+const submissionBankByFlow = ref({}); // 通用流程每次送审必须明确选择本次分类子题库
 const loading = ref(false);
 const showCreate = ref(false);
 const editingFlowId = ref(""); // 非空表示编辑模式
@@ -153,8 +154,11 @@ function validateForm() {
   return true;
 }
 
+const savingFlow = ref(false);
+
 async function submitFlow() {
   if (!validateForm()) return;
+  if (savingFlow.value) return; // 在途防重复提交
 
   const flowId = form.value.id || `flow-${Date.now()}`;
   const flow = {
@@ -168,6 +172,7 @@ async function submitFlow() {
     rounds: form.value.rounds,
   };
 
+  savingFlow.value = true;
   try {
     if (editingFlowId.value) {
       await api.updateFlow(editingFlowId.value, flow);
@@ -181,6 +186,8 @@ async function submitFlow() {
     loadFlows();
   } catch (e) {
     showToast(`${editingFlowId.value ? "修改" : "创建"}失败: ` + e.message);
+  } finally {
+    savingFlow.value = false;
   }
 }
 
@@ -188,7 +195,7 @@ async function submitFlow() {
 const revokingFlowId = ref("");
 
 async function revokeFlow(flow) {
-  if (!confirm(`撤销「${flow.name}」的提交？\n\n将删除该流程下所有未完成审核的任务（审核中/需修改/待决断），这些题目恢复到提交前状态；\n已审核结束（已通过/已驳回/已入库）的题目不受影响。\n\n此操作用于误提交或卡死时撤回，请确认。`)) return;
+  if (!confirm(`撤销「${flow.name}」的提交？\n\n将删除该流程下所有未完成审核的任务（审核中/需修改/待决断），这些题目恢复到提交前状态；\n已审核结束（已通过/已驳回）的题目不受影响。\n\n此操作用于误提交或卡死时撤回，请确认。`)) return;
   revokingFlowId.value = flow.id;
   try {
     const data = await api.revokeFlow(flow.id);
@@ -203,14 +210,20 @@ async function revokeFlow(flow) {
   }
 }
 
+const deletingFlowId = ref("");
+
 async function deleteFlow(flow) {
   if (!confirm(`确定删除流程：${flow.name}？`)) return;
+  if (deletingFlowId.value) return; // 在途防重复提交
+  deletingFlowId.value = flow.id;
   try {
     await api.deleteFlow(flow.id);
     showToast("已删除");
     flows.value = flows.value.filter((f) => f.id !== flow.id);
   } catch (e) {
     showToast("删除失败: " + e.message);
+  } finally {
+    deletingFlowId.value = "";
   }
 }
 
@@ -218,40 +231,55 @@ async function deleteFlow(flow) {
 const submittingFlowId = ref("");
 
 async function submitFlowBank(flow) {
-  const bn = bankName(flow.bank_id);
-  const bank = banks.value.find((b) => b.id === flow.bank_id);
+  const submissionBankId = flow.bank_id || submissionBankByFlow.value[flow.id] || "";
+  if (!submissionBankId) {
+    showToast("通用流程送审前必须选择本次提交的分类子题库");
+    return;
+  }
+  const bn = bankName(submissionBankId);
+  const bank = banks.value.find((b) => b.id === submissionBankId);
   let conflictHint = "";
   if (bank && bank.status_counts) {
     const c = bank.status_counts;
     const reviewing = (c.reviewing || 0) + (c.conflict || 0);
-    const finished = (c.approved || 0) + (c.published || 0) + (c.archived || 0);
+    const finished = (c.published || 0) + (c.archived || 0);
     if (reviewing > 0 || finished > 0) {
-      conflictHint = `\n\n⚠ 题库状态提醒：${reviewing} 道已在审核中/待决断（将跳过），${finished} 道已审核结束（不会重复处理）。`;
+      conflictHint = `\n\n${reviewing} 道已在审核中或待决断，将被跳过；${finished} 道已结束，不会重复处理。`;
     }
   }
-  if (!confirm(`将「${bn}」中所有可提交（草稿/需修改/已驳回等）的题目统一提交到流程「${flow.name}」？\n已在审核中的题目会自动跳过。${conflictHint}`)) return;
+  if (!confirm(`将「${bn}」中所有已通过 AI 检查、可送审的题目统一提交到流程「${flow.name}」？\n已在审核中、已完成或已驳回的题目会自动跳过。${conflictHint}`)) return;
   submittingFlowId.value = flow.id;
   try {
-    const data = await api.submitBankReview(flow.bank_id, flow.id);
+    const data = await api.submitBankReview(submissionBankId, flow.id);
     const notes = [];
-    if (data.skipped_reviewing) notes.push(`跳过审核中 ${data.skipped_reviewing}`);
-    if (data.skipped_finished) notes.push(`跳过已结束 ${data.skipped_finished}`);
+    if (data.skipped_reviewing) notes.push(`已在审核中 ${data.skipped_reviewing}`);
+    if (data.skipped_finished) notes.push(`已审核结束 ${data.skipped_finished}`);
+    if (data.skipped_not_checked) notes.push(`等待 AI 检查 ${data.skipped_not_checked}`);
 
-    // 全部失败或部分失败时，展示首个失败原因，便于用户定位问题
-    if ((data.failed || []).length) {
-      const firstReason = (data.failed[0] || "").split(": ").slice(1).join(": ") || data.failed[0];
-      let msg = `提交 ${data.submitted} 道`;
+    // 失败明细分类：「无需重复提交」属于后端幂等拦截的重复提交，按已提交处理而非失败
+    const failed = data.failed || [];
+    const duplicates = failed.filter((f) => f.includes("无需重复提交"));
+    const realFailed = failed.filter((f) => !f.includes("无需重复提交"));
+    const firstReason = (list) => (list[0] || "").split(": ").slice(1).join(": ") || list[0];
+
+    if (data.submitted > 0) {
+      let msg = `批量提交完成：成功提交 ${data.submitted} 道`;
       if (notes.length) msg += `，${notes.join("，")}`;
-      msg += `，失败 ${data.failed.length} 道`;
-      showToast(`${msg}。示例失败原因：${firstReason}`);
-      console.error("批量提交失败列表:", data.failed);
-    } else if (data.submitted > 0) {
-      let msg = `批量提交完成：成功 ${data.submitted} 道`;
-      if (notes.length) msg += `，${notes.join("，")}`;
+      if (duplicates.length) msg += `，${duplicates.length} 道已提交过，无需重复提交`;
+      if (realFailed.length) msg += `，失败 ${realFailed.length} 道（示例原因：${firstReason(realFailed)}）`;
       showToast(msg);
+      if (realFailed.length) console.error("批量提交失败列表:", realFailed);
+    } else if (duplicates.length && !realFailed.length) {
+      // 全部是重复提交：明确提示无需重复操作
+      showToast(`题目已成功提交过审核，无需重复提交（${duplicates.length} 道均在审核流程中）`);
+    } else if (realFailed.length) {
+      showToast(`提交失败 ${realFailed.length} 道。示例失败原因：${firstReason(realFailed)}`);
+      console.error("批量提交失败列表:", realFailed);
+    } else if (notes.length) {
+      // 0 道提交且无失败：题库内题目均处于不可重复提交的状态
+      showToast(`无需重复提交：题库「${bn}」内没有新可送的题目（${notes.join("，")}），题目均已提交过或已结束审核。`);
     } else {
-      // 0 道提交且无失败：题库内没有可提交的题目
-      showToast(`题库「${bn}」内没有可提交的题目：共 ${bank?.question_count || 0} 道，均已在审核中或已审核结束，或题目尚未归属本库（可点「重新归纳」）。`);
+      showToast(`题库「${bn}」内没有可提交的题目：共 ${bank?.question_count || 0} 道，请确认题目已归属本库并通过 AI 检查（可点「重新归纳」）。`);
     }
   } catch (e) {
     showToast("批量提交失败: " + e.message);
@@ -273,12 +301,9 @@ function matchedReviewers(flow) {
   if (firstRound && (firstRound.expert_ids || []).length) {
     return firstRound.expert_ids.map(expertName).join("、");
   }
-  // 自动匹配：直接勾选审题权限且题库范围覆盖的用户（bank_ids 空=全部）
-  const scoped = reviewers.value.filter((r) => !(r.bank_ids || []).length || (r.bank_ids || []).includes(flow.bank_id));
-  if (scoped.length) return scoped.map((r) => r.display_name || r.username).join("、");
-  // 兜底：角色模板审题人（如 expert 角色账号）
-  const fallback = users.value.filter((u) => (u.permissions || []).includes("review:do"));
-  return fallback.map((u) => u.display_name || u.username).join("、") || "无";
+  const bankId = flow.bank_id || submissionBankByFlow.value[flow.id] || "";
+  if (!bankId) return "送审时选择题库后自动匹配";
+  return "按该分类子题库范围自动匹配（直接分配优先）";
 }
 
 function bankName(id) {
@@ -291,7 +316,7 @@ function bankName(id) {
 function bankOptionLabel(b) {
   if (!b.status_counts) return `${b.name}（${b.question_count || 0} 题）`;
   const c = b.status_counts;
-  const pending = (c.ai_draft || 0) + (c.auto_checked || 0) + (c.ai_reviewed || 0) + (c.revision_required || 0) + (c.rejected || 0);
+  const pending = (c.ai_draft || 0) + (c.auto_checked || 0) + (c.ai_reviewed || 0) + (c.revision_required || 0);
   const reviewing = (c.reviewing || 0) + (c.conflict || 0);
   let label = `${b.name}（${b.question_count || 0} 题`;
   if (pending) label += `，待提交 ${pending}`;
@@ -318,7 +343,7 @@ onMounted(() => {
     <section class="panel">
       <div class="section-heading">
         <span class="dot blue"></span>
-        <h2>审核流程配置</h2>
+        <h2>审核流程</h2>
         <small>{{ flows.length }} 个流程</small>
         <button class="primary-button" type="button" @click="showCreate = !showCreate; resetForm()">
           {{ showCreate ? "取消" : "+ 新建流程" }}
@@ -340,10 +365,6 @@ onMounted(() => {
             <input v-model="form.description" placeholder="可选" />
           </div>
           <div class="field">
-            <label>流程ID（{{ editingFlowId ? "不可修改" : "自动生成" }}）</label>
-            <input v-model="form.id" placeholder="留空自动生成" :disabled="!!editingFlowId" />
-          </div>
-          <div class="field">
             <label>适用题库（空 = 通用流程）</label>
             <select v-model="form.bank_id">
               <option value="">通用（全部题库）</option>
@@ -359,15 +380,15 @@ onMounted(() => {
           </div>
         </div>
         <p class="rule-hint" v-if="form.vote_rule === 'veto'">
-          一票否决：本轮任一审核人驳回 → 题目直接驳回；任一需修改 → 退回修改；全部审核人通过才过轮。
+          任一审核人驳回则题目被驳回；提出修改则退回修改；全部通过后进入下一轮。
         </p>
         <p class="rule-hint" v-else>
-          通过票数推进：达到通过票数即过轮（即使有人投了反对票，反对票会记录并供最终决断参考）。
+          达到设定票数后进入下一轮；未达到时转交最终把关人处理。
         </p>
 
         <!-- 最终把关人 -->
         <div class="final-reviewers">
-          <label>最终把关管理员（票数冲突时由他们决断，可指定多位；不选 = 任意有「最终把关」权限的用户）</label>
+          <label>最终把关人（不选则由任意具备最终把关权限的用户处理）</label>
           <div class="expert-chips">
             <button
               v-for="u in finalReviewers()"
@@ -385,7 +406,7 @@ onMounted(() => {
 
         <!-- 轮次配置 -->
         <div class="rounds-section">
-          <h3>审核轮次配置</h3>
+          <h3>审核轮次</h3>
           <div v-for="(round, ri) in form.rounds" :key="ri" class="round-card">
             <div class="round-header">
               <strong>第 {{ round.round_number }} 轮</strong>
@@ -397,19 +418,15 @@ onMounted(() => {
               <div class="config-item">
                 <label>通过票数：</label>
                 <input v-model.number="round.required_count" type="number" min="1" class="count-input" />
-                <span class="config-hint">0 = 全部审核人通过；>0 = 无反对票时达到该票数即通过本轮</span>
+                <span class="config-hint">达到该票数后进入下一轮</span>
               </div>
               <div class="config-item full">
                 <label>审核说明：</label>
                 <input v-model="round.pass_condition" placeholder="如：检查题干、答案、解析" />
               </div>
             </div>
-            <p class="round-rule-hint">
-              规则：本轮达到通过票数且无反对票即进入下一轮（最终轮则交给把关人最终决断）；全员投完仍有反对票时，由把关人决断本轮。
-            </p>
-
             <div class="expert-select">
-              <label>选择审核人（有审题权限的用户；留空 = 自动匹配所有「审题」权限且题库范围覆盖本流程题库的用户）：</label>
+              <label>审核人（不选则按审题权限和题库范围分配）</label>
               <div class="expert-chips">
                 <button
                   v-for="r in reviewers"
@@ -424,8 +441,7 @@ onMounted(() => {
                 <span v-if="!reviewers.length" class="no-expert">没有用户拥有审题权限，请在「用户管理」中分配审题权限</span>
               </div>
               <p class="expert-hint">
-                提示：审核人也可不在此指定——只要用户在「用户管理」勾选「审题」权限并设置题库范围（如内科），
-                题目提交后会自动成为审核人；全部审核完毕后系统自动统计票数，票数冲突时由最终把关人决断。
+                审核范围可在“用户管理”中调整。
               </p>
             </div>
           </div>
@@ -434,8 +450,8 @@ onMounted(() => {
         </div>
 
         <div class="form-actions">
-          <button class="primary-button" type="button" @click="submitFlow">
-            {{ editingFlowId ? "保存修改" : "创建流程" }}
+          <button class="primary-button" type="button" :disabled="savingFlow" @click="submitFlow">
+            {{ savingFlow ? "保存中..." : (editingFlowId ? "保存修改" : "创建流程") }}
           </button>
           <button class="ghost-button" type="button" @click="showCreate = false; resetForm()">取消</button>
         </div>
@@ -448,13 +464,21 @@ onMounted(() => {
           <div class="flow-header">
             <div>
               <strong>{{ flow.name }}</strong>
-              <span class="flow-id">{{ flow.id }}</span>
             </div>
             <div class="flow-actions">
+              <select
+                v-if="!flow.bank_id"
+                v-model="submissionBankByFlow[flow.id]"
+                class="submit-bank-select"
+                title="通用流程本次要提交的分类子题库"
+              >
+                <option value="">选择送审题库...</option>
+                <option v-for="b in banks" :key="b.id" :value="b.id">{{ bankOptionLabel(b) }}</option>
+              </select>
               <button
                 class="submit-bank-btn"
                 type="button"
-                :disabled="submittingFlowId === flow.id"
+                :disabled="submittingFlowId === flow.id || (!flow.bank_id && !submissionBankByFlow[flow.id])"
                 @click="submitFlowBank(flow)"
                 title="批量提交该流程适用题库内的所有可提交题目"
               >
@@ -470,7 +494,7 @@ onMounted(() => {
                 {{ revokingFlowId === flow.id ? "撤销中..." : "撤销提交" }}
               </button>
               <button class="edit-btn" type="button" @click="startEditFlow(flow)" title="编辑">编辑</button>
-              <button class="delete-btn" type="button" @click="deleteFlow(flow)" title="删除">×</button>
+              <button class="delete-btn" type="button" :disabled="deletingFlowId === flow.id" @click="deleteFlow(flow)" title="删除">×</button>
             </div>
           </div>
           <p v-if="flow.description" class="flow-desc">{{ flow.description }}</p>
@@ -484,7 +508,7 @@ onMounted(() => {
             <span v-else>｜ 最终把关：任意有「最终把关」权限的用户</span>
           </p>
           <p class="flow-meta reviewers-hint">
-            自动匹配审核人：{{ matchedReviewers(flow) }}
+            审核人：{{ matchedReviewers(flow) }}
           </p>
           <div class="flow-rounds">
             <div v-for="round in flow.rounds" :key="round.round_number" class="flow-round">
@@ -530,6 +554,16 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.submit-bank-select {
+  max-width: 220px;
+  height: 28px;
+  border: 1px solid #dce8f7;
+  border-radius: 6px;
+  background: #fff;
+  color: #3a4658;
+  font-size: 12px;
 }
 
 .submit-bank-btn {
@@ -737,15 +771,6 @@ onMounted(() => {
   font-size: 12px;
 }
 
-.round-rule-hint {
-  margin: 4px 0 10px;
-  font-size: 12px;
-  color: #6e7b8f;
-  background: #eff8ff;
-  border-radius: 5px;
-  padding: 6px 10px;
-}
-
 .config-item.full input {
   flex: 1;
   height: 30px;
@@ -826,13 +851,6 @@ onMounted(() => {
 .flow-header strong {
   font-size: 15px;
   color: #172033;
-}
-
-.flow-id {
-  margin-left: 8px;
-  font-size: 11px;
-  color: #6e7b8f;
-  font-family: monospace;
 }
 
 .flow-desc {
@@ -936,6 +954,12 @@ onMounted(() => {
 .delete-btn:hover {
   background: #fff0f0;
   border-color: #c54858;
+}
+
+.delete-btn:disabled,
+.remove-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .empty {

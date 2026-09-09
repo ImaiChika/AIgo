@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from "vue";
 import { api } from "../api.js";
+import { permissionName } from "../auth.js";
 
 const toast = ref("");
 const roles = ref([]);
@@ -34,7 +35,7 @@ async function loadAll() {
     const groups = {};
     const nameMap = {};
     for (const p of permData.permissions || []) {
-      nameMap[p.code] = p.name;
+      nameMap[p.code] = permissionName(p);
       if (!groups[p.group]) groups[p.group] = [];
       groups[p.group].push(p);
     }
@@ -73,11 +74,15 @@ function togglePerm(code) {
   else form.value.permissions.push(code);
 }
 
+const savingRole = ref(false); // 角色表单在途守卫，防重复提交
+
 async function submitRole() {
+  if (savingRole.value) return;
   if (!form.value.name.trim()) {
     showToast("角色名称不能为空");
     return;
   }
+  savingRole.value = true;
   try {
     if (editingId.value) {
       await api.updateRole(editingId.value, form.value);
@@ -91,17 +96,25 @@ async function submitRole() {
     loadAll();
   } catch (e) {
     showToast(`${editingId.value ? "修改" : "创建"}失败: ` + e.message);
+  } finally {
+    savingRole.value = false;
   }
 }
 
+const deletingRoleId = ref("");
+
 async function deleteRole(r) {
   if (!confirm(`确定删除角色「${r.name}」？`)) return;
+  if (deletingRoleId.value) return;
+  deletingRoleId.value = r.id;
   try {
     await api.deleteRole(r.id);
     showToast("已删除");
     loadAll();
   } catch (e) {
     showToast("删除失败: " + e.message);
+  } finally {
+    deletingRoleId.value = "";
   }
 }
 
@@ -134,7 +147,7 @@ onMounted(loadAll);
         </div>
 
         <div class="perm-picker">
-          <h3>角色权限（勾选后，该角色的所有用户自动获得这些权限，全题库范围）</h3>
+          <h3>角色权限</h3>
           <div v-for="g in permGroups" :key="g.group" class="perm-group">
             <div class="perm-group-title">{{ g.group }}权限</div>
             <div class="perm-checks">
@@ -147,8 +160,8 @@ onMounted(loadAll);
         </div>
 
         <div class="form-actions">
-          <button class="primary-button" type="button" @click="submitRole">
-            {{ editingId ? "保存修改" : "创建角色" }}
+          <button class="primary-button" type="button" :disabled="savingRole" @click="submitRole">
+            {{ savingRole ? "保存中..." : (editingId ? "保存修改" : "创建角色") }}
           </button>
           <button class="ghost-button" type="button" @click="showCreate = false; resetForm()">取消</button>
         </div>
@@ -161,12 +174,10 @@ onMounted(loadAll);
           <div class="role-header">
             <div>
               <strong>{{ r.name }}</strong>
-              <span class="role-id">{{ r.id }}</span>
-              <span v-if="r.is_builtin" class="builtin-tag">内置</span>
             </div>
-            <div class="role-actions">
+            <div v-if="r.id !== 'super_admin'" class="role-actions">
               <button class="edit-btn" type="button" @click="startEdit(r)">编辑</button>
-              <button class="delete-btn" type="button" @click="deleteRole(r)" title="删除">×</button>
+              <button class="delete-btn" type="button" :disabled="deletingRoleId === r.id" @click="deleteRole(r)" title="删除">×</button>
             </div>
           </div>
           <p v-if="r.description" class="role-desc">{{ r.description }}</p>
@@ -288,23 +299,6 @@ onMounted(loadAll);
 .role-header strong {
   font-size: 15px;
   color: #172033;
-}
-
-.role-id {
-  margin-left: 8px;
-  font-size: 11px;
-  color: #6e7b8f;
-  font-family: monospace;
-}
-
-.builtin-tag {
-  margin-left: 8px;
-  padding: 1px 6px;
-  border-radius: 3px;
-  background: #eff8ff;
-  color: #0571dc;
-  font-size: 11px;
-  font-weight: 600;
 }
 
 .role-actions {

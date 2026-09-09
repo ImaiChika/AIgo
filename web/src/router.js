@@ -6,17 +6,19 @@ import { permissionAllowed } from "./navigation.js";
 import GeneratePage from "./pages/GeneratePage.vue";
 import KnowledgePage from "./pages/KnowledgePage.vue";
 import ReviewPage from "./pages/ReviewPage.vue";
+import MyRevisionsPage from "./pages/MyRevisionsPage.vue";
 import BankPage from "./pages/BankPage.vue";
 import ReviewFlowPage from "./pages/ReviewFlowPage.vue";
 import AuditPage from "./pages/AuditPage.vue";
 import UsersPage from "./pages/UsersPage.vue";
 import BatchPage from "./pages/BatchPage.vue";
-import AICheckPage from "./pages/AICheckPage.vue";
 import StatsPage from "./pages/StatsPage.vue";
 import RolesPage from "./pages/RolesPage.vue";
 import BanksPage from "./pages/BanksPage.vue";
 import ReviewResultsPage from "./pages/ReviewResultsPage.vue";
 import ReviewDecisionsPage from "./pages/ReviewDecisionsPage.vue";
+import ShareRequestsPage from "./pages/ShareRequestsPage.vue";
+import AIProviderPage from "./pages/AIProviderPage.vue";
 
 const routes = [
   { path: "/login", component: LoginPage, meta: { public: true } },
@@ -26,17 +28,19 @@ const routes = [
     { path: "batch", name: "generation-batch", component: BatchPage, meta: { title: "批量推理", perm: "batch:run" } },
   ] },
   { path: "/knowledge", component: KnowledgePage, meta: { title: "知识点" } },
-  { path: "/ai-check", component: AICheckPage, meta: { title: "质量检查", perm: "ai:check" } },
-  { path: "/review", component: ReviewPage, meta: { title: "待审任务", perm: ["review:do", "review:final"] } },
+  { path: "/review", component: ReviewPage, meta: { title: "待审任务", perm: "review:do" } },
+  { path: "/my-revisions", component: MyRevisionsPage, meta: { title: "待我修改", perm: "question:edit" } },
+  { path: "/share-requests", component: ShareRequestsPage, meta: { title: "全局库分享", perm: ["question:share", "question:share_review"] } },
   { path: "/review-decisions", component: ReviewDecisionsPage, meta: { title: "最终决断", perm: "review:final" } },
-  { path: "/review-results", component: ReviewResultsPage, meta: { title: "审核记录", perm: ["review:do", "review:final", "question:view"] } },
-  { path: "/bank", component: BankPage, meta: { title: "题库", perm: "question:view" } },
+  { path: "/review-results", component: ReviewResultsPage, meta: { title: "审核记录", perm: "review:view_results" } },
+  { path: "/bank", component: BankPage, meta: { title: "题库", perm: ["question:view", "question:view_formal", "question:view_eliminated"] } },
   { path: "/batch", redirect: to => ({ path: "/generate/batch", query: to.query, hash: to.hash }) },
   { path: "/stats", component: StatsPage, meta: { title: "数据统计", perm: "stats:view" } },
   { path: "/review-flows", component: ReviewFlowPage, meta: { title: "审核流程", perm: "flow:manage" } },
   { path: "/audit", component: AuditPage, meta: { title: "操作日志", perm: "audit:view" } },
   { path: "/users", component: UsersPage, meta: { title: "用户管理", perm: "user:manage" } },
   { path: "/roles", component: RolesPage, meta: { title: "角色管理", perm: "role:manage" } },
+  { path: "/system/ai-providers", component: AIProviderPage, meta: { title: "AI 服务配置", perm: "role:manage" } },
   { path: "/banks", component: BanksPage, meta: { title: "题库管理", perm: "bank:manage" } },
 ];
 

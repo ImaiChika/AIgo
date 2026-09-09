@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"aigo/internal/auth"
 	"aigo/internal/domain"
+	"aigo/internal/storage"
 )
 
 // handleLogin 用户登录。
@@ -23,11 +25,40 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "请求格式错误")
 		return
 	}
+	req.Username = strings.TrimSpace(req.Username)
+	clientIP := s.clientIP(r)
+	wait, err := s.authSvc.CheckLoginAllowed(r.Context(), req.Username, clientIP)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "登录服务暂时不可用")
+		return
+	}
+	if wait > 0 {
+		writeRateLimited(w, wait)
+		return
+	}
 
 	// 调用认证服务验证密码并生成 JWT
 	token, user, err := s.authSvc.Login(req.Username, req.Password)
 	if err != nil {
-		writeError(w, 401, err.Error())
+		if errors.Is(err, auth.ErrInvalidCredentials) || errors.Is(err, auth.ErrUserDisabled) {
+			blockedFor, limitErr := s.authSvc.RecordLoginFailure(r.Context(), req.Username, clientIP)
+			if limitErr != nil {
+				writeError(w, http.StatusServiceUnavailable, "登录服务暂时不可用")
+				return
+			}
+			s.logAuthenticationFailure(r, req.Username, clientIP, blockedFor > 0)
+			if blockedFor > 0 {
+				writeRateLimited(w, blockedFor)
+				return
+			}
+			writeError(w, http.StatusUnauthorized, "用户名或密码错误")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "登录服务暂时不可用")
+		return
+	}
+	if err := s.authSvc.RecordLoginSuccess(r.Context(), req.Username); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "登录服务暂时不可用")
 		return
 	}
 
@@ -104,7 +135,7 @@ func (s *Server) handleRegisterEnabled(w http.ResponseWriter, r *http.Request) {
 
 // handleRegister 用户自主注册。
 // 注册后默认无任何权限，由管理员在用户管理中分配权限。
-// 受 AIGO_REGISTER_ENABLED 配置控制：默认关闭，防止公网被随意注册。
+// 受 AIGO_REGISTER_ENABLED 配置控制：默认开启；注册接口另有来源 IP 频率限制。
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if !s.registerEnabled {
 		writeError(w, 403, "注册功能未开放，请联系管理员创建账号")
@@ -119,6 +150,25 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "请求格式错误")
 		return
 	}
+	clientIP := s.clientIP(r)
+	wait, err := s.authSvc.CheckRegistrationAllowed(r.Context(), clientIP)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "注册服务暂时不可用")
+		return
+	}
+	if wait > 0 {
+		writeRateLimited(w, wait)
+		return
+	}
+	blockedFor, err := s.authSvc.RecordRegistrationAttempt(r.Context(), clientIP)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "注册服务暂时不可用")
+		return
+	}
+	if blockedFor > 0 {
+		writeRateLimited(w, blockedFor)
+		return
+	}
 	user, err := s.authSvc.Register(req.Username, req.Password, req.DisplayName)
 	if err != nil {
 		writeError(w, 400, err.Error())
@@ -126,6 +176,31 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	s.auditSvc.LogUser(r.Context(), user.Username, user.Username, "register")
 	writeJSON(w, 201, user)
+}
+
+func (s *Server) logAuthenticationFailure(r *http.Request, username, clientIP string, limited bool) {
+	if s.auditSvc == nil {
+		return
+	}
+	action := "auth_login_failed"
+	if limited {
+		action = "auth_rate_limited"
+	}
+	detail := fmt.Sprintf("account=%s source=%s", auth.AuditSubject("account", strings.ToLower(strings.TrimSpace(username))), auth.AuditSubject("ip", clientIP))
+	_ = s.auditSvc.Log(r.Context(), "", action, "anonymous", detail)
+}
+
+func writeRateLimited(w http.ResponseWriter, delay time.Duration) {
+	seconds := int((delay + time.Second - 1) / time.Second)
+	seconds = ((seconds + 9) / 10) * 10
+	if seconds < 10 {
+		seconds = 10
+	}
+	if seconds > 300 {
+		seconds = 300
+	}
+	w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
+	writeError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 }
 
 // handleListUsers 管理员查看所有用户列表（含权限）。
@@ -153,9 +228,13 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "请求格式错误")
 		return
 	}
-	user, err := s.authSvc.CreateUser(req.Username, req.Password, req.DisplayName, req.Role, req.Permissions, req.BankIDs)
+	user, err := s.authSvc.CreateUserAs(r.Context(), auth.GetUserID(r.Context()), req.Username, req.Password, req.DisplayName, req.Role, req.Permissions, req.BankIDs)
 	if err != nil {
-		writeError(w, 400, err.Error())
+		status := http.StatusBadRequest
+		if errors.Is(err, auth.ErrSuperAdminOnly) || errors.Is(err, auth.ErrSuperAdminExists) || errors.Is(err, auth.ErrSuperAdminRoleNotAssignable) {
+			status = http.StatusForbidden
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	s.auditSvc.LogUser(r.Context(), user.Username, auth.GetUsername(r.Context()), "create")
@@ -178,9 +257,13 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "请求格式错误")
 		return
 	}
-	user, err := s.authSvc.UpdateUser(userID, req.DisplayName, req.Role, req.Permissions, req.BankIDs, req.Enabled)
+	user, err := s.authSvc.UpdateUserAs(r.Context(), auth.GetUserID(r.Context()), userID, req.DisplayName, req.Role, req.Permissions, req.BankIDs, req.Enabled)
 	if err != nil {
-		writeError(w, 400, err.Error())
+		status := http.StatusBadRequest
+		if errors.Is(err, auth.ErrSuperAdminOnly) || errors.Is(err, auth.ErrProtectedAccount) || errors.Is(err, auth.ErrSuperAdminRoleNotAssignable) {
+			status = http.StatusForbidden
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	s.auditSvc.LogUser(r.Context(), user.Username, auth.GetUsername(r.Context()), "update_permissions")
@@ -188,8 +271,27 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, user)
 }
 
+// handleDeleteUser 删除普通用户。超级管理员账号和当前操作账号由服务层保护。
+func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	deleted, err := s.authSvc.DeleteUserAs(r.Context(), auth.GetUserID(r.Context()), userID)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, auth.ErrSuperAdminOnly) || errors.Is(err, auth.ErrProtectedAccount) {
+			status = http.StatusForbidden
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	s.auditSvc.LogUser(r.Context(), deleted.Username, auth.GetUsername(r.Context()), "delete")
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": deleted.ID})
+}
+
 // syncUserToExperts 有审题权限的用户自动在专家库建立记录（ID 一致）。
 func (s *Server) syncUserToExperts(r *http.Request, user *auth.User) {
+	if s.reviewSvc == nil {
+		return
+	}
 	hasReview := false
 	for _, p := range user.Permissions {
 		if p == domain.PermReviewDo {
@@ -242,8 +344,12 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 		Description: req.Description,
 		Permissions: req.Permissions,
 	}
-	if err := s.authSvc.SaveRole(r.Context(), role); err != nil {
-		writeError(w, 400, err.Error())
+	if err := s.authSvc.SaveRoleAs(r.Context(), auth.GetUserID(r.Context()), role); err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, auth.ErrSuperAdminOnly) || errors.Is(err, auth.ErrProtectedRole) {
+			status = http.StatusForbidden
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	s.auditSvc.Log(r.Context(), "", "role_create", auth.GetUsername(r.Context()), fmt.Sprintf("创建角色 %s", role.ID))
@@ -274,8 +380,12 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	existing.Name = req.Name
 	existing.Description = req.Description
 	existing.Permissions = req.Permissions
-	if err := s.authSvc.SaveRole(r.Context(), *existing); err != nil {
-		writeError(w, 400, err.Error())
+	if err := s.authSvc.SaveRoleAs(r.Context(), auth.GetUserID(r.Context()), *existing); err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, auth.ErrSuperAdminOnly) || errors.Is(err, auth.ErrProtectedRole) {
+			status = http.StatusForbidden
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	s.auditSvc.Log(r.Context(), "", "role_update", auth.GetUsername(r.Context()), fmt.Sprintf("修改角色 %s", id))
@@ -285,8 +395,12 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 // handleDeleteRole 删除角色模板（有用户引用时拒绝）。
 func (s *Server) handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := s.authSvc.DeleteRole(r.Context(), id); err != nil {
-		writeError(w, 400, err.Error())
+	if err := s.authSvc.DeleteRoleAs(r.Context(), auth.GetUserID(r.Context()), id); err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, auth.ErrSuperAdminOnly) || errors.Is(err, auth.ErrProtectedRole) {
+			status = http.StatusForbidden
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	s.auditSvc.Log(r.Context(), "", "role_delete", auth.GetUsername(r.Context()), fmt.Sprintf("删除角色 %s", id))
@@ -300,18 +414,39 @@ func (s *Server) handleListBanks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
-	// 统计各题库题量与状态分布（多对多：题目可属于多个题库）
+	catalogScope, catalogRestricted := s.bankCatalogScope(r)
+	if catalogRestricted {
+		visible := banks[:0]
+		for _, bank := range banks {
+			if catalogScope[bank.ID] {
+				visible = append(visible, bank)
+			}
+		}
+		banks = visible
+	}
+	includeStats := r.URL.Query().Get("include_stats") != "false"
+	// 分类子题库只管理待审核层，因此题量与状态分布不计正式/淘汰题。
 	counts := make(map[string]int)
 	statusCounts := make(map[string]map[string]int)
-	questions, qErr := s.questionStore.ListQuestions(r.Context())
-	if qErr == nil {
-		for _, q := range questions {
-			for _, b := range q.BankIDs {
-				counts[b]++
-				if statusCounts[b] == nil {
-					statusCounts[b] = make(map[string]int)
+	if includeStats {
+		questions, qErr := s.questionStore.ListQuestions(r.Context())
+		if qErr == nil {
+			globalCatalog := s.hasPermission(r, domain.PermQuestionViewGlobal)
+			viewerID := auth.GetUserID(r.Context())
+			for _, q := range questions {
+				if q.Tier() != domain.TierWorking {
+					continue
 				}
-				statusCounts[b][string(q.Status)]++
+				if !globalCatalog && q.OwnerID != viewerID {
+					continue
+				}
+				for _, b := range q.BankIDs {
+					counts[b]++
+					if statusCounts[b] == nil {
+						statusCounts[b] = make(map[string]int)
+					}
+					statusCounts[b][string(q.Status)]++
+				}
 			}
 		}
 	}
@@ -370,6 +505,39 @@ func (s *Server) handleUpdateBank(w http.ResponseWriter, r *http.Request) {
 // handleDeleteBank 删除题库（题目保留为未分类）。
 func (s *Server) handleDeleteBank(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	users, err := s.authSvc.ListUsers()
+	if err != nil {
+		writeError(w, 500, "检查用户题库范围失败")
+		return
+	}
+	for _, user := range users {
+		for _, bankID := range user.BankIDs {
+			if bankID == id {
+				writeError(w, 409, fmt.Sprintf("题库仍分配给用户「%s」，请先移除该用户的题库范围", user.DisplayName))
+				return
+			}
+		}
+	}
+	flows, err := s.reviewSvc.ListFlows(r.Context())
+	if err != nil {
+		writeError(w, 500, "检查审核流程引用失败")
+		return
+	}
+	for _, flow := range flows {
+		if flow.BankID == id {
+			writeError(w, 409, fmt.Sprintf("题库正被审核流程「%s」使用，请先处理该流程", flow.Name))
+			return
+		}
+	}
+	used, err := s.reviewSvc.HasSubmissionBankHistory(r.Context(), id)
+	if err != nil {
+		writeError(w, 500, "检查历史审核任务失败")
+		return
+	}
+	if used {
+		writeError(w, 409, "题库已有审核历史，需永久保留用于追溯，不能物理删除")
+		return
+	}
 	if err := s.bankSvc.DeleteBank(r.Context(), id); err != nil {
 		writeError(w, 400, err.Error())
 		return
@@ -377,38 +545,11 @@ func (s *Server) handleDeleteBank(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok", "id": id})
 }
 
-// handleListBankQuestions 列出题库内的题目（手动微调进出用，支持搜索）。
+// handleListBankQuestions 列出题库内的题目（手动微调进出用，支持搜索，数据库端分页）。
 func (s *Server) handleListBankQuestions(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	questions, err := s.questionStore.ListQuestions(r.Context())
-	if err != nil {
-		writeError(w, 500, err.Error())
-		return
-	}
-	keyword := strings.ToLower(r.URL.Query().Get("q"))
-	var inBank []domain.A2Question
-	for _, q := range questions {
-		// 题目属于该题库（多对多）
-		inThis := false
-		for _, b := range q.BankIDs {
-			if b == id {
-				inThis = true
-				break
-			}
-		}
-		if !inThis {
-			continue
-		}
-		if keyword != "" {
-			if !strings.Contains(strings.ToLower(q.ClinicalStem), keyword) &&
-				!strings.Contains(strings.ToLower(q.ID), keyword) &&
-				!strings.Contains(strings.ToLower(q.Profession), keyword) {
-				continue
-			}
-		}
-		inBank = append(inBank, q)
-	}
-	writePagedQuestions(w, inBank, r)
+	filter := storage.QuestionFilter{BankID: id, Keyword: r.URL.Query().Get("q"), Tiers: []string{string(domain.TierWorking)}}
+	s.respondPagedQuestions(w, r, filter)
 }
 
 // handleCollectBank 重新归纳：把未分类且专业匹配的题目自动归入题库。

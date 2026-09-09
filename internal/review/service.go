@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"aigo/internal/domain"
@@ -22,12 +24,8 @@ type Candidate struct {
 // UserResolver 审核人解析接口：从用户权限体系获取审核人。
 // 由 auth.Service 实现，避免 review 包直接依赖 auth。
 type UserResolver interface {
-	// ListReviewers 列出可审核指定题库的用户（直接勾选审题权限且题库范围匹配、账号启用）。
+	// ListReviewers 列出可审核指定题库的用户（角色或直接审题权限 + 用户题库分配范围）。
 	ListReviewers(ctx context.Context, bankID string) ([]string, error)
-	// ListFallbackReviewers 列出角色模板含审题权限的非管理员用户（兜底匹配用）。
-	ListFallbackReviewers(ctx context.Context) ([]string, error)
-	// HasFinalRight 检查用户是否拥有最终把关权限。
-	HasFinalRight(ctx context.Context, userID string) (bool, error)
 	// ListReviewCandidates 列出全部有审题权限的用户（流程配置选审核人用）。
 	ListReviewCandidates(ctx context.Context) ([]Candidate, error)
 }
@@ -37,6 +35,9 @@ type Service struct {
 	reviewStore   storage.ReviewStore
 	questionStore storage.QuestionStore
 	users         UserResolver
+	// RequireAICheck 送审强制前置：开启后仅 AI 检查通过（ai_reviewed）
+	// 及人工审核回流状态（revision_required/rejected）可提交审核。
+	RequireAICheck bool
 }
 
 func NewService(expertStore storage.ExpertStore, reviewStore storage.ReviewStore, questionStore storage.QuestionStore, users UserResolver) *Service {
@@ -46,6 +47,40 @@ func NewService(expertStore storage.ExpertStore, reviewStore storage.ReviewStore
 		questionStore: questionStore,
 		users:         users,
 	}
+}
+
+// submittableStatuses 返回当前配置下允许提交审核的题目状态集合。
+// rejected 是终态锁定：禁止修改与重新提交，不进入送审白名单。
+// revision_required 在新模型下仅作为审核任务上的标记保留（题目本体已恢复 ai_reviewed），
+// 白名单保留它以兼容存量数据。
+func (s *Service) submittableStatuses() map[domain.QuestionStatus]bool {
+	if s.RequireAICheck {
+		return map[domain.QuestionStatus]bool{
+			domain.StatusAIReviewed:       true,
+			domain.StatusRevisionRequired: true,
+		}
+	}
+	return map[domain.QuestionStatus]bool{
+		domain.StatusAIDraft:          true,
+		domain.StatusAutoChecked:      true,
+		domain.StatusAIReviewed:       true,
+		domain.StatusRevisionRequired: true,
+	}
+}
+
+// withReviewMutation 先获取跨进程审核锁，再在单一事务中执行关联写入。
+// 锁防止并发覆盖，事务保证审核记录、任务和题目状态要么全部提交、要么全部回滚。
+func (s *Service) withReviewMutation(ctx context.Context, fn func(txCtx context.Context) error) (mutationErr error) {
+	release, err := s.reviewStore.AcquireReviewMutationLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if releaseErr := release(); mutationErr == nil {
+			mutationErr = releaseErr
+		}
+	}()
+	return s.reviewStore.WithReviewTransaction(ctx, s.questionStore, fn)
 }
 
 // ===== 专家管理 =====
@@ -86,10 +121,22 @@ func (s *Service) DeleteExpert(ctx context.Context, id string) error {
 
 // CreateFlow 创建审核流程配置。
 func (s *Service) CreateFlow(ctx context.Context, flow domain.ReviewFlowConfig) error {
+	release, err := s.reviewStore.AcquireReviewMutationLock(ctx)
+	if err != nil {
+		return err
+	}
+	err = s.createFlowLocked(ctx, flow)
+	if releaseErr := release(); err == nil {
+		err = releaseErr
+	}
+	return err
+}
+
+func (s *Service) createFlowLocked(ctx context.Context, flow domain.ReviewFlowConfig) error {
 	if flow.ID == "" {
 		return fmt.Errorf("流程ID不能为空")
 	}
-	// 重复 ID 拒绝（防止静默覆盖已有流程）
+	// 重复 ID 拒绝（防止静默覆盖已有流程）；检查在锁内执行，避免并发创建同 ID 流程时查重被绕过
 	if existing, _ := s.reviewStore.GetFlowConfig(ctx, flow.ID); existing != nil {
 		return fmt.Errorf("流程 ID %s 已存在，请更换 ID", flow.ID)
 	}
@@ -102,6 +149,18 @@ func (s *Service) CreateFlow(ctx context.Context, flow domain.ReviewFlowConfig) 
 
 // UpdateFlow 更新审核流程配置。有进行中的任务引用该流程时禁止修改。
 func (s *Service) UpdateFlow(ctx context.Context, flow domain.ReviewFlowConfig) error {
+	release, err := s.reviewStore.AcquireReviewMutationLock(ctx)
+	if err != nil {
+		return err
+	}
+	err = s.updateFlowLocked(ctx, flow)
+	if releaseErr := release(); err == nil {
+		err = releaseErr
+	}
+	return err
+}
+
+func (s *Service) updateFlowLocked(ctx context.Context, flow domain.ReviewFlowConfig) error {
 	existing, _ := s.reviewStore.GetFlowConfig(ctx, flow.ID)
 	if existing == nil {
 		return fmt.Errorf("流程 %s 不存在", flow.ID)
@@ -223,6 +282,18 @@ func (s *Service) ListFlows(ctx context.Context) ([]domain.ReviewFlowConfig, err
 // DeleteFlow 删除审核流程。有任务引用该流程（含历史任务）时拒绝删除，
 // 保证历史审核记录始终能追溯到当时的流程配置。
 func (s *Service) DeleteFlow(ctx context.Context, id string) error {
+	release, err := s.reviewStore.AcquireReviewMutationLock(ctx)
+	if err != nil {
+		return err
+	}
+	err = s.deleteFlowLocked(ctx, id)
+	if releaseErr := release(); err == nil {
+		err = releaseErr
+	}
+	return err
+}
+
+func (s *Service) deleteFlowLocked(ctx context.Context, id string) error {
 	activeCount, err := s.reviewStore.CountActiveTasksByFlow(ctx, id)
 	if err != nil {
 		return fmt.Errorf("检查流程引用失败: %w", err)
@@ -244,6 +315,23 @@ func (s *Service) DeleteFlow(ctx context.Context, id string) error {
 
 // SubmitQuestion 将题目提交到审核流程，创建审核任务。
 func (s *Service) SubmitQuestion(ctx context.Context, questionID string, flowID string) (*domain.ReviewTask, error) {
+	return s.SubmitQuestionForBank(ctx, questionID, flowID, "")
+}
+
+// SubmitQuestionForBank 将题目按明确的分类子题库提交到审核流程。
+// submissionBankID 会固化到任务，后续分类变化不会改变本批次的专家路由。
+// 为空时仅对“流程已绑定题库”或“题目只属于一个子题库”的情况做安全推导。
+func (s *Service) SubmitQuestionForBank(ctx context.Context, questionID, flowID, submissionBankID string) (*domain.ReviewTask, error) {
+	var task *domain.ReviewTask
+	err := s.withReviewMutation(ctx, func(txCtx context.Context) error {
+		var submitErr error
+		task, submitErr = s.submitQuestionLocked(txCtx, questionID, flowID, submissionBankID)
+		return submitErr
+	})
+	return task, err
+}
+
+func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, requestedBankID string) (*domain.ReviewTask, error) {
 	q, err := s.questionStore.GetQuestion(ctx, questionID)
 	if err != nil {
 		return nil, err
@@ -251,17 +339,21 @@ func (s *Service) SubmitQuestion(ctx context.Context, questionID string, flowID 
 	if q == nil {
 		return nil, fmt.Errorf("题目 %s 不存在", questionID)
 	}
+	if err := q.ValidateForReview(); err != nil {
+		return nil, fmt.Errorf("题目 %s 无法提交审核: %w", questionID, err)
+	}
 
 	// 只允许特定状态的题目提交审核
-	allowedStatuses := map[domain.QuestionStatus]bool{
-		domain.StatusAIDraft:          true,
-		domain.StatusAutoChecked:      true,
-		domain.StatusAIReviewed:       true,
-		domain.StatusRevisionRequired: true,
-		domain.StatusRejected:         true,
-	}
+	allowedStatuses := s.submittableStatuses()
 	if !allowedStatuses[q.Status] {
-		return nil, fmt.Errorf("题目 %s 当前状态为 %s，不允许提交审核", questionID, q.Status)
+		switch {
+		case s.RequireAICheck && (q.Status == domain.StatusAIDraft || q.Status == domain.StatusAutoChecked):
+			return nil, fmt.Errorf("题目 %s 尚未通过 AI 质量检查（当前状态 %s），请等待自动检查完成后再提交审核", questionID, q.Status)
+		case q.Status == domain.StatusRejected:
+			return nil, fmt.Errorf("题目 %s 已被驳回（终态锁定），不允许修改或重新提交审核", questionID)
+		default:
+			return nil, fmt.Errorf("题目 %s 当前状态为 %s，不允许提交审核", questionID, q.Status)
+		}
 	}
 
 	flow, err := s.reviewStore.GetFlowConfig(ctx, flowID)
@@ -271,38 +363,39 @@ func (s *Service) SubmitQuestion(ctx context.Context, questionID string, flowID 
 	if flow == nil {
 		return nil, fmt.Errorf("审核流程 %s 不存在", flowID)
 	}
+	submissionBankID, err := resolveSubmissionBank(q, flow, requestedBankID)
+	if err != nil {
+		return nil, err
+	}
 
 	existing, _ := s.reviewStore.GetTaskByQuestionID(ctx, questionID)
 	if existing != nil {
-		// 如果是"已驳回"状态，允许重新提交（重置任务从头再来）
-		if existing.Status == domain.StatusRejected {
-			assigned, err := s.resolveReviewers(ctx, bankIDForQuestion(q), flow.Rounds[0].ExpertIDs)
+		// 如果是"需修改"状态，恢复为审核中（保持原轮，清空本轮投票重新审核，进入新一批次）
+		if existing.Status == domain.StatusRevisionRequired {
+			flowChanged := existing.FlowID != flowID
+			roundIdx := existing.CurrentRound - 1
+			if flowChanged {
+				existing.CurrentRound = 1
+				roundIdx = 0
+				existing.RoundResults = make([]domain.RoundResult, len(flow.Rounds))
+				for i := range existing.RoundResults {
+					existing.RoundResults[i].RoundNumber = i + 1
+				}
+			}
+			if roundIdx < 0 || roundIdx >= len(flow.Rounds) {
+				return nil, fmt.Errorf("审核流程 %s 不包含第 %d 轮", flowID, existing.CurrentRound)
+			}
+			assigned, err := s.resolveReviewers(ctx, submissionBankID, flow.Rounds[roundIdx].ExpertIDs)
 			if err != nil {
 				return nil, err
 			}
 			existing.Status = domain.StatusReviewing
-			existing.FlowID = flowID // 更新为本次选择的流程
-			existing.CurrentRound = 1
+			existing.FlowID = flowID
+			existing.SubmissionBankID = submissionBankID
 			existing.AssignedTo = assigned
 			existing.FinalReviewerIDs = flow.FinalReviewerIDs
-			existing.FinalDecision = nil
 			existing.QuestionPrevStatus = q.Status // 记录重提前状态（撤销时恢复）
-			existing.RoundResults = make([]domain.RoundResult, len(flow.Rounds))
-			for i := range existing.RoundResults {
-				existing.RoundResults[i].RoundNumber = i + 1
-			}
-			existing.UpdatedAt = time.Now()
-			if err := s.reviewStore.UpdateTask(ctx, *existing); err != nil {
-				return nil, err
-			}
-			s.updateQuestionStatus(ctx, questionID, domain.StatusReviewing)
-			return existing, nil
-		}
-		// 如果是"需修改"状态，恢复为审核中（保持原轮，清空本轮投票重新审核）
-		if existing.Status == domain.StatusRevisionRequired {
-			existing.Status = domain.StatusReviewing
-			existing.QuestionPrevStatus = q.Status // 记录重提前状态（撤销时恢复）
-			roundIdx := existing.CurrentRound - 1
+			existing.QuestionVersion = q.Version
 			if roundIdx >= 0 && roundIdx < len(existing.RoundResults) {
 				existing.RoundResults[roundIdx].Reviews = nil
 				existing.RoundResults[roundIdx].ApprovedCount = 0
@@ -311,24 +404,28 @@ func (s *Service) SubmitQuestion(ctx context.Context, questionID string, flowID 
 				existing.RoundResults[roundIdx].Passed = false
 			}
 			existing.FinalDecision = nil
+			existing.Attempt++
 			existing.UpdatedAt = time.Now()
 			if err := s.reviewStore.UpdateTask(ctx, *existing); err != nil {
 				return nil, err
 			}
-			s.updateQuestionStatus(ctx, questionID, domain.StatusReviewing)
+			if err := s.updateQuestionStatus(ctx, questionID, domain.StatusReviewing); err != nil {
+				return nil, err
+			}
 			return existing, nil
 		}
-		// 题目被编辑后回退为草稿（旧任务处于终态），允许创建新任务重新走流程
-		isTerminalTask := existing.Status == domain.StatusApproved || existing.Status == domain.StatusPublished || existing.Status == domain.StatusArchived
-		if q.Status == domain.StatusAIDraft && isTerminalTask {
+		// 已入库（published/archived）的题目由管理员撤回到 ai_reviewed 后，
+		// 或题目被编辑回草稿（旧任务终态）时，允许创建新任务重新走流程。
+		isTerminalTask := existing.Status == domain.StatusPublished || existing.Status == domain.StatusArchived
+		if (q.Status == domain.StatusAIDraft || q.Status == domain.StatusAIReviewed) && isTerminalTask {
 			// 继续向下创建新任务
 		} else {
-			return nil, fmt.Errorf("题目 %s 已有审核任务 %s，状态为 %s", questionID, existing.ID, existing.Status)
+			return nil, fmt.Errorf("题目 %s 已提交审核（任务状态：%s），无需重复提交", questionID, existing.Status)
 		}
 	}
 
 	// 解析第一轮审核人（显式配置优先，否则按审题权限+题库范围自动匹配）
-	assigned, err := s.resolveReviewers(ctx, bankIDForQuestion(q), flow.Rounds[0].ExpertIDs)
+	assigned, err := s.resolveReviewers(ctx, submissionBankID, flow.Rounds[0].ExpertIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -347,11 +444,14 @@ func (s *Service) SubmitQuestion(ctx context.Context, questionID string, flowID 
 		ID:                 fmt.Sprintf("task-%s-%d", questionID, time.Now().UnixNano()),
 		QuestionID:         questionID,
 		FlowID:             flowID,
+		SubmissionBankID:   submissionBankID,
 		CurrentRound:       1,
 		Status:             domain.StatusReviewing,
 		AssignedTo:         assigned,
 		FinalReviewerIDs:   flow.FinalReviewerIDs,
 		QuestionPrevStatus: prevStatus,
+		QuestionVersion:    q.Version,
+		Attempt:            1,
 		RoundResults:       make([]domain.RoundResult, len(flow.Rounds)),
 		CreatedAt:          time.Now(),
 		UpdatedAt:          time.Now(),
@@ -368,8 +468,7 @@ func (s *Service) SubmitQuestion(ctx context.Context, questionID string, flowID 
 }
 
 // resolveReviewers 解析本轮审核人：
-// 显式配置的审核人直接使用；为空时按"审题权限 + 题库范围"自动匹配；
-// 一个直接权限审题人都没有时，兜底使用角色模板含审题权限的非管理员用户。
+// 显式配置的审核人直接使用；为空时按"审题权限 + 题库分配范围"自动匹配。
 func (s *Service) resolveReviewers(ctx context.Context, bankID string, configured []string) ([]string, error) {
 	if len(configured) > 0 {
 		return configured, nil
@@ -382,23 +481,34 @@ func (s *Service) resolveReviewers(ctx context.Context, bankID string, configure
 		return nil, fmt.Errorf("查询审题人失败: %w", err)
 	}
 	if len(reviewers) == 0 {
-		// 兜底：角色模板含审题权限的非管理员用户（如 expert 角色账号）
-		if fallback, ferr := s.users.ListFallbackReviewers(ctx); ferr == nil && len(fallback) > 0 {
-			reviewers = fallback
-		}
-	}
-	if len(reviewers) == 0 {
 		return nil, fmt.Errorf("题库「%s」没有分配审题人：请给用户分配审题权限并设置题库范围，或在流程中显式指定审核人", bankNameOrAll(bankID))
 	}
 	return reviewers, nil
 }
 
-// bankIDForQuestion 取题目的首个所属题库（多对多时用于审核人自动匹配）。
-func bankIDForQuestion(q *domain.A2Question) string {
-	if q != nil && len(q.BankIDs) > 0 {
-		return q.BankIDs[0]
+func resolveSubmissionBank(q *domain.A2Question, flow *domain.ReviewFlowConfig, requested string) (string, error) {
+	bankID := strings.TrimSpace(requested)
+	if bankID == "" && flow != nil {
+		bankID = strings.TrimSpace(flow.BankID)
 	}
-	return ""
+	if bankID == "" && q != nil && len(q.BankIDs) == 1 {
+		bankID = q.BankIDs[0]
+	}
+	if bankID == "" {
+		return "", fmt.Errorf("题目必须先归入一个分类子题库；通用流程送审时也必须明确选择本次提交题库")
+	}
+	if flow != nil && flow.BankID != "" && flow.BankID != bankID {
+		return "", fmt.Errorf("审核流程 %s 绑定的是题库 %s，不能按题库 %s 提交", flow.ID, flow.BankID, bankID)
+	}
+	if q == nil {
+		return "", fmt.Errorf("题目不存在")
+	}
+	for _, candidate := range q.BankIDs {
+		if candidate == bankID {
+			return bankID, nil
+		}
+	}
+	return "", fmt.Errorf("题目 %s 不属于本次提交题库 %s", q.ID, bankID)
 }
 
 func bankNameOrAll(bankID string) string {
@@ -418,10 +528,20 @@ type RevokeFlowResult struct {
 // RevokeFlow 撤销流程下所有未完成的审核任务：
 //   - 任务状态为 reviewing / revision_required / conflict 的：删除任务（级联删审核记录），
 //     题目状态恢复为提交前状态（task.QuestionPrevStatus，兜底 ai_draft）
-//   - 终态任务（approved / rejected / published 等）：保留不动，题目状态也不变
+//   - 终态任务（rejected / published 等）：保留不动，题目状态也不变
 //
 // 用于管理员发现误提交后整体撤回，避免任务卡死。
 func (s *Service) RevokeFlow(ctx context.Context, flowID string) (*RevokeFlowResult, error) {
+	var result *RevokeFlowResult
+	err := s.withReviewMutation(ctx, func(txCtx context.Context) error {
+		var revokeErr error
+		result, revokeErr = s.revokeFlowLocked(txCtx, flowID)
+		return revokeErr
+	})
+	return result, err
+}
+
+func (s *Service) revokeFlowLocked(ctx context.Context, flowID string) (*RevokeFlowResult, error) {
 	flow, err := s.reviewStore.GetFlowConfig(ctx, flowID)
 	if err != nil {
 		return nil, err
@@ -446,7 +566,10 @@ func (s *Service) RevokeFlow(ctx context.Context, flowID string) (*RevokeFlowRes
 		}
 		// 恢复题目状态
 		q, err := s.questionStore.GetQuestion(ctx, t.QuestionID)
-		if err == nil && q != nil {
+		if err != nil {
+			return result, fmt.Errorf("读取题目 %s 失败: %w", t.QuestionID, err)
+		}
+		if q != nil {
 			prev := t.QuestionPrevStatus
 			if prev == "" {
 				prev = domain.StatusAIDraft
@@ -454,9 +577,10 @@ func (s *Service) RevokeFlow(ctx context.Context, flowID string) (*RevokeFlowRes
 			if q.Status == domain.StatusReviewing || q.Status == domain.StatusRevisionRequired || q.Status == domain.StatusConflict || q.Status == prev {
 				q.Status = prev
 				q.UpdatedAt = time.Now()
-				if err := s.questionStore.SaveQuestion(ctx, *q); err == nil {
-					result.Restored++
+				if err := s.questionStore.SaveQuestion(ctx, *q); err != nil {
+					return result, fmt.Errorf("恢复题目 %s 状态失败: %w", t.QuestionID, err)
 				}
+				result.Restored++
 			}
 		}
 		// 删除任务（级联删审核记录）
@@ -470,16 +594,21 @@ func (s *Service) RevokeFlow(ctx context.Context, flowID string) (*RevokeFlowRes
 
 // SubmitBankResult 批量提交结果（含跳过统计，便于前端提示题库状态冲突）。
 type SubmitBankResult struct {
-	Submitted        int      `json:"submitted"`         // 成功提交数量
-	Failed           []string `json:"failed"`            // 失败明细
-	SkippedReviewing int      `json:"skipped_reviewing"` // 已在审核中/待决断，跳过
-	SkippedFinished  int      `json:"skipped_finished"`  // 已通过/已发布/已归档，跳过
+	Submitted         int      `json:"submitted"`           // 成功提交数量
+	Failed            []string `json:"failed"`              // 失败明细
+	SkippedReviewing  int      `json:"skipped_reviewing"`   // 已在审核中/待决断，跳过
+	SkippedFinished   int      `json:"skipped_finished"`    // 已通过/已归档，跳过
+	SkippedNotChecked int      `json:"skipped_not_checked"` // 未通过 AI 检查的草稿，跳过（强制前置开启时）
 }
 
 // SubmitBank 按题库批量提交审核：把题库内所有可提交状态的题目统一提交到流程。
-// 已在审核中（reviewing/conflict）和已审核结束（approved/published/archived）的题目自动跳过，
+// 已在审核中（reviewing/conflict）和已审核结束（published/archived）的题目自动跳过，
 // 返回跳过统计，便于提示题库内状态冲突。
 func (s *Service) SubmitBank(ctx context.Context, bankID, flowID string) (*SubmitBankResult, error) {
+	bankID = strings.TrimSpace(bankID)
+	if bankID == "" {
+		return nil, fmt.Errorf("批量送审必须明确选择一个分类子题库")
+	}
 	flow, err := s.reviewStore.GetFlowConfig(ctx, flowID)
 	if err != nil {
 		return nil, err
@@ -488,20 +617,14 @@ func (s *Service) SubmitBank(ctx context.Context, bankID, flowID string) (*Submi
 		return nil, fmt.Errorf("审核流程 %s 不存在", flowID)
 	}
 	// 流程绑定了其他题库时校验
-	if flow.BankID != "" && bankID != "" && flow.BankID != bankID {
+	if flow.BankID != "" && flow.BankID != bankID {
 		return nil, fmt.Errorf("审核流程 %s 绑定的是题库 %s，不能提交题库 %s", flowID, flow.BankID, bankID)
 	}
 	questions, err := s.questionStore.ListQuestions(ctx)
 	if err != nil {
 		return nil, err
 	}
-	allowedStatuses := map[domain.QuestionStatus]bool{
-		domain.StatusAIDraft:          true,
-		domain.StatusAutoChecked:      true,
-		domain.StatusAIReviewed:       true,
-		domain.StatusRevisionRequired: true,
-		domain.StatusRejected:         true,
-	}
+	allowedStatuses := s.submittableStatuses()
 	result := &SubmitBankResult{}
 	for i := range questions {
 		q := &questions[i]
@@ -517,15 +640,18 @@ func (s *Service) SubmitBank(ctx context.Context, bankID, flowID string) (*Submi
 			continue
 		}
 		if !allowedStatuses[q.Status] {
-			switch q.Status {
-			case domain.StatusReviewing, domain.StatusConflict:
+			switch {
+			case q.Status == domain.StatusReviewing || q.Status == domain.StatusConflict:
 				result.SkippedReviewing++
+			case s.RequireAICheck && (q.Status == domain.StatusAIDraft || q.Status == domain.StatusAutoChecked):
+				// 强制前置下未通过 AI 检查的草稿单独计数，便于前端提示
+				result.SkippedNotChecked++
 			default:
 				result.SkippedFinished++
 			}
 			continue
 		}
-		if _, err := s.SubmitQuestion(ctx, q.ID, flowID); err != nil {
+		if _, err := s.SubmitQuestionForBank(ctx, q.ID, flowID, bankID); err != nil {
 			result.Failed = append(result.Failed, fmt.Sprintf("%s: %s", q.ID, err.Error()))
 			continue
 		}
@@ -541,13 +667,12 @@ type ReviewResultItem struct {
 	Question    domain.A2Question     `json:"question"`       // 题目
 	Task        *domain.ReviewTask    `json:"task,omitempty"` // 当前审核任务（可为空=从未提交）
 	Records     []domain.ReviewRecord `json:"records"`        // 全部审核记录（含专家评语）
-	FinalStatus string                `json:"final_status"`   // 最终状态分类：pending/reviewing/conflict/approved/rejected/revision_required/published
+	FinalStatus string                `json:"final_status"`   // 最终状态分类：pending/reviewing/conflict/rejected/revision_required/published
 }
 
 // ReviewStats 审核结果统计。
 type ReviewStats struct {
-	Published        int `json:"published"`         // 已入库
-	Approved         int `json:"approved"`          // 审核通过待发布
+	Published        int `json:"published"`         // 已通过（唯一成功终态）
 	Rejected         int `json:"rejected"`          // 已驳回
 	RevisionRequired int `json:"revision_required"` // 需修改
 	Reviewing        int `json:"reviewing"`         // 审核中
@@ -556,39 +681,194 @@ type ReviewStats struct {
 	Total            int `json:"total"`             // 题目总数
 }
 
+func addReviewStat(stats *ReviewStats, finalStatus string, count int) {
+	stats.Total += count
+	switch finalStatus {
+	case "published":
+		stats.Published += count
+	case "rejected":
+		stats.Rejected += count
+	case "revision_required":
+		stats.RevisionRequired += count
+	case "reviewing":
+		stats.Reviewing += count
+	case "conflict":
+		stats.Conflict += count
+	default:
+		stats.Pending += count
+	}
+}
+
+// SearchResultsForViewer 优先使用生产存储的数据库端审核记录查询能力，只加载当前页。
+// 轻量测试存储未实现该能力时回退到内存筛选，保持接口兼容。
+func (s *Service) SearchResultsForViewer(ctx context.Context, query storage.ReviewResultQuery, userID string, fullAccess bool) ([]ReviewResultItem, int, ReviewStats, error) {
+	if fastStore, ok := s.reviewStore.(storage.ReviewResultQueryStore); ok {
+		page, err := fastStore.SearchReviewResults(ctx, query)
+		if err != nil {
+			return nil, 0, ReviewStats{}, err
+		}
+		stats := ReviewStats{}
+		for status, count := range page.Stats {
+			addReviewStat(&stats, status, count)
+		}
+		items := make([]ReviewResultItem, 0, len(page.Rows))
+		for _, row := range page.Rows {
+			task := row.Task
+			if !fullAccess && task != nil && taskInFlight(task.Status) {
+				task = sanitizeTaskForReviewer(task)
+			}
+			items = append(items, ReviewResultItem{Question: row.Question, Task: task, FinalStatus: row.FinalStatus})
+		}
+		return items, page.Total, stats, nil
+	}
+
+	items, _, err := s.ListResultsForViewer(ctx, userID, fullAccess)
+	if err != nil {
+		return nil, 0, ReviewStats{}, err
+	}
+	stats := ReviewStats{}
+	filtered := make([]ReviewResultItem, 0, len(items))
+	for _, item := range items {
+		if matchesReviewQuestionFilter(item.Question, query.StatsFilter) {
+			addReviewStat(&stats, item.FinalStatus, 1)
+		}
+		if !matchesReviewQuestionFilter(item.Question, query.Filter) ||
+			(query.FinalStatus != "" && item.FinalStatus != query.FinalStatus) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	total := len(filtered)
+	page, pageSize := query.Page, query.PageSize
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 500 {
+		pageSize = 50
+	}
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	return filtered[start:end], total, stats, nil
+}
+
+func matchesReviewQuestionFilter(q domain.A2Question, filter storage.QuestionFilter) bool {
+	if filter.Status != "" && string(q.Status) != filter.Status {
+		return false
+	}
+	if len(filter.Tiers) > 0 {
+		matched := false
+		for _, tier := range filter.Tiers {
+			if q.Tier() == domain.QuestionTier(tier) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	if filter.Difficulty != "" && string(q.Difficulty) != filter.Difficulty {
+		return false
+	}
+	if filter.DifficultyBand != "" && !storage.DifficultyMatchesBand(string(q.Difficulty), filter.DifficultyBand) {
+		return false
+	}
+	if len(filter.Professions) > 0 {
+		matched := false
+		for _, profession := range filter.Professions {
+			if q.Profession == profession {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	if filter.OutlineCode != "" && !strings.HasPrefix(q.OutlineCode, filter.OutlineCode) {
+		return false
+	}
+	if !storage.QuestionMatchesKeyword(q, filter.Keyword) {
+		return false
+	}
+	if filter.BankID != "" {
+		found := false
+		for _, bankID := range q.BankIDs {
+			if bankID == filter.BankID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if filter.Unclassified && len(q.BankIDs) > 0 {
+		return false
+	}
+	if filter.ClassifiableOnly && q.Status != domain.StatusAIDraft && q.Status != domain.StatusAutoChecked &&
+		q.Status != domain.StatusAIReviewed && q.Status != domain.StatusRevisionRequired {
+		return false
+	}
+	if filter.ScopeRestricted {
+		found := false
+		for _, bankID := range q.BankIDs {
+			for _, allowed := range filter.BankScope {
+				if bankID == allowed {
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 // finalStatusOf 根据题目与任务计算最终状态分类。
 func finalStatusOf(q domain.A2Question, task *domain.ReviewTask) string {
+	if task != nil {
+		switch task.Status {
+		case domain.StatusRevisionRequired:
+			return "revision_required"
+		case domain.StatusConflict:
+			return "conflict"
+		}
+	}
 	switch q.Status {
 	case domain.StatusPublished:
 		return "published"
-	case domain.StatusApproved:
-		return "approved"
 	case domain.StatusRejected:
 		return "rejected"
 	case domain.StatusRevisionRequired:
 		return "revision_required"
 	case domain.StatusReviewing:
-		if task != nil && task.Status == domain.StatusConflict {
-			return "conflict"
-		}
 		return "reviewing"
 	default:
 		return "pending"
 	}
 }
 
-// ListResults 汇总全部题目的审核结果（题目 + 任务 + 专家评语 + 统计）。
-// 调用方在内存中做筛选与分页。
-func (s *Service) ListResults(ctx context.Context) ([]ReviewResultItem, ReviewStats, error) {
+// ListResults 汇总全部题目的审核结果（题目 + 任务 + 统计）。
+// 按查看者做分层隔离：全量可见者（把关人/管理员）看到全部评语；
+// 普通用户对进行中的任务（审核中/待决断/需修改）只能看到自己的记录与脱敏任务摘要，
+// 已结束的任务（已通过/已驳回/归档）属于历史档案，保留完整评语。
+// 评语不在本方法加载：调用方筛选分页定稿后，用 AttachRecordsForItems 为当页条目补齐，
+// 避免审核记录表增长后每次请求全表加载。
+func (s *Service) ListResultsForViewer(ctx context.Context, userID string, fullAccess bool) ([]ReviewResultItem, ReviewStats, error) {
 	questions, err := s.questionStore.ListQuestions(ctx)
 	if err != nil {
 		return nil, ReviewStats{}, err
 	}
 	tasks, err := s.reviewStore.ListAllTasks(ctx)
-	if err != nil {
-		return nil, ReviewStats{}, err
-	}
-	records, err := s.reviewStore.ListAllRecords(ctx)
 	if err != nil {
 		return nil, ReviewStats{}, err
 	}
@@ -602,32 +882,25 @@ func (s *Service) ListResults(ctx context.Context) ([]ReviewResultItem, ReviewSt
 			taskByQuestion[t.QuestionID] = t
 		}
 	}
-	recordsByTask := make(map[string][]domain.ReviewRecord)
-	for _, r := range records {
-		recordsByTask[r.TaskID] = append(recordsByTask[r.TaskID], r)
-	}
 
 	items := make([]ReviewResultItem, 0, len(questions))
 	stats := ReviewStats{Total: len(questions)}
 	for i := range questions {
 		q := &questions[i]
 		task := taskByQuestion[q.ID]
-		var taskRecords []domain.ReviewRecord
-		if task != nil {
-			taskRecords = recordsByTask[task.ID]
-		}
 		fs := finalStatusOf(*q, task)
+		// 非全量可见者：进行中的任务做脱敏裁剪（评语由 AttachRecordsForItems 按同一规则裁剪）
+		if !fullAccess && task != nil && taskInFlight(task.Status) {
+			task = sanitizeTaskForReviewer(task)
+		}
 		items = append(items, ReviewResultItem{
 			Question:    *q,
 			Task:        task,
-			Records:     taskRecords,
 			FinalStatus: fs,
 		})
 		switch fs {
 		case "published":
 			stats.Published++
-		case "approved":
-			stats.Approved++
 		case "rejected":
 			stats.Rejected++
 		case "revision_required":
@@ -643,22 +916,58 @@ func (s *Service) ListResults(ctx context.Context) ([]ReviewResultItem, ReviewSt
 	return items, stats, nil
 }
 
+// AttachRecordsForItems 为筛选分页后的汇总条目加载审核记录（仅当页任务）。
+// 非全量可见者的进行中任务保持隔离规则：只保留该用户自己的评语。
+func (s *Service) AttachRecordsForItems(ctx context.Context, items []ReviewResultItem, userID string, fullAccess bool) error {
+	taskIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Task != nil {
+			taskIDs = append(taskIDs, item.Task.ID)
+		}
+	}
+	if len(taskIDs) == 0 {
+		return nil
+	}
+	records, err := s.reviewStore.ListRecordsByTaskIDs(ctx, taskIDs)
+	if err != nil {
+		return err
+	}
+	recordsByTask := make(map[string][]domain.ReviewRecord, len(taskIDs))
+	for _, r := range records {
+		recordsByTask[r.TaskID] = append(recordsByTask[r.TaskID], r)
+	}
+	for i := range items {
+		item := &items[i]
+		if item.Task == nil {
+			item.Records = nil
+			continue
+		}
+		taskRecords := recordsByTask[item.Task.ID]
+		if !fullAccess && taskInFlight(item.Task.Status) {
+			taskRecords = ownRecords(taskRecords, userID)
+		}
+		item.Records = taskRecords
+	}
+	return nil
+}
+
 // MyTaskItem 待我审核的任务（含题目、流程轮次、投票进度）。
 type MyTaskItem struct {
-	Task          *domain.ReviewTask `json:"task"`           // 审核任务
-	Question      domain.A2Question  `json:"question"`       // 题目完整信息
-	FlowName      string             `json:"flow_name"`      // 流程名
-	RoundIndex    int                `json:"round_index"`    // 当前轮序号（从1）
-	RoundCount    int                `json:"round_count"`    // 总轮数
-	RoundName     string             `json:"round_name"`     // 当前轮名称
-	Voted         int                `json:"voted"`          // 已投人数
-	Assigned      int                `json:"assigned"`       // 应投人数
-	Approved      int                `json:"approved"`       // 通过票
-	Rejected      int                `json:"rejected"`       // 驳回票
-	Revision      int                `json:"revision"`       // 需修改票
-	MyVoted       bool               `json:"my_voted"`       // 我是否已投过本轮
-	CanVote       bool               `json:"can_vote"`       // 我是否可以投票
-	NeedsDecision bool               `json:"needs_decision"` // 待决断（把关人可见）
+	Task            *domain.ReviewTask `json:"task"`             // 审核任务
+	Question        domain.A2Question  `json:"question"`         // 题目完整信息
+	FlowName        string             `json:"flow_name"`        // 流程名
+	RoundIndex      int                `json:"round_index"`      // 当前轮序号（从1）
+	RoundCount      int                `json:"round_count"`      // 总轮数
+	RoundName       string             `json:"round_name"`       // 当前轮名称
+	Voted           int                `json:"voted"`            // 已投人数
+	Assigned        int                `json:"assigned"`         // 应投人数
+	Approved        int                `json:"approved"`         // 通过票
+	Rejected        int                `json:"rejected"`         // 驳回票
+	Revision        int                `json:"revision"`         // 需修改票
+	MyVoted         bool               `json:"my_voted"`         // 我是否已投过本轮
+	CanVote         bool               `json:"can_vote"`         // 我是否可以投票
+	NeedsDecision   bool               `json:"needs_decision"`   // 待决断（把关人可见）
+	VersionMismatch bool               `json:"version_mismatch"` // 任务版本与当前题目不一致
 }
 
 // MyTasks 列出待我审核的任务：
@@ -737,17 +1046,18 @@ func (s *Service) MyTasks(ctx context.Context, userID string, hasFinalRight bool
 
 		flow := flowByName[task.FlowID]
 		item := MyTaskItem{
-			Task:          task,
-			Question:      *q,
-			RoundIndex:    task.CurrentRound,
-			Voted:         len(round.Reviews),
-			Assigned:      len(task.AssignedTo),
-			Approved:      round.ApprovedCount,
-			Rejected:      round.RejectedCount,
-			Revision:      round.RevisionCount,
-			MyVoted:       myVoted,
-			CanVote:       true,
-			NeedsDecision: false,
+			Task:            task,
+			Question:        *q,
+			RoundIndex:      task.CurrentRound,
+			Voted:           len(round.Reviews),
+			Assigned:        len(task.AssignedTo),
+			Approved:        round.ApprovedCount,
+			Rejected:        round.RejectedCount,
+			Revision:        round.RevisionCount,
+			MyVoted:         myVoted,
+			CanVote:         task.QuestionVersion == q.Version,
+			NeedsDecision:   false,
+			VersionMismatch: task.QuestionVersion != q.Version,
 		}
 		if flow != nil {
 			item.FlowName = flow.Name
@@ -757,6 +1067,14 @@ func (s *Service) MyTasks(ctx context.Context, userID string, hasFinalRight bool
 			}
 		} else {
 			item.RoundCount = len(task.RoundResults)
+		}
+		// 同轮隔离：非把关人看不到他人实时票数与评语，避免界面动态更新他人状态
+		if !hasFinalRight {
+			item.Task = sanitizeTaskForReviewer(task)
+			item.Voted = 0
+			item.Approved = 0
+			item.Rejected = 0
+			item.Revision = 0
 		}
 		result = append(result, item)
 	}
@@ -775,6 +1093,11 @@ func (s *Service) MyTasks(ctx context.Context, userID string, hasFinalRight bool
 // 所有 conflict（待决断）任务，且我在该流程的把关人名单内（名单空=全部把关人可见）。
 // 含题目完整信息、流程轮次、票数统计，供「待决断」独立页面使用。
 func (s *Service) MyDecisions(ctx context.Context, userID string) ([]MyTaskItem, error) {
+	return s.MyDecisionsForViewer(ctx, userID, false)
+}
+
+// MyDecisionsForViewer 支持系统管理员查看全部待决断任务；普通把关人仍受任务快照名单限制。
+func (s *Service) MyDecisionsForViewer(ctx context.Context, userID string, isSystemAdmin bool) ([]MyTaskItem, error) {
 	questions, err := s.questionStore.ListQuestions(ctx)
 	if err != nil {
 		return nil, err
@@ -810,7 +1133,7 @@ func (s *Service) MyDecisions(ctx context.Context, userID string) ([]MyTaskItem,
 			continue
 		}
 		// 把关人名单校验（名单空 = 任意把关人）
-		if len(task.FinalReviewerIDs) > 0 {
+		if len(task.FinalReviewerIDs) > 0 && !isSystemAdmin {
 			allowed := false
 			for _, id := range task.FinalReviewerIDs {
 				if id == userID {
@@ -829,16 +1152,17 @@ func (s *Service) MyDecisions(ctx context.Context, userID string) ([]MyTaskItem,
 		round := &task.RoundResults[roundIdx]
 		flow := flowByName[task.FlowID]
 		item := MyTaskItem{
-			Task:          task,
-			Question:      *q,
-			RoundIndex:    task.CurrentRound,
-			Voted:         len(round.Reviews),
-			Assigned:      len(task.AssignedTo),
-			Approved:      round.ApprovedCount,
-			Rejected:      round.RejectedCount,
-			Revision:      round.RevisionCount,
-			CanVote:       false,
-			NeedsDecision: true,
+			Task:            task,
+			Question:        *q,
+			RoundIndex:      task.CurrentRound,
+			Voted:           len(round.Reviews),
+			Assigned:        len(task.AssignedTo),
+			Approved:        round.ApprovedCount,
+			Rejected:        round.RejectedCount,
+			Revision:        round.RevisionCount,
+			CanVote:         false,
+			NeedsDecision:   true,
+			VersionMismatch: task.QuestionVersion != q.Version,
 		}
 		if flow != nil {
 			item.FlowName = flow.Name
@@ -866,22 +1190,56 @@ func (s *Service) MyDecisions(ctx context.Context, userID string) ([]MyTaskItem,
 type ReviewRequest struct {
 	TaskID        string                `json:"task_id"`
 	ExpertID      string                `json:"expert_id"`
-	Action        domain.QuestionStatus `json:"action"` // approved / rejected / revision_required
-	Opinion       string                `json:"opinion"`
+	Action        domain.QuestionStatus `json:"action"`          // approved / rejected / revision_required
+	Opinion       string                `json:"opinion"`         // 自由文本意见（兼容旧客户端；非通过时视为「其他」栏）
+	Comment       *domain.ReviewComment `json:"comment"`         // 结构化评语（题干/选项/答案与解析/其他）
 	HasFinalRight bool                  `json:"has_final_right"` // 最终把关人可审任意轮
+}
+
+// effectiveComment 归并评语输入：结构化评语优先；旧版自由文本意见映射到「其他」栏。
+func (req ReviewRequest) effectiveComment() *domain.ReviewComment {
+	if req.Comment != nil {
+		return req.Comment
+	}
+	if opinion := strings.TrimSpace(req.Opinion); opinion != "" {
+		return &domain.ReviewComment{Other: opinion}
+	}
+	return nil
+}
+
+// validateComment 非通过结论必须留下至少一栏评语；通过时评语可选。
+func validateComment(action domain.QuestionStatus, comment *domain.ReviewComment) error {
+	if action == domain.StatusApproved {
+		return nil
+	}
+	if comment.IsEmpty() {
+		return fmt.Errorf("驳回或退回修改必须填写评语：请在题干/选项/答案与解析/其他至少一栏说明理由")
+	}
+	return nil
 }
 
 // Review 专家执行审核（投票）。
 // 新规则：单人反对不再立即退回/驳回，所有分配审核人审核完毕后自动统计：
 //   - 无反对票且通过数达门槛 → 本轮通过（进下一轮/完成）
 //   - 全员审完但存在反对票 → 任务进入 conflict，等待最终把关人决断
+//
+// 评语规则：通过时评语可选；驳回/需修改必须填写结构化评语（至少一栏）。
 func (s *Service) Review(ctx context.Context, req ReviewRequest) error {
+	return s.withReviewMutation(ctx, func(txCtx context.Context) error {
+		return s.reviewLocked(txCtx, req)
+	})
+}
+
+func (s *Service) reviewLocked(ctx context.Context, req ReviewRequest) error {
 	task, err := s.reviewStore.GetTask(ctx, req.TaskID)
 	if err != nil {
 		return err
 	}
 	if task == nil {
 		return fmt.Errorf("审核任务 %s 不存在", req.TaskID)
+	}
+	if err := s.ensureTaskQuestionVersion(ctx, task); err != nil {
+		return err
 	}
 
 	flow, err := s.reviewStore.GetFlowConfig(ctx, task.FlowID)
@@ -932,12 +1290,20 @@ func (s *Service) Review(ctx context.Context, req ReviewRequest) error {
 		return fmt.Errorf("无效的审核动作: %s", req.Action)
 	}
 
+	// 评语校验：通过时可选，非通过必须写至少一栏
+	comment := req.effectiveComment()
+	if err := validateComment(req.Action, comment); err != nil {
+		return err
+	}
+
 	// 记录审核结果
 	now := time.Now()
 	expertReview := domain.ExpertReview{
 		ExpertID:   req.ExpertID,
+		ExpertName: s.resolveExpertName(ctx, req.ExpertID),
 		Conclusion: req.Action,
-		Opinion:    req.Opinion,
+		Opinion:    comment.Flatten(),
+		Comment:    comment,
 		ReviewedAt: now,
 	}
 	task.RoundResults[roundIdx].Reviews = append(task.RoundResults[roundIdx].Reviews, expertReview)
@@ -948,9 +1314,12 @@ func (s *Service) Review(ctx context.Context, req ReviewRequest) error {
 		TaskID:      task.ID,
 		QuestionID:  task.QuestionID,
 		RoundNumber: task.CurrentRound,
+		Attempt:     attemptOrOne(task.Attempt),
 		ExpertID:    req.ExpertID,
+		ExpertName:  expertReview.ExpertName,
 		Conclusion:  req.Action,
-		Opinion:     req.Opinion,
+		Opinion:     expertReview.Opinion,
+		Comment:     comment,
 		CreatedAt:   now,
 	}
 	if err := s.reviewStore.SaveRecord(ctx, record); err != nil {
@@ -983,16 +1352,21 @@ func (s *Service) Review(ctx context.Context, req ReviewRequest) error {
 			if err := s.reviewStore.UpdateTask(ctx, *task); err != nil {
 				return fmt.Errorf("更新审核任务失败: %w", err)
 			}
-			s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusRejected)
+			if err := s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusRejected); err != nil {
+				return err
+			}
 			return nil
 		}
 		if req.Action == domain.StatusRevisionRequired {
+			// 退回修改：任务标记 revision_required，题目本体恢复 ai_reviewed
 			task.Status = domain.StatusRevisionRequired
 			task.UpdatedAt = now
 			if err := s.reviewStore.UpdateTask(ctx, *task); err != nil {
 				return fmt.Errorf("更新审核任务失败: %w", err)
 			}
-			s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusRevisionRequired)
+			if err := s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusAIReviewed); err != nil {
+				return err
+			}
 			return nil
 		}
 		// approved：达到通过票数 → 过轮（最终轮进入最终待决断）
@@ -1086,39 +1460,41 @@ func (s *Service) advanceRoundAfterFinalize(ctx context.Context, task *domain.Re
 	} else {
 		// 最终轮决断通过 → 直接入库
 		task.Status = domain.StatusPublished
-		s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusPublished)
+		if err := s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusPublished); err != nil {
+			return err
+		}
 	}
 	task.UpdatedAt = now
 	return s.reviewStore.UpdateTask(ctx, *task)
 }
 
-// resolveAssignedForTask 为任务解析某轮的审核人（需要题目所属题库）。
-// 题目可属于多个题库：自动匹配时使用第一个题库（提交时按流程对应题库解析，
-// 若题目未归属则按空库匹配全部范围审题人）。
+// resolveAssignedForTask 为任务解析某轮审核人。
+// 始终使用任务提交时固化的分类子题库，不能被题目后续分类调整改变。
 func (s *Service) resolveAssignedForTask(ctx context.Context, task *domain.ReviewTask, configured []string) ([]string, error) {
 	if len(configured) > 0 {
 		return configured, nil
 	}
-	q, err := s.questionStore.GetQuestion(ctx, task.QuestionID)
-	if err != nil {
-		return nil, err
+	if task.SubmissionBankID == "" {
+		// 兼容迁移前已存在的任务：只有当前题目恰好属于一个子题库时才能无歧义补齐。
+		q, err := s.questionStore.GetQuestion(ctx, task.QuestionID)
+		if err != nil {
+			return nil, err
+		}
+		if q == nil || len(q.BankIDs) != 1 {
+			return nil, fmt.Errorf("审核任务 %s 缺少提交题库快照，无法安全分配下一轮审核人", task.ID)
+		}
+		task.SubmissionBankID = q.BankIDs[0]
 	}
-	if q == nil {
-		return nil, fmt.Errorf("题目 %s 不存在", task.QuestionID)
-	}
-	bankID := ""
-	if len(q.BankIDs) > 0 {
-		bankID = q.BankIDs[0]
-	}
-	return s.resolveReviewers(ctx, bankID, nil)
+	return s.resolveReviewers(ctx, task.SubmissionBankID, nil)
 }
 
 // FinalizeRequest 最终把关决断请求。
 type FinalizeRequest struct {
 	TaskID        string                `json:"task_id"`
-	ReviewerID    string                `json:"reviewer_id"` // 决断管理员 ID
-	Action        domain.QuestionStatus `json:"action"`      // approved / rejected / revision_required
-	Opinion       string                `json:"opinion"`
+	ReviewerID    string                `json:"reviewer_id"`     // 决断管理员 ID
+	Action        domain.QuestionStatus `json:"action"`          // approved / rejected / revision_required
+	Opinion       string                `json:"opinion"`         // 自由文本意见（兼容旧客户端）
+	Comment       *domain.ReviewComment `json:"comment"`         // 结构化评语
 	IsSystemAdmin bool                  `json:"is_system_admin"` // 系统管理员可跳过把关人名单
 }
 
@@ -1126,12 +1502,21 @@ type FinalizeRequest struct {
 // 仅任务处于 conflict 状态时可决断；决断人必须在流程配置的把关人名单内
 // （名单为空则任意把关权限者；系统管理员不受名单限制）。
 func (s *Service) Finalize(ctx context.Context, req FinalizeRequest) error {
+	return s.withReviewMutation(ctx, func(txCtx context.Context) error {
+		return s.finalizeLocked(txCtx, req)
+	})
+}
+
+func (s *Service) finalizeLocked(ctx context.Context, req FinalizeRequest) error {
 	task, err := s.reviewStore.GetTask(ctx, req.TaskID)
 	if err != nil {
 		return err
 	}
 	if task == nil {
 		return fmt.Errorf("审核任务 %s 不存在", req.TaskID)
+	}
+	if err := s.ensureTaskQuestionVersion(ctx, task); err != nil {
+		return err
 	}
 	if task.Status != domain.StatusConflict {
 		return fmt.Errorf("任务当前状态为 %s，只有票数冲突的任务需要最终把关", task.Status)
@@ -1155,6 +1540,23 @@ func (s *Service) Finalize(ctx context.Context, req FinalizeRequest) error {
 	if req.Action != domain.StatusApproved && req.Action != domain.StatusRejected && req.Action != domain.StatusRevisionRequired {
 		return fmt.Errorf("无效的决断动作: %s", req.Action)
 	}
+	// 决断评语：通过时可选，非通过必须写至少一栏
+	comment := (&ReviewRequest{Opinion: req.Opinion, Comment: req.Comment}).effectiveComment()
+	if err := validateComment(req.Action, comment); err != nil {
+		return err
+	}
+	if req.Action == domain.StatusApproved {
+		q, err := s.questionStore.GetQuestion(ctx, task.QuestionID)
+		if err != nil {
+			return err
+		}
+		if q == nil {
+			return fmt.Errorf("题目 %s 不存在", task.QuestionID)
+		}
+		if err := q.ValidateForReview(); err != nil {
+			return fmt.Errorf("题目 %s 无法通过最终决断: %w", task.QuestionID, err)
+		}
+	}
 
 	roundIdx := task.CurrentRound - 1
 	if roundIdx < 0 || roundIdx >= len(task.RoundResults) {
@@ -1164,8 +1566,10 @@ func (s *Service) Finalize(ctx context.Context, req FinalizeRequest) error {
 	now := time.Now()
 	decision := domain.ExpertReview{
 		ExpertID:   req.ReviewerID,
+		ExpertName: s.resolveExpertName(ctx, req.ReviewerID),
 		Conclusion: req.Action,
-		Opinion:    req.Opinion,
+		Opinion:    comment.Flatten(),
+		Comment:    comment,
 		ReviewedAt: now,
 	}
 	task.FinalDecision = &decision
@@ -1176,9 +1580,12 @@ func (s *Service) Finalize(ctx context.Context, req FinalizeRequest) error {
 		TaskID:      task.ID,
 		QuestionID:  task.QuestionID,
 		RoundNumber: task.CurrentRound,
+		Attempt:     attemptOrOne(task.Attempt),
 		ExpertID:    req.ReviewerID,
+		ExpertName:  decision.ExpertName,
 		Conclusion:  req.Action,
-		Opinion:     req.Opinion,
+		Opinion:     decision.Opinion,
+		Comment:     comment,
 		CreatedAt:   now,
 	}
 	if err := s.reviewStore.SaveRecord(ctx, record); err != nil {
@@ -1196,15 +1603,21 @@ func (s *Service) Finalize(ctx context.Context, req FinalizeRequest) error {
 		if err := s.reviewStore.UpdateTask(ctx, *task); err != nil {
 			return fmt.Errorf("更新审核任务失败: %w", err)
 		}
-		s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusRejected)
+		if err := s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusRejected); err != nil {
+			return err
+		}
 		return nil
 	case domain.StatusRevisionRequired:
+		// 退回修改：任务标记为 revision_required（生成者"待我修改"入口），
+		// 题目本体恢复 ai_reviewed（AI 检查已通过的状态），生成者修改后由管理员重新送审。
 		task.Status = domain.StatusRevisionRequired
 		task.UpdatedAt = now
 		if err := s.reviewStore.UpdateTask(ctx, *task); err != nil {
 			return fmt.Errorf("更新审核任务失败: %w", err)
 		}
-		s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusRevisionRequired)
+		if err := s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusAIReviewed); err != nil {
+			return err
+		}
 		return nil
 	}
 	return nil
@@ -1215,9 +1628,127 @@ func (s *Service) GetTask(ctx context.Context, taskID string) (*domain.ReviewTas
 	return s.reviewStore.GetTask(ctx, taskID)
 }
 
+// RevisionItem 待修改条目：被退回修改的任务及其题目。
+type RevisionItem struct {
+	Task     domain.ReviewTask `json:"task"`
+	Question domain.A2Question `json:"question"`
+	// Reason 是最近一次"需修改"的退修意见（轮内投票或把关人决断）。
+	Reason string `json:"reason"`
+	// Modified 表示生成者已提交修改（题目版本已新于任务绑定的送审版本），等待管理员重新送审。
+	Modified bool `json:"modified"`
+}
+
+// MyRevisions 列出退回给指定生成者修改的题目：
+// 审核任务处于 revision_required 且题目由该用户创建（CreatedBy 匹配）。
+// 按分层可见性规则裁剪：生成者仅能看到"需修改"的退修意见，看不到各专家的态度与通过/驳回评语。
+func (s *Service) MyRevisions(ctx context.Context, createdBy string) ([]RevisionItem, error) {
+	tasks, err := s.reviewStore.ListAllTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]RevisionItem, 0, 8)
+	for _, task := range tasks {
+		if task.Status != domain.StatusRevisionRequired {
+			continue
+		}
+		q, err := s.questionStore.GetQuestion(ctx, task.QuestionID)
+		if err != nil || q == nil {
+			continue
+		}
+		if q.CreatedBy != createdBy {
+			continue
+		}
+		// 深拷贝并裁剪：仅保留退修意见
+		trimmed, err := cloneTaskForRevisions(task)
+		if err != nil {
+			return nil, err
+		}
+		// 退修意见：优先取把关人决断记录，其次轮内需修改票
+		reason := ""
+		records, _ := s.reviewStore.ListRecordsByTaskID(ctx, task.ID)
+		for i := len(records) - 1; i >= 0; i-- {
+			if records[i].Conclusion != domain.StatusRevisionRequired {
+				continue
+			}
+			if records[i].Comment != nil {
+				c := records[i].Comment
+				reason = strings.Join(strings.Fields(strings.TrimSpace(c.Stem+" "+c.Options+" "+c.Answer+" "+c.Other)), " ")
+			}
+			if reason == "" {
+				reason = records[i].Opinion
+			}
+			if reason != "" {
+				break
+			}
+		}
+		items = append(items, RevisionItem{
+			Task:     trimmed,
+			Question: *q,
+			Reason:   reason,
+			Modified: q.Version > task.QuestionVersion,
+		})
+	}
+	// 最近退回的排在前面
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].Task.UpdatedAt.After(items[j].Task.UpdatedAt)
+	})
+	return items, nil
+}
+
+// cloneTaskForRevisions 深拷贝任务并裁剪掉非"需修改"的专家记录。
+func cloneTaskForRevisions(task domain.ReviewTask) (domain.ReviewTask, error) {
+	raw, err := json.Marshal(task)
+	if err != nil {
+		return task, err
+	}
+	var trimmed domain.ReviewTask
+	if err := json.Unmarshal(raw, &trimmed); err != nil {
+		return task, err
+	}
+	for i := range trimmed.RoundResults {
+		rr := &trimmed.RoundResults[i]
+		keep := make([]domain.ExpertReview, 0, len(rr.Reviews))
+		for _, rev := range rr.Reviews {
+			if rev.Conclusion == domain.StatusRevisionRequired {
+				keep = append(keep, rev)
+			}
+		}
+		rr.Reviews = keep
+	}
+	return trimmed, nil
+}
+
 // GetTaskByQuestionID 根据题目 ID 获取审核任务。
 func (s *Service) GetTaskByQuestionID(ctx context.Context, questionID string) (*domain.ReviewTask, error) {
 	return s.reviewStore.GetTaskByQuestionID(ctx, questionID)
+}
+
+// HasSubmissionBankHistory 判断分类子题库是否已被任何审核任务引用。
+// 审核任务需要永久保留提交题库快照，因此使用过的子题库不能物理删除。
+func (s *Service) HasSubmissionBankHistory(ctx context.Context, bankID string) (bool, error) {
+	tasks, err := s.reviewStore.ListAllTasks(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, task := range tasks {
+		if task.SubmissionBankID == bankID {
+			return true, nil
+		}
+		if task.SubmissionBankID == "" {
+			q, err := s.questionStore.GetQuestion(ctx, task.QuestionID)
+			if err != nil {
+				return false, err
+			}
+			if q != nil {
+				for _, currentBankID := range q.BankIDs {
+					if currentBankID == bankID {
+						return true, nil
+					}
+				}
+			}
+		}
+	}
+	return false, nil
 }
 
 // ListRecords 列出某审核任务的所有记录。
@@ -1225,8 +1756,14 @@ func (s *Service) ListRecords(ctx context.Context, taskID string) ([]domain.Revi
 	return s.reviewStore.ListRecordsByTaskID(ctx, taskID)
 }
 
-// PublishQuestion 将审核通过的题目发布到正式题库。
+// PublishQuestion 是旧客户端兼容接口。当前 published 已是唯一“已通过”终态，调用保持幂等。
 func (s *Service) PublishQuestion(ctx context.Context, questionID string) error {
+	return s.withReviewMutation(ctx, func(txCtx context.Context) error {
+		return s.publishQuestionLocked(txCtx, questionID)
+	})
+}
+
+func (s *Service) publishQuestionLocked(ctx context.Context, questionID string) error {
 	q, err := s.questionStore.GetQuestion(ctx, questionID)
 	if err != nil {
 		return err
@@ -1234,26 +1771,176 @@ func (s *Service) PublishQuestion(ctx context.Context, questionID string) error 
 	if q == nil {
 		return fmt.Errorf("题目 %s 不存在", questionID)
 	}
-	if q.Status != domain.StatusApproved {
-		return fmt.Errorf("题目 %s 当前状态为 %s，只有审核通过的题目才能发布", questionID, q.Status)
+	if q.Status != domain.StatusPublished {
+		return fmt.Errorf("题目 %s 当前状态为 %s，尚未通过最终审核", questionID, q.Status)
 	}
-	q.Status = domain.StatusPublished
-	q.UpdatedAt = time.Now()
-	return s.questionStore.SaveQuestion(ctx, *q)
+	if err := q.Validate(); err != nil {
+		return fmt.Errorf("题目 %s 无法发布: %w", questionID, err)
+	}
+	return nil
 }
 
-func (s *Service) updateQuestionStatus(ctx context.Context, questionID string, status domain.QuestionStatus) {
+func (s *Service) updateQuestionStatus(ctx context.Context, questionID string, status domain.QuestionStatus) error {
 	q, err := s.questionStore.GetQuestion(ctx, questionID)
 	if err != nil {
-		fmt.Printf("⚠ 获取题目 %s 失败: %v\n", questionID, err)
-		return
+		return fmt.Errorf("获取题目 %s 失败: %w", questionID, err)
 	}
 	if q == nil {
-		return
+		return fmt.Errorf("题目 %s 不存在", questionID)
 	}
 	q.Status = status
 	q.UpdatedAt = time.Now()
 	if err := s.questionStore.SaveQuestion(ctx, *q); err != nil {
-		fmt.Printf("⚠ 更新题目 %s 状态为 %s 失败: %v\n", questionID, status, err)
+		return fmt.Errorf("更新题目 %s 状态为 %s 失败: %w", questionID, status, err)
 	}
+	return nil
+}
+
+func (s *Service) ensureTaskQuestionVersion(ctx context.Context, task *domain.ReviewTask) error {
+	q, err := s.questionStore.GetQuestion(ctx, task.QuestionID)
+	if err != nil {
+		return fmt.Errorf("获取审核题目失败: %w", err)
+	}
+	if q == nil {
+		return fmt.Errorf("题目 %s 不存在", task.QuestionID)
+	}
+	if task.QuestionVersion < 1 {
+		return fmt.Errorf("审核任务 %s 未绑定有效题目版本，不能继续审核", task.ID)
+	}
+	if q.Version != task.QuestionVersion {
+		return fmt.Errorf("%w: 审核任务绑定版本 %d，但题目当前为版本 %d；请撤销或退回后重新提交", domain.ErrQuestionVersionConflict, task.QuestionVersion, q.Version)
+	}
+	return nil
+}
+
+// ===== 评语可见性（分层隔离） =====
+//
+// 规则：
+//   - 同一轮审核人之间互不可见评语与态度，仅能看到题目和自己的输入；
+//   - 跨轮次默认隔离，普通审核人只能看到历史轮次的脱敏统计摘要（票数），
+//     看不到任何人的评语与姓名归属；
+//   - 最终把关人（及系统管理员）全量可见，按轮次对比所有专家的结构化评语。
+
+// attemptOrOne 兼容旧数据：批次号缺省视为第 1 批。
+func attemptOrOne(attempt int) int {
+	if attempt < 1 {
+		return 1
+	}
+	return attempt
+}
+
+// taskInFlight 判断任务是否仍在审核流程中（评语隔离窗口期）。
+func taskInFlight(status domain.QuestionStatus) bool {
+	return status == domain.StatusReviewing ||
+		status == domain.StatusConflict ||
+		status == domain.StatusRevisionRequired
+}
+
+// ownRecords 只保留某位审核人自己的记录。
+func ownRecords(records []domain.ReviewRecord, userID string) []domain.ReviewRecord {
+	var own []domain.ReviewRecord
+	for _, r := range records {
+		if r.ExpertID == userID {
+			own = append(own, r)
+		}
+	}
+	return own
+}
+
+// sanitizeTaskForReviewer 按隔离规则裁剪任务快照：
+// 去掉全部评语明细与决断意见；历史轮次仅保留票数汇总，当前轮次连票数也清零
+// （当前轮的实时票数会随同轮老师提交而变化，属于他人态度信息）。
+func sanitizeTaskForReviewer(task *domain.ReviewTask) *domain.ReviewTask {
+	if task == nil {
+		return nil
+	}
+	copied := *task
+	copied.FinalDecision = nil
+	copied.RoundResults = make([]domain.RoundResult, len(task.RoundResults))
+	for i, rr := range task.RoundResults {
+		rr.Reviews = nil
+		if rr.RoundNumber == task.CurrentRound {
+			rr.ApprovedCount = 0
+			rr.RejectedCount = 0
+			rr.RevisionCount = 0
+			rr.Passed = false
+		}
+		copied.RoundResults[i] = rr
+	}
+	return &copied
+}
+
+// resolveExpertName 解析审核人显示名（快照到评语，历史可比对）。解析失败不阻断审核。
+func (s *Service) resolveExpertName(ctx context.Context, userID string) string {
+	if s.users == nil || userID == "" {
+		return ""
+	}
+	candidates, err := s.users.ListReviewCandidates(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, c := range candidates {
+		if c.ID == userID {
+			if c.DisplayName != "" {
+				return c.DisplayName
+			}
+			return c.Username
+		}
+	}
+	return ""
+}
+
+// TaskForViewer 按可见性规则获取任务详情：
+// 全量可见者（把关人/管理员）拿到完整任务；普通审核人拿到裁剪后的任务。
+func (s *Service) TaskForViewer(ctx context.Context, taskID, userID string, fullAccess bool) (*domain.ReviewTask, error) {
+	task, err := s.reviewStore.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, nil
+	}
+	if fullAccess {
+		return task, nil
+	}
+	return sanitizeTaskForReviewer(task), nil
+}
+
+// TaskByQuestionForViewer 同 TaskForViewer，按题目 ID 查询。
+func (s *Service) TaskByQuestionForViewer(ctx context.Context, questionID, userID string, fullAccess bool) (*domain.ReviewTask, error) {
+	task, err := s.reviewStore.GetTaskByQuestionID(ctx, questionID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, nil
+	}
+	if fullAccess {
+		return task, nil
+	}
+	return sanitizeTaskForReviewer(task), nil
+}
+
+// RecordsForViewer 按可见性规则返回审核记录：
+// 全量可见者拿到全部记录；任务进行中时普通审核人仅能看到自己提交的记录；
+// 任务结束后（已通过/已驳回/归档）属于历史档案，全部记录对有权查看题目的人开放。
+func (s *Service) RecordsForViewer(ctx context.Context, taskID, userID string, fullAccess bool) ([]domain.ReviewRecord, error) {
+	task, err := s.reviewStore.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	records, err := s.reviewStore.ListRecordsByTaskID(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if fullAccess || task == nil || !taskInFlight(task.Status) {
+		return records, nil
+	}
+	var own []domain.ReviewRecord
+	for _, r := range records {
+		if r.ExpertID == userID {
+			own = append(own, r)
+		}
+	}
+	return own, nil
 }

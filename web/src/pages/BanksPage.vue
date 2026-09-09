@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, nextTick } from "vue";
 import { api } from "../api.js";
 import QuestionDetailModal from "../components/QuestionDetailModal.vue";
 
@@ -20,8 +20,9 @@ const bankQTotal = ref(0);
 const bankQPage = ref(1);
 const bankQSearch = ref("");
 const bankQLoading = ref(false);
+let bankQuestionTicket = 0;
 
-// 添加题目：搜索库外题目（含所有状态，可单个/批量加入）
+// 添加题目：仅搜索待审核层中尚未进入审核的可归类题目
 const addSearch = ref("");
 const addProfession = ref(""); // 准确筛选：专业
 const addStatus = ref("");     // 准确筛选：状态
@@ -34,8 +35,26 @@ const addTotal = ref(0);
 const addHasMore = ref(false);
 const addSelected = ref(new Set());
 const addSelectAll = ref(false);
+const addResultsScroll = ref(null);
+const addSearched = ref(false);
+let addSearchTicket = 0;
+const classifiableStatuses = new Set(["ai_draft", "auto_checked", "ai_reviewed", "revision_required"]);
+
+function isClassifiable(q) {
+  return classifiableStatuses.has(q?.status);
+}
+
+function isInSelectedBank(q) {
+  return !!selectedBankId.value && (q?.bank_ids || []).includes(selectedBankId.value);
+}
+
+function setAddResultsScroll(element) {
+  addResultsScroll.value = element;
+}
 
 function toggleAddSelect(id) {
+  const question = addResults.value.find((q) => q.id === id);
+  if (!question || isInSelectedBank(question)) return;
   if (addSelected.value.has(id)) addSelected.value.delete(id);
   else addSelected.value.add(id);
 }
@@ -45,7 +64,7 @@ function toggleAddSelectAll() {
     addSelected.value.clear();
     addSelectAll.value = false;
   } else {
-    addResults.value.forEach((q) => addSelected.value.add(q.id));
+    addResults.value.filter((q) => !isInSelectedBank(q)).forEach((q) => addSelected.value.add(q.id));
     addSelectAll.value = true;
   }
 }
@@ -115,11 +134,15 @@ function addCustomProfession() {
 
 const customProfession = ref("");
 
+const savingBank = ref(false); // 题库表单在途守卫，防重复提交
+
 async function submitBank() {
+  if (savingBank.value) return;
   if (!form.value.name.trim()) {
     showToast("题库名称不能为空");
     return;
   }
+  savingBank.value = true;
   try {
     let createdBank = null;
     if (editingId.value) {
@@ -141,11 +164,17 @@ async function submitBank() {
     }
   } catch (e) {
     showToast(`${editingId.value ? "修改" : "创建"}失败: ` + e.message);
+  } finally {
+    savingBank.value = false;
   }
 }
 
+const deletingBankId = ref("");
+
 async function deleteBank(b) {
-  if (!confirm(`确定删除题库「${b.name}」？题库中的题目将变为未分类。`)) return;
+  if (!confirm(`确定删除分类子题库「${b.name}」？仅未进入审核且没有历史引用的子题库可删除，其中的待审核题目将变为未分类。`)) return;
+  if (deletingBankId.value) return;
+  deletingBankId.value = b.id;
   try {
     await api.deleteBank(b.id);
     showToast("已删除");
@@ -153,10 +182,13 @@ async function deleteBank(b) {
     loadBanks();
   } catch (e) {
     showToast("删除失败: " + e.message);
+  } finally {
+    deletingBankId.value = "";
   }
 }
 
 async function openBank(b) {
+  resetAddSearch();
   selectedBankId.value = b.id;
   bankQPage.value = 1;
   bankQSearch.value = "";
@@ -164,21 +196,24 @@ async function openBank(b) {
 }
 
 function closeBank() {
+  resetAddSearch();
   selectedBankId.value = "";
   bankQuestions.value = [];
 }
 
 async function loadBankQuestions() {
   if (!selectedBankId.value) return;
+  const ticket = ++bankQuestionTicket;
   bankQLoading.value = true;
   try {
     const data = await api.listBankQuestions(selectedBankId.value, bankQSearch.value, bankQPage.value, 100);
+    if (ticket !== bankQuestionTicket) return;
     bankQuestions.value = bankQPage.value === 1 ? (data.questions || []) : bankQuestions.value.concat(data.questions || []);
     bankQTotal.value = data.total || 0;
   } catch (e) {
     showToast("加载题目失败: " + e.message);
   } finally {
-    bankQLoading.value = false;
+    if (ticket === bankQuestionTicket) bankQLoading.value = false;
   }
 }
 
@@ -212,10 +247,11 @@ async function addToOtherBank(q, bankId) {
 }
 
 // 搜索并添加题目到本库（准确筛选：专业/状态/难度/大纲；模糊搜索：关键词）
-// 搜索范围为全部题目，包含已审核/已入库等所有状态；左右翻页查看
+// 分类子题库只收待审核题库题目（tier=working）：正式题库已定稿、淘汰题库已终态锁定，不可归类
 async function searchAdd(page = 1) {
-  if (page === 1 && !addSearch.value.trim() && !addProfession.value && !addStatus.value && !addDifficulty.value && !addOutlineCode.value) return;
+  const ticket = ++addSearchTicket;
   addLoading.value = true;
+  addSearched.value = true;
   try {
     const data = await api.searchQuestions(
       addSearch.value.trim(),
@@ -224,22 +260,46 @@ async function searchAdd(page = 1) {
       "",
       addProfession.value ? [addProfession.value] : [],
       addDifficulty.value,
-      addOutlineCode.value
+      addOutlineCode.value,
+      "working",
+      true
     );
-    addResults.value = (data.questions || []).filter((q) => !(q.bank_ids || []).includes(selectedBankId.value));
+    if (ticket !== addSearchTicket) return;
+    // 已在本库的命中项仍保留显示并明确标记，避免用户误以为搜索失效或数据丢失。
+    addResults.value = data.questions || [];
+    addResults.value.filter(isInSelectedBank).forEach((q) => addSelected.value.delete(q.id));
     addTotal.value = data.total || 0;
     addPage.value = page;
     addHasMore.value = !!data.has_more;
     addSelectAll.value = false; // 翻页后按当前页重新判断
+    await nextTick();
+    addResultsScroll.value?.scrollTo({ top: 0 });
   } catch (e) {
     showToast("搜索失败: " + e.message);
   } finally {
-    addLoading.value = false;
+    if (ticket === addSearchTicket) addLoading.value = false;
   }
+}
+
+function resetAddSearch() {
+  addSearchTicket++;
+  addSearch.value = "";
+  addProfession.value = "";
+  addStatus.value = "";
+  addDifficulty.value = "";
+  addOutlineCode.value = "";
+  addResults.value = [];
+  addTotal.value = 0;
+  addHasMore.value = false;
+  addPage.value = 1;
+  addSelected.value.clear();
+  addSelectAll.value = false;
+  addSearched.value = false;
 }
 
 // 总页数（每页 100）
 const addPageCount = computed(() => Math.max(1, Math.ceil(addTotal.value / 100)));
+const addAvailableOnPage = computed(() => addResults.value.filter((q) => !isInSelectedBank(q)).length);
 
 // 翻页（勾选跨页保留：addSelected 为全局集合）
 function goAddPage(p) {
@@ -262,7 +322,7 @@ const addPageWindow = computed(() => {
 async function selectAllAddResults() {
   for (let p = 1; p <= addPageCount.value; p++) {
     await searchAdd(p);
-    addResults.value.forEach((q) => addSelected.value.add(q.id));
+    addResults.value.filter((q) => !isInSelectedBank(q)).forEach((q) => addSelected.value.add(q.id));
   }
   addSelectAll.value = true;
   showToast(`已全选全部 ${addSelected.value.size} 道结果`);
@@ -272,7 +332,7 @@ async function addToBank(q) {
   try {
     await api.addQuestionBank(q.id, selectedBankId.value);
     showToast("已加入题库");
-    addResults.value = addResults.value.filter((x) => x.id !== q.id);
+    q.bank_ids = [...new Set([...(q.bank_ids || []), selectedBankId.value])];
     addSelected.value.delete(q.id);
     loadBankQuestions();
     loadBanks();
@@ -290,7 +350,9 @@ async function addSelectedToBank() {
   try {
     const data = await api.moveQuestionsBankBatch(Array.from(addSelected.value), selectedBankId.value);
     showToast(`已批量加入 ${data.moved} 道题${(data.failed || []).length ? `，失败 ${data.failed.length} 道` : ""}`);
-    addResults.value = addResults.value.filter((x) => !addSelected.value.has(x.id));
+    addResults.value.forEach((q) => {
+      if (addSelected.value.has(q.id)) q.bank_ids = [...new Set([...(q.bank_ids || []), selectedBankId.value])];
+    });
     addSelected.value.clear();
     addSelectAll.value = false;
     loadBankQuestions();
@@ -316,9 +378,9 @@ function bankName(id) {
 
 function statusText(status) {
   const map = {
-    ai_draft: "AI草稿", auto_checked: "已初评", ai_reviewed: "AI已检查",
+    ai_draft: "草稿", auto_checked: "已初评", ai_reviewed: "已检查",
     reviewing: "审核中", conflict: "待决断", revision_required: "需修改",
-    rejected: "已驳回", approved: "已通过", published: "已入库", archived: "已归档",
+    rejected: "已驳回", published: "已通过", archived: "已归档",
   };
   return map[status] || status;
 }
@@ -339,8 +401,8 @@ onMounted(() => {
     <section class="panel">
       <div class="section-heading">
         <span class="dot blue"></span>
-        <h2>题库管理</h2>
-        <small>指定专业范围自动归纳题目，也可手动微调进出</small>
+        <h2>分类子题库管理</h2>
+        <small>按专业范围管理题目</small>
         <button class="primary-button" type="button" @click="showCreate = !showCreate; resetForm()">
           {{ showCreate ? "取消" : "+ 新建题库" }}
         </button>
@@ -381,14 +443,13 @@ onMounted(() => {
             <button class="ghost-button" type="button" @click="addCustomProfession">添加专业</button>
           </div>
           <p class="prof-hint">
-            创建/保存后，系统自动把「未分类且专业匹配」的题目归纳进本库；
-            之后 AI 出题/新建题目也会自动归入第一个匹配的题库。也可点题库卡片上的「重新归纳」手动执行。
+            保存后，符合专业范围的未分类题目将归入本库，题库归属也可手动调整。
           </p>
         </div>
 
         <div class="form-actions">
-          <button class="primary-button" type="button" @click="submitBank">
-            {{ editingId ? "保存修改" : "创建题库" }}
+          <button class="primary-button" type="button" :disabled="savingBank" @click="submitBank">
+            {{ savingBank ? "保存中..." : (editingId ? "保存修改" : "创建题库") }}
           </button>
           <button class="ghost-button" type="button" @click="showCreate = false; resetForm()">取消</button>
         </div>
@@ -406,7 +467,7 @@ onMounted(() => {
             </div>
             <div class="bank-actions">
               <button class="edit-btn" type="button" @click="startEdit(b)">编辑</button>
-              <button class="delete-btn" type="button" @click="deleteBank(b)" title="删除">×</button>
+              <button class="delete-btn" type="button" :disabled="deletingBankId === b.id" @click="deleteBank(b)" title="删除">×</button>
             </div>
           </div>
           <p v-if="b.description" class="bank-desc">{{ b.description }}</p>
@@ -420,7 +481,7 @@ onMounted(() => {
           <div v-if="selectedBankId === b.id" class="bank-detail">
             <div class="detail-head">
               <strong>题库内题目（{{ bankQTotal }} 道）</strong>
-              <input v-model="bankQSearch" placeholder="在库内搜索..." @keyup.enter="bankQPage = 1; loadBankQuestions()" />
+              <input v-model="bankQSearch" placeholder="在本库搜索题干、专业、系统或知识点..." @keyup.enter="bankQPage = 1; loadBankQuestions()" />
               <button class="ghost-button" type="button" @click="bankQPage = 1; loadBankQuestions()">搜索</button>
             </div>
 
@@ -430,8 +491,9 @@ onMounted(() => {
                 <span class="dq-stem" role="button" tabindex="0" title="点击查看题目全部信息" @click="openDetail(q)" @keydown.enter="openDetail(q)">{{ (q.clinical_stem || "").slice(0, 50) }}...</span>
                 <span class="dq-meta">{{ q.profession || "无专业" }}</span>
                 <span class="dq-status">{{ q.status }}</span>
-                <button class="out-btn" type="button" @click="removeFromBank(q)" title="从本库移出（不影响其他库归属）">移出本库</button>
-                <select class="move-select" :value="''" @change="addToOtherBank(q, $event.target.value)" title="同时加入其他题库（多对多）">
+                <button v-if="isClassifiable(q)" class="out-btn" type="button" @click="removeFromBank(q)" title="从本库移出（不影响其他库归属）">移出本库</button>
+                <span v-else class="dq-meta">审核中，分类已锁定</span>
+                <select v-if="isClassifiable(q)" class="move-select" :value="''" @change="addToOtherBank(q, $event.target.value)" title="同时加入其他题库（多对多）">
                   <option value="">加入其他库...</option>
                   <option v-for="other in banks.filter(x => x.id !== b.id)" :key="other.id" :value="other.id">{{ other.name }}</option>
                 </select>
@@ -442,12 +504,12 @@ onMounted(() => {
               </button>
             </div>
 
-            <!-- 手动添加题目（搜索全部题目，含已审核等所有状态，可单个/批量加入） -->
+            <!-- 手动添加题目（仅分类待审核层题目） -->
             <div class="add-section">
               <strong>手动添加题目到本库</strong>
-              <p class="add-hint">在总题库中搜索（含已审核/已入库等所有状态），勾选后单个或批量加入本库</p>
+              <p class="add-hint">搜索题干、选项、解析、专业、系统、知识点或大纲代码；已在本库的题目仍会显示并标记</p>
               <div class="add-row">
-                <input v-model="addSearch" placeholder="模糊搜索：题干/答案/ID 关键词" @keyup.enter="searchAdd" />
+                <input v-model="addSearch" placeholder="搜索题干、选项、解析、专业、系统、知识点或ID" @keyup.enter="searchAdd" />
                 <input v-model="addOutlineCode" placeholder="大纲代码（如 110.4.1）" @keyup.enter="searchAdd" />
                 <select v-model="addProfession">
                   <option value="">全部专业</option>
@@ -455,32 +517,26 @@ onMounted(() => {
                 </select>
                 <select v-model="addStatus">
                   <option value="">全部状态</option>
-                  <option value="ai_draft">AI草稿</option>
+                  <option value="ai_draft">草稿</option>
                   <option value="auto_checked">已初评</option>
-                  <option value="ai_reviewed">AI已检查</option>
-                  <option value="reviewing">审核中</option>
-                  <option value="conflict">待决断</option>
-                  <option value="approved">已通过</option>
-                  <option value="rejected">已驳回</option>
-                  <option value="revision_required">需修改</option>
-                  <option value="published">已入库</option>
+                  <option value="ai_reviewed">已检查</option>
                 </select>
                 <select v-model="addDifficulty">
                   <option value="">全部难度</option>
-                  <option value="easy">简单</option>
-                  <option value="medium">中等</option>
-                  <option value="hard">困难</option>
+                  <option value="easy">简单（≤ 0.60）</option>
+                  <option value="medium">中等（0.61–0.80）</option>
+                  <option value="hard">困难（&gt; 0.80）</option>
                 </select>
                 <button class="ghost-button" type="button" :disabled="addLoading" @click="searchAdd()">
                   {{ addLoading ? "搜索中..." : "搜索" }}
                 </button>
-                <button class="ghost-button" type="button" @click="addSearch=''; addProfession=''; addStatus=''; addDifficulty=''; addOutlineCode=''; addResults=[]; addTotal=0; addHasMore=false">重置</button>
+                <button class="ghost-button" type="button" @click="resetAddSearch">重置</button>
               </div>
               <div v-if="addResults.length" class="add-toolbar">
-                <span class="add-total">共 {{ addTotal }} 道，本页 {{ addResults.length }} 道</span>
+                <span class="add-total">共 {{ addTotal }} 道，本页可加入 {{ addAvailableOnPage }} 道</span>
                 <label class="add-select-all">
-                  <input type="checkbox" :checked="addSelectAll" @change="toggleAddSelectAll" />
-                  <span>全选本页（{{ addResults.length }} 道）</span>
+                  <input type="checkbox" :checked="addSelectAll" :disabled="addAvailableOnPage === 0" @change="toggleAddSelectAll" />
+                  <span>全选本页（{{ addAvailableOnPage }} 道）</span>
                 </label>
                 <button class="ghost-button" type="button" @click="selectAllAddResults" :disabled="addLoading">
                   {{ addLoading ? "加载中..." : "全选全部结果" }}
@@ -490,16 +546,18 @@ onMounted(() => {
                   批量加入本库（{{ addSelected.size }}）
                 </button>
               </div>
-              <div v-if="addResults.length" class="add-results">
-                <div v-for="q in addResults" :key="q.id" class="detail-item" :class="{ checked: addSelected.has(q.id) }">
-                  <input type="checkbox" :checked="addSelected.has(q.id)" @change="toggleAddSelect(q.id)" class="add-checkbox" />
+              <div v-if="addResults.length" :ref="setAddResultsScroll" class="add-results">
+                <div v-for="q in addResults" :key="q.id" class="detail-item" :class="{ checked: addSelected.has(q.id), 'already-in-bank': isInSelectedBank(q) }">
+                  <input type="checkbox" :checked="addSelected.has(q.id)" :disabled="isInSelectedBank(q)" @change="toggleAddSelect(q.id)" class="add-checkbox" />
                   <span class="dq-stem" role="button" tabindex="0" title="点击查看题目全部信息" @click="openDetail(q)" @keydown.enter="openDetail(q)">{{ (q.clinical_stem || "").slice(0, 50) }}...</span>
                   <span class="dq-meta">{{ q.profession || "无专业" }} ｜ {{ statusText(q.status) }} ｜ 所属：{{ bankNames(q.bank_ids) }}</span>
-                  <button class="in-btn" type="button" @click="addToBank(q)">加入</button>
+                  <button v-if="!isInSelectedBank(q)" class="in-btn" type="button" @click="addToBank(q)">加入</button>
+                  <span v-else class="already-badge">已在本库</span>
                 </div>
               </div>
-              <div v-else-if="addTotal > 0 && !addLoading" class="empty">本页无匹配（或题目均已在本库）</div>
-              <div v-else-if="addTotal === 0 && !addLoading" class="empty">无匹配结果</div>
+              <div v-else-if="addSearched && addTotal > 0 && !addLoading" class="empty">本页无可分类题目</div>
+              <div v-else-if="addSearched && addTotal === 0 && !addLoading" class="empty">无匹配结果</div>
+              <div v-else-if="!addSearched" class="empty">输入条件搜索，或直接点击“搜索”浏览全部可分类题目</div>
 
               <!-- 左右翻页 -->
               <div v-if="addPageCount > 1" class="pagination">
@@ -520,8 +578,7 @@ onMounted(() => {
           </div>
         </div>
         <div v-if="!banks.length" class="empty">
-          暂无题库。创建题库时指定专业范围（如「呼吸」「消化」），系统会自动把匹配的题目归纳进库；
-          也可以在题库详情里手动把题目移入/移出。
+          暂无题库，请先新建题库并设置专业范围。
         </div>
       </div>
     </section>
@@ -966,6 +1023,27 @@ onMounted(() => {
   border-color: #1385f8;
 }
 
+.detail-item.already-in-bank {
+  background: #f6f8fb;
+  border-color: #e1e7ef;
+}
+
+.detail-item.already-in-bank .dq-stem,
+.detail-item.already-in-bank .dq-meta {
+  color: #7c8798;
+}
+
+.already-badge {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: #e9eef5;
+  color: #5d697a;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .add-row {
   display: flex;
   gap: 8px;
@@ -984,7 +1062,12 @@ onMounted(() => {
 .add-results {
   margin-top: 8px;
   display: grid;
+  max-height: min(42vh, 380px);
   gap: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
 }
 
 .empty {

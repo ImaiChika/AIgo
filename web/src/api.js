@@ -22,7 +22,7 @@ async function request(path, options = {}) {
   }
 
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `请求失败: ${res.status}`);
+  if (!res.ok) { const error = new Error(data.error || `请求失败: ${res.status}`); error.status = res.status; throw error; }
   return data;
 }
 
@@ -61,8 +61,15 @@ export const api = {
     request(`/roles/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteRole: (id) => request(`/roles/${id}`, { method: "DELETE" }),
 
+  // 系统级 AI 服务配置（仅超级管理员，API Key 由后端脱敏返回）
+  listAIProviders: () => request("/system/ai-providers"),
+  createAIProvider: (data) => request("/system/ai-providers", { method: "POST", body: JSON.stringify(data) }),
+  updateAIProvider: (id, data) => request(`/system/ai-providers/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(data) }),
+  activateAIProvider: (id) => request(`/system/ai-providers/${encodeURIComponent(id)}/activate`, { method: "POST" }),
+  deleteAIProvider: (id) => request(`/system/ai-providers/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
   // 题库
-  listBanks: () => request("/banks"),
+  listBanks: (includeStats = true) => request(`/banks?include_stats=${includeStats ? "true" : "false"}`),
   createBank: (data) =>
     request("/banks", { method: "POST", body: JSON.stringify(data) }),
   updateBank: (id, data) =>
@@ -90,9 +97,10 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(params),
     }),
+  deleteUser: (id) => request(`/users/${id}`, { method: "DELETE" }),
 
   // 统计
-  stats: () => request("/stats"),
+  stats: (scope = "") => request(`/stats${scope ? `?scope=${encodeURIComponent(scope)}` : ""}`),
 
   // 操作日志
   auditLogs: (limit = 100) => request(`/audit-logs?limit=${limit}`),
@@ -100,14 +108,27 @@ export const api = {
   auditLogsByActor: (actor) => request(`/audit-logs/actor/${actor}`),
 
   // 题目
-  listQuestions: (page = 1, pageSize = 100, bankId = "") => {
+  // tier: 题库分层（formal=正式题库 / working=待审核题库 / eliminated=淘汰题库）
+  listQuestions: (page = 1, pageSize = 100, bankId = "", tier = "", scope = "") => {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
     if (bankId) params.set("bank_id", bankId);
+    if (tier) params.set("tier", tier);
+    if (scope) params.set("scope", scope);
     return request(`/questions?${params}`);
   },
   getQuestion: (id) => request(`/questions/${id}`),
-  createQuestion: (data) =>
-    request("/questions", { method: "POST", body: JSON.stringify(data) }),
+  listQuestionVersions: (id) => request(`/questions/${id}/versions`),
+  restoreQuestionVersion: (id, version, reason = "") =>
+    request(`/questions/${id}/restore`, {
+      method: "POST",
+      body: JSON.stringify({ version, reason }),
+    }),
+  // 管理员撤回已入库题目至 AI 检查通过状态
+  unpublishQuestion: (id, reason = "") =>
+    request(`/questions/${id}/unpublish`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
   updateQuestion: (id, data) =>
     request(`/questions/${id}`, {
       method: "PUT",
@@ -116,7 +137,7 @@ export const api = {
   deleteQuestion: (id) => request(`/questions/${id}`, { method: "DELETE" }),
   publishQuestion: (id) =>
     request(`/questions/${id}/publish`, { method: "POST" }),
-  searchQuestions: (q, status = "", page = 1, pageSize = 100, bankId = "", professions = [], difficulty = "", outlineCode = "") => {
+  searchQuestions: (q, status = "", page = 1, pageSize = 100, bankId = "", professions = [], difficulty = "", outlineCode = "", tier = "", classifiable = false, scope = "") => {
     const params = new URLSearchParams();
     if (q) params.set("q", q);
     if (status) params.set("status", status);
@@ -124,6 +145,9 @@ export const api = {
     if (professions.length) params.set("profession", professions.join(","));
     if (difficulty) params.set("difficulty", difficulty);
     if (outlineCode) params.set("outline_code", outlineCode);
+    if (tier) params.set("tier", tier);
+    if (classifiable) params.set("classifiable", "true");
+    if (scope) params.set("scope", scope);
     params.set("page", String(page));
     params.set("page_size", String(pageSize));
     return request(`/questions/search?${params}`);
@@ -146,6 +170,16 @@ export const api = {
       body: JSON.stringify(params),
     }),
 
+  // 个人题目分享至全局题库（每题只能申请一次）
+  createQuestionShare: (questionId) =>
+    request(`/questions/${questionId}/share`, { method: "POST" }),
+  listQuestionShares: (scope = "mine") => request(`/question-shares?scope=${encodeURIComponent(scope)}`),
+  reviewQuestionShare: (id, status, note = "") =>
+    request(`/question-shares/${id}/review`, {
+      method: "POST",
+      body: JSON.stringify({ status, note }),
+    }),
+
   // 知识点
   listKP: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
@@ -159,39 +193,48 @@ export const api = {
     });
     return request(`/knowledge-points/search?${qs}`);
   },
-  kpMeta: () => request("/knowledge-points/meta"),
+  kpMeta: (versionId = "") => request(`/knowledge-points/meta?version_id=${encodeURIComponent(versionId)}`),
+  kpTree: (versionId) => request(`/knowledge-points/tree?version_id=${encodeURIComponent(versionId)}`),
+  kpVersions: () => request("/knowledge-versions"),
+  deleteKPVersion: (id) => request(`/knowledge-versions/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  createKPVersion: (data) => request("/knowledge-versions", { method: "POST", body: JSON.stringify(data) }),
+  publishKPVersion: (id) => request(`/knowledge-versions/${encodeURIComponent(id)}/publish`, { method: "POST" }),
+  updateKP: (id, data) => request(`/knowledge-points/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(data) }),
   createKP: (data) =>
     request("/knowledge-points", {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  deleteKP: (id) => request(`/knowledge-points/${id}`, { method: "DELETE" }),
-  importKP: async (file) => {
+  deleteKP: (id) => request(`/knowledge-points/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  importKP: async (files, versionId, mode = "merge") => {
     const form = new FormData();
-    form.append("file", file);
+    for (const file of (Array.isArray(files) ? files : [files])) form.append("files", file);
+    form.append("version_id", versionId);
+    form.append("mode", mode);
     return request("/knowledge-points/import", {
       method: "POST",
       body: form,
     });
   },
-
-  // 图片
-  imagePrompt: (questionId) =>
-    request("/images/prompt", {
+  exportKnowledgePoints: async (versionId) => {
+    const token = getToken();
+    const res = await fetch(`${BASE}/knowledge-points/export`, {
       method: "POST",
-      body: JSON.stringify({ question_id: questionId }),
-    }),
-  imageGenerate: (questionId, count = 4) =>
-    request("/images/generate", {
-      method: "POST",
-      body: JSON.stringify({ question_id: questionId, count }),
-    }),
-  listImages: (questionId) => request(`/images/${questionId}`),
-  imageReview: (params) =>
-    request("/images/review", {
-      method: "POST",
-      body: JSON.stringify(params),
-    }),
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ version_id: versionId }),
+    });
+    if (!res.ok) {
+      let msg = `导出失败: ${res.status}`;
+      try {
+        const data = await res.json();
+        if (data.error) msg = data.error;
+      } catch (e) {
+        /* ignore */
+      }
+      throw new Error(msg);
+    }
+    return { blob: await res.blob(), filename: res.headers.get("Content-Disposition")?.match(/filename="?([^";]+)"?/)?.[1] || "知识点导出.xlsx" };
+  },
 
   // 导出
   exportXlsx: (params) =>
@@ -224,6 +267,7 @@ export const api = {
   },
 
   // 批量推理
+  batchCapabilities: () => request("/batch/capabilities"),
   batchSubmit: (params) =>
     request("/batch/submit", {
       method: "POST",
@@ -246,6 +290,26 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ question_ids: questionIds }),
     }),
+  // 加入后台检查队列，立即返回（批量补查用）
+  aiCheckAsync: (questionIds) =>
+    request("/ai-check/async", {
+      method: "POST",
+      body: JSON.stringify({ question_ids: questionIds }),
+    }),
+  // 题目粒度检查进度（登录即可，逐题校验题库范围）
+  aiCheckProgress: (questionIds) =>
+    request("/ai-check/progress", {
+      method: "POST",
+      body: JSON.stringify({ question_ids: questionIds }),
+    }),
+  // 检查概况统计（质量检查权限）
+  aiCheckSummary: () => request("/ai-check/summary"),
+  // 强制通过 AI 检查（质量检查权限，写审计留痕）
+  aiCheckOverride: (questionId, reason = "") =>
+    request("/ai-check/override", {
+      method: "POST",
+      body: JSON.stringify({ question_id: questionId, reason }),
+    }),
   aiCheckResult: (questionId) =>
     request(`/ai-check/result/${questionId}`),
   aiCheckResults: (limit = 50) =>
@@ -266,10 +330,10 @@ export const api = {
   deleteExpert: (id) => request(`/experts/${id}`, { method: "DELETE" }),
 
   // 审核
-  submitReview: (questionId, flowId) =>
+  submitReview: (questionId, flowId, bankId = "") =>
     request("/review/submit", {
       method: "POST",
-      body: JSON.stringify({ question_id: questionId, flow_id: flowId }),
+      body: JSON.stringify({ question_id: questionId, flow_id: flowId, bank_id: bankId }),
     }),
   submitBankReview: (bankId, flowId) =>
     request("/review/submit-bank", {
@@ -286,6 +350,8 @@ export const api = {
   listReviewers: () => request("/review/reviewers"),
   myTasks: () => request("/review/my-tasks"),
   myDecisions: () => request("/review/my-decisions"),
+  // 待我修改（退回修改的题目；提交修改=保存回库，送审由管理员负责）
+  myRevisions: () => request("/review/my-revisions"),
   reviewAction: (params) =>
     request("/review/action", {
       method: "POST",

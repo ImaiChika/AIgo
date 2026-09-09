@@ -1,5 +1,13 @@
 -- AIgo 数据库 Schema
 
+-- 版本化迁移记录（由迁移器在执行版本 1 前创建；此处用于完整描述基线）
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version BIGINT PRIMARY KEY,
+    name TEXT NOT NULL,
+    checksum TEXT NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- 知识点（2024考试大纲）
 CREATE TABLE IF NOT EXISTS knowledge_points (
     id TEXT PRIMARY KEY,           -- 大纲代码，如 110.2.6.2.1.1
@@ -31,16 +39,23 @@ CREATE TABLE IF NOT EXISTS questions (
     profession TEXT NOT NULL DEFAULT '',         -- 专业
     system_name TEXT NOT NULL DEFAULT '',        -- 系统
     status TEXT NOT NULL DEFAULT 'ai_draft',
+    CONSTRAINT questions_no_legacy_approved CHECK (status <> 'approved'),
     version INT NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 题目-题库多对多关系（一道题可属于多个题库）
-CREATE TABLE IF NOT EXISTS question_bank_members (
+-- 题目内容版本快照（不可变）。状态和题库归属可变化，但内容变化必须生成新版本。
+CREATE TABLE IF NOT EXISTS question_versions (
+	 id TEXT PRIMARY KEY,
     question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
-    bank_id TEXT NOT NULL REFERENCES question_banks(id) ON DELETE CASCADE,
-    PRIMARY KEY (question_id, bank_id)
+    version INT NOT NULL,
+    snapshot JSONB NOT NULL,
+    actor TEXT NOT NULL DEFAULT 'system',
+    change_type TEXT NOT NULL DEFAULT 'create',
+    change_note TEXT NOT NULL DEFAULT '',
+	 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	 UNIQUE (question_id, version)
 );
 
 -- 专家
@@ -65,6 +80,14 @@ CREATE TABLE IF NOT EXISTS question_banks (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- 题目-题库多对多关系（一道题可属于多个题库）
+-- 必须放在 questions 与 question_banks 之后，确保全新数据库可一次完成建表。
+CREATE TABLE IF NOT EXISTS question_bank_members (
+    question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+    bank_id TEXT NOT NULL REFERENCES question_banks(id) ON DELETE CASCADE,
+    PRIMARY KEY (question_id, bank_id)
+);
+
 -- 审核流程配置
 CREATE TABLE IF NOT EXISTS review_flows (
     id TEXT PRIMARY KEY,
@@ -85,10 +108,12 @@ CREATE TABLE IF NOT EXISTS review_tasks (
     flow_id TEXT NOT NULL REFERENCES review_flows(id),
     current_round INT NOT NULL DEFAULT 1,
     status TEXT NOT NULL DEFAULT 'reviewing',
+    CONSTRAINT review_tasks_no_legacy_approved CHECK (status <> 'approved'),
     assigned_to TEXT[] DEFAULT '{}',
     final_reviewer_ids TEXT[] DEFAULT '{}',
     final_decision JSONB DEFAULT 'null',
     question_prev_status TEXT NOT NULL DEFAULT '',   -- 提交前题目状态（撤销时恢复用）
+    question_version INT NOT NULL DEFAULT 1,         -- 本任务实际审核的题目内容版本
     round_results JSONB DEFAULT '[]',
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -181,7 +206,10 @@ CREATE TABLE IF NOT EXISTS roles (
 
 -- 批量任务记录
 CREATE TABLE IF NOT EXISTS batch_jobs (
-    id TEXT PRIMARY KEY,              -- DashScope job_id
+    id TEXT PRIMARY KEY,              -- provider job_id（API 层使用 backend:id 稳定引用）
+    backend TEXT NOT NULL DEFAULT 'dashscope',
+    backend_profile TEXT NOT NULL DEFAULT 'dashscope-default',
+    model TEXT NOT NULL DEFAULT '',    -- 提交时固化，禁止用当前配置冒充历史模型
     job_name TEXT NOT NULL DEFAULT '', -- 自定义任务名称
     status TEXT NOT NULL DEFAULT 'pending', -- 状态
     total_count INT NOT NULL DEFAULT 0,
@@ -218,6 +246,7 @@ CREATE INDEX IF NOT EXISTS idx_bank_members_question ON question_bank_members(qu
 CREATE INDEX IF NOT EXISTS idx_kp_subject ON knowledge_points(subject);
 CREATE INDEX IF NOT EXISTS idx_kp_topic ON knowledge_points USING gin(to_tsvector('simple', topic));
 CREATE INDEX IF NOT EXISTS idx_review_tasks_question ON review_tasks(question_id);
+CREATE INDEX IF NOT EXISTS idx_question_versions_question ON question_versions(question_id, version DESC);
 CREATE INDEX IF NOT EXISTS idx_review_records_task ON review_records(task_id);
 CREATE INDEX IF NOT EXISTS idx_audit_question ON audit_logs(question_id);
 CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_logs(actor);

@@ -3,6 +3,7 @@ package generator
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"aigo/internal/domain"
@@ -12,7 +13,7 @@ import (
 // Service 题目生成服务，负责调用 LLM 生成 A2 型试题。
 type Service struct {
 	client llm.Client // LLM 客户端（千问）
-	Brief  bool       // 精简模式：限制解析长度以节省 token
+	Brief  bool       // 兼容旧配置；专家规范下不再降低说明质量
 }
 
 // NewService 创建生成服务实例。
@@ -39,7 +40,7 @@ func (s *Service) Generate(ctx context.Context, req domain.GenerationRequest) ([
 	raw, err := s.client.Complete(ctx, []llm.Message{
 		{Role: llm.RoleSystem, Content: getSystemPrompt(s.Brief)},
 		{Role: llm.RoleUser, Content: prompt},
-	}, llm.GenerateOptions{Temperature: 0.4, MaxTokens: 2000})
+	}, llm.GenerateOptions{Temperature: 0.4})
 	if err != nil {
 		return nil, err
 	}
@@ -52,6 +53,7 @@ func (s *Service) Generate(ctx context.Context, req domain.GenerationRequest) ([
 
 	// 转换为领域对象，自动从知识点填充元数据
 	var questions []domain.A2Question
+	var rejected []string
 	for _, item := range items {
 		// 无大纲代码时用知识点主题做 ID 前缀，避免出现 "q--xxx" 空段
 		idPrefix := SanitizeIDPrefix(kp.OutlineCode)
@@ -61,12 +63,13 @@ func (s *Service) Generate(ctx context.Context, req domain.GenerationRequest) ([
 		if idPrefix == "" {
 			idPrefix = "custom"
 		}
+		profession, system := QuestionMetadataForKnowledgePoint(kp, req.Subject)
 		q := domain.A2Question{
 			ID:              fmt.Sprintf("q-%s-%d", idPrefix, time.Now().UnixNano()),
-			OutlineCode:     kp.OutlineCode,  // 大纲代码
-			Profession:      kp.Subject,       // 专业
-			System:          kp.Category,      // 系统（基础医学/临床综合）
-			Difficulty:      req.Difficulty,    // 默认使用请求的难度
+			OutlineCode:     kp.OutlineCode, // 大纲代码
+			Profession:      profession,     // 专业按请求或大纲系统映射填写
+			System:          system,         // 系统按考试大纲名称填写
+			Difficulty:      req.Difficulty, // 默认使用请求的难度
 			KnowledgePoints: []domain.KnowledgePoint{kp},
 			Status:          domain.StatusAIDraft,
 			Version:         1,
@@ -110,7 +113,15 @@ func (s *Service) Generate(ctx context.Context, req domain.GenerationRequest) ([
 			}
 		}
 
+		q.NormalizeGeneratedA2()
+		if err := q.ValidateGeneratedA2(); err != nil {
+			rejected = append(rejected, err.Error())
+			continue
+		}
 		questions = append(questions, q)
+	}
+	if len(questions) == 0 && len(rejected) > 0 {
+		return nil, fmt.Errorf("AI生成结果未通过A2专家规范: %s", strings.Join(rejected, "；"))
 	}
 	return questions, nil
 }

@@ -9,7 +9,7 @@
         {
           "round_number": 1,
           "name": "专家初审",
-          "expert_ids": ["user-1783588118145188000", "user-1784048905516098000"],
+          "expert_ids": [],
           "required_count": 1,
           "can_modify": true,
           "pass_condition": "任意1位专家通过即可",
@@ -18,7 +18,7 @@
         {
           "round_number": 2,
           "name": "终审确认",
-          "expert_ids": ["user-1783588118145188000"],
+          "expert_ids": [],
           "required_count": 1,
           "can_modify": false,
           "pass_condition": "确认入库",

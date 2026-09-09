@@ -1,12 +1,16 @@
 <script setup>
 import { ref, onMounted, computed } from "vue";
 import { api } from "../api.js";
+import { hasPerm } from "../auth.js";
+import ReviewCommentCard from "../components/ReviewCommentCard.vue";
+import AICheckScoreButton from "../components/AICheckScoreButton.vue";
 
 const toast = ref("");
 const items = ref([]);
 const stats = ref(null);
 const total = ref(0);
 const hasMore = ref(false);
+let resultSearchTicket = 0;
 const loading = ref(false);
 
 const filterStatus = ref("");
@@ -24,8 +28,7 @@ const statusMeta = {
   conflict: { label: "待决断", cls: "s-conflict" },
   revision_required: { label: "需修改", cls: "s-revision" },
   rejected: { label: "已驳回", cls: "s-rejected" },
-  approved: { label: "已通过", cls: "s-approved" },
-  published: { label: "已入库", cls: "s-published" },
+  published: { label: "已通过", cls: "s-published" },
 };
 
 function statusText(s) {
@@ -45,6 +48,7 @@ function showToast(msg) {
 }
 
 async function loadResults(resetPage = true) {
+  const ticket = ++resultSearchTicket;
   loading.value = true;
   if (resetPage) page.value = 1;
   try {
@@ -54,7 +58,9 @@ async function loadResults(resetPage = true) {
       q: searchQuery.value,
       page: page.value,
       page_size: pageSize,
+      scope: hasPerm("question:view_global") ? "global" : "personal",
     });
+    if (ticket !== resultSearchTicket) return;
     items.value = page.value === 1 ? (data.items || []) : items.value.concat(data.items || []);
     total.value = data.total || 0;
     hasMore.value = !!data.has_more;
@@ -62,7 +68,7 @@ async function loadResults(resetPage = true) {
   } catch (e) {
     showToast("加载失败: " + e.message);
   } finally {
-    loading.value = false;
+    if (ticket === resultSearchTicket) loading.value = false;
   }
 }
 
@@ -90,7 +96,7 @@ function setStatusFilter(s) {
 
 async function loadBanks() {
   try {
-    const data = await api.listBanks();
+    const data = await api.listBanks(false);
     banks.value = data.banks || [];
   } catch (e) {
     console.error(e);
@@ -134,7 +140,7 @@ function difficultyText(d) {
   return d || "-";
 }
 
-// 专家评语（审核记录按轮次分组）
+// 专家评语（审核记录按轮次分组，跨提交批次合并展示并标注批次）
 function recordsByRound(item) {
   const map = new Map();
   for (const r of item.records || []) {
@@ -154,13 +160,6 @@ function conclusionText(c) {
     final_revision_required: "决断：退回修改",
   };
   return map[c] || c;
-}
-
-function conclusionClass(c) {
-  if (c.startsWith("final_")) return "c-final";
-  if (c === "approved") return "c-approved";
-  if (c === "rejected") return "c-rejected";
-  return "c-revision";
 }
 
 onMounted(() => {
@@ -195,11 +194,8 @@ onMounted(() => {
         <button type="button" class="stat-card s-rejected" :class="{ active: filterStatus === 'rejected' }" @click="setStatusFilter('rejected')">
           <strong>{{ stats.rejected }}</strong><span>已驳回</span>
         </button>
-        <button type="button" class="stat-card s-approved" :class="{ active: filterStatus === 'approved' }" @click="setStatusFilter('approved')">
-          <strong>{{ stats.approved }}</strong><span>已通过</span>
-        </button>
         <button type="button" class="stat-card s-published" :class="{ active: filterStatus === 'published' }" @click="setStatusFilter('published')">
-          <strong>{{ stats.published }}</strong><span>已入库</span>
+          <strong>{{ stats.published }}</strong><span>已通过</span>
         </button>
       </div>
     </section>
@@ -216,7 +212,7 @@ onMounted(() => {
       </div>
 
       <div class="filter-row">
-        <input v-model="searchQuery" placeholder="搜索ID、题干、专业..." @keyup.enter="doSearch" />
+        <input v-model="searchQuery" placeholder="搜索题干、选项、解析、专业、系统、知识点或ID..." @keyup.enter="doSearch" />
         <select v-model="filterStatus" @change="doSearch">
           <option value="">全部状态</option>
           <option value="pending">未提交审核</option>
@@ -224,8 +220,7 @@ onMounted(() => {
           <option value="conflict">待决断</option>
           <option value="revision_required">需修改</option>
           <option value="rejected">已驳回</option>
-          <option value="approved">已通过</option>
-          <option value="published">已入库</option>
+          <option value="published">已通过</option>
         </select>
         <select v-model="filterBank" @change="doSearch">
           <option value="">全部题库</option>
@@ -249,6 +244,7 @@ onMounted(() => {
               </span>
             </div>
             <span class="r-status" :class="statusClass(item.final_status)">{{ statusText(item.final_status) }}</span>
+            <AICheckScoreButton :question-id="item.question.id" />
             <span class="r-expand">{{ expandedId === item.question.id ? "收起 ▲" : "查看评语 ▼" }}</span>
           </div>
 
@@ -291,6 +287,7 @@ onMounted(() => {
             <div v-if="item.task" class="task-line">
               审核任务：第 {{ item.task.current_round }} 轮 / 共
               {{ item.task.round_results?.length || 1 }} 轮 ｜ 流程：{{ item.task.flow_id }} ｜
+              <template v-if="item.task.submission_bank_id">提交分类：{{ bankName(item.task.submission_bank_id) }} ｜</template>
               审核人：{{ (item.task.assigned_to || []).map(expertName).join("、") || "自动匹配" }}
               <span v-if="item.task.final_decision" class="final-decision">
                 ｜ 最终决断：{{ expertName(item.task.final_decision.expert_id) }} → {{ conclusionText("final_" + item.task.final_decision.conclusion) }}
@@ -301,12 +298,15 @@ onMounted(() => {
 
             <div v-if="(item.records || []).length" class="rounds">
               <div v-for="[round, recs] in recordsByRound(item)" :key="round" class="round-block">
-                <div class="round-title">第 {{ round }} 轮（{{ recs.length }} 条意见）</div>
-                <div v-for="rec in recs" :key="rec.id" class="record-item">
-                  <span class="rec-expert">{{ expertName(rec.expert_id) }}</span>
-                  <span class="rec-conclusion" :class="conclusionClass(rec.review_status)">{{ conclusionText(rec.review_status) }}</span>
-                  <span class="rec-opinion">{{ rec.opinion || "（无评语）" }}</span>
-                  <span class="rec-time">{{ new Date(rec.created_at).toLocaleString() }}</span>
+                <div class="round-title">第 {{ round }} 轮（{{ recs.length }} 条评语）</div>
+                <div class="record-grid">
+                  <ReviewCommentCard
+                    v-for="rec in recs"
+                    :key="rec.id"
+                    :record="rec"
+                    :fallback-name="expertName(rec.expert_id)"
+                    compact
+                  />
                 </div>
               </div>
             </div>
@@ -333,7 +333,7 @@ onMounted(() => {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 10px;
 }
 
@@ -367,11 +367,10 @@ onMounted(() => {
 
 .s-pending strong { color: #6e7b8f; }
 .s-reviewing strong { color: #0571dc; }
-.s-conflict strong { color: #b93a7c; }
+.s-conflict strong { color: #3a4658; }
 .s-revision strong { color: #c07b22; }
 .s-rejected strong { color: #c54858; }
-.s-approved strong { color: #087c55; }
-.s-published strong { color: #1385f8; }
+.s-published strong { color: #087c55; }
 
 .filter-row {
   display: flex;
@@ -451,11 +450,10 @@ onMounted(() => {
 
 .s-pending { background: #f0f3f7; color: #6e7b8f; }
 .s-reviewing { background: #eff8ff; color: #0571dc; }
-.s-conflict { background: #fdf0f8; color: #b93a7c; }
+.s-conflict { background: #eef2f7; color: #3a4658; }
 .s-revision { background: #fdf2e3; color: #c07b22; }
 .s-rejected { background: #fff0f0; color: #c54858; }
-.s-approved { background: #f0fff8; color: #087c55; }
-.s-published { background: #eff8ff; color: #1385f8; }
+.s-published { background: #f0fff8; color: #087c55; }
 
 .r-expand {
   font-size: 12px;
@@ -587,7 +585,7 @@ onMounted(() => {
 }
 
 .final-decision {
-  color: #b93a7c;
+  color: #3a4658;
   font-weight: 600;
 }
 
@@ -610,43 +608,11 @@ onMounted(() => {
   margin-bottom: 6px;
 }
 
-.record-item {
-  display: flex;
-  gap: 10px;
-  align-items: baseline;
-  padding: 4px 0;
-  font-size: 12px;
-  border-bottom: 1px dashed #f0f3f7;
-}
-
-.record-item:last-child {
-  border-bottom: 0;
-}
-
-.rec-expert {
-  color: #172033;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.rec-conclusion {
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.c-approved { color: #087c55; }
-.c-rejected { color: #c54858; }
-.c-revision { color: #c07b22; }
-.c-final { color: #b93a7c; }
-
-.rec-opinion {
-  flex: 1;
-  color: #3a4658;
-}
-
-.rec-time {
-  color: #9aa5b4;
-  white-space: nowrap;
+.record-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 8px;
+  align-items: start;
 }
 
 .load-more-btn {

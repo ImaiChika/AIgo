@@ -1,0 +1,210 @@
+name: ${COMPOSE_PROJECT_NAME:-aigo}
+
+x-aigo-environment: &aigo-environment
+  AIGO_ENV_FILE: "-"
+  AIGO_HTTP_ADDR: 0.0.0.0:8080
+  AIGO_WEB_DIST_DIR: /app/web
+  AIGO_REGISTER_ENABLED: ${AIGO_REGISTER_ENABLED:-1}
+  AIGO_TRUST_PROXY_HEADERS: "true"
+  AIGO_DB_HOST: postgres
+  AIGO_DB_PORT: "5432"
+  AIGO_DB_USER: ${AIGO_DB_USER:-aigo}
+  AIGO_DB_NAME: ${AIGO_DB_NAME:-aigo}
+  AIGO_DB_SSLMODE: disable
+  AIGO_DB_PASSWORD_FILE: /run/secrets/postgres_password
+  JWT_SECRET_FILE: /run/secrets/jwt_secret
+  AIGO_ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+  # 实时 AI 配置上线后以数据库中的超级管理员配置为准；以下变量仅用于
+  # 首次启动兼容导入/没有数据库配置时的回退，不再作为容器启动硬依赖。
+  QWEN_DEPLOYMENT: ${QWEN_DEPLOYMENT:-cloud}
+  QWEN_BASE_URL: ${QWEN_BASE_URL:-}
+  QWEN_MODEL: ${QWEN_MODEL:-}
+  QWEN_ENABLE_THINKING: ${QWEN_ENABLE_THINKING:-auto}
+  QWEN_BATCH_BACKEND: ${QWEN_BATCH_BACKEND:-disabled}
+  TZ: ${TZ:-Asia/Shanghai}
+
+x-aigo-secrets: &aigo-secrets
+  - postgres_password
+  - jwt_secret
+  - admin_password
+
+x-json-logging: &json-logging
+  driver: json-file
+  options:
+    max-size: ${AIGO_LOG_MAX_SIZE:-20m}
+    max-file: ${AIGO_LOG_MAX_FILES:-5}
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${AIGO_DB_NAME:-aigo}
+      POSTGRES_USER: ${AIGO_DB_USER:-aigo}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      TZ: ${TZ:-Asia/Shanghai}
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    shm_size: 256mb
+    stop_grace_period: 30s
+    networks:
+      - data
+    logging: *json-logging
+
+  migrate:
+    image: ${AIGO_IMAGE:-aigo:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    command: ["migrate"]
+    restart: "no"
+    environment: *aigo-environment
+    secrets: *aigo-secrets
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - data
+    logging: *json-logging
+
+  app:
+    image: ${AIGO_IMAGE:-aigo:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    command: ["serve"]
+    restart: unless-stopped
+    init: true
+    environment: *aigo-environment
+    secrets: *aigo-secrets
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - app_output:/app/output
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: ${AIGO_APP_PIDS_LIMIT:-256}
+    mem_limit: ${AIGO_APP_MEMORY_LIMIT:-1g}
+    cpus: ${AIGO_APP_CPU_LIMIT:-2.0}
+    stop_grace_period: 30s
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    networks:
+      - edge
+      - data
+    logging: *json-logging
+
+  caddy:
+    image: ${CADDY_IMAGE:-caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648}
+    restart: unless-stopped
+    environment:
+      AIGO_SITE_ADDRESS: ${AIGO_SITE_ADDRESS:-http://localhost}
+    ports:
+      - "${AIGO_HTTP_PORT:-80}:80"
+      - "${AIGO_HTTPS_PORT:-443}:443"
+      - "${AIGO_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    networks:
+      - edge
+    logging: *json-logging
+
+  backup:
+    image: ${AIGO_BACKUP_IMAGE:-aigo-backup:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backup
+    command: ["daemon"]
+    restart: unless-stopped
+    environment:
+      AIGO_DB_HOST: postgres
+      AIGO_DB_PORT: "5432"
+      AIGO_DB_USER: ${AIGO_DB_USER:-aigo}
+      AIGO_DB_NAME: ${AIGO_DB_NAME:-aigo}
+      AIGO_DB_PASSWORD_FILE: /run/secrets/postgres_password
+      AIGO_APPLICATION_VERSION: ${AIGO_IMAGE:-aigo:local}
+      AIGO_BACKUP_INTERVAL_SECONDS: ${AIGO_BACKUP_INTERVAL_SECONDS:-86400}
+      AIGO_BACKUP_RETENTION_DAYS: ${AIGO_BACKUP_RETENTION_DAYS:-14}
+      AIGO_BACKUP_MAX_COUNT: ${AIGO_BACKUP_MAX_COUNT:-30}
+      AIGO_BACKUP_LOCK_TIMEOUT_SECONDS: ${AIGO_BACKUP_LOCK_TIMEOUT_SECONDS:-30}
+      TZ: ${TZ:-Asia/Shanghai}
+    secrets:
+      - postgres_password
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - backup_data:/backups
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: ${AIGO_BACKUP_MEMORY_LIMIT:-512m}
+    cpus: ${AIGO_BACKUP_CPU_LIMIT:-1.0}
+    stop_grace_period: 2m
+    networks:
+      - data
+    logging: *json-logging
+
+secrets:
+  postgres_password:
+    file: ${AIGO_POSTGRES_PASSWORD_FILE:-./deploy/secrets/postgres_password}
+  jwt_secret:
+    file: ${AIGO_JWT_SECRET_FILE:-./deploy/secrets/jwt_secret}
+  admin_password:
+    file: ${AIGO_ADMIN_PASSWORD_FILE:-./deploy/secrets/admin_password}
+
+volumes:
+  postgres_data:
+  app_output:
+  caddy_data:
+  caddy_config:
+  backup_data:
+
+networks:
+  edge:
+  data:
+    internal: true

@@ -10,3 +10,20 @@ web/dist/
 
 # Env
 .env
+账号密码.txt
+
+# Local datasets, screenshots, planning state, and SSH artifacts
+data/
+screenshots/
+.zcode/
+id_ed25519*
+server_public_key.txt
+8.19
+820
+824
+
+deploy/production.env
+deploy/secrets/*
+!deploy/secrets/.gitkeep
+deploy/offsite-recovery/*
+!deploy/offsite-recovery/.gitkeep

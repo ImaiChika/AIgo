@@ -1,11 +1,16 @@
 package importer
 
 import (
+	"path/filepath"
 	"testing"
+
+	"aigo/internal/domain"
+
+	"github.com/xuri/excelize/v2"
 )
 
 func TestReadXlsx(t *testing.T) {
-	rows, err := ReadXlsx("../../2025执医a2.xlsx", true)
+	rows, err := ReadXlsx("../../data/samples/2025执医A2.xlsx", true)
 	if err != nil {
 		t.Fatalf("ReadXlsx failed: %v", err)
 	}
@@ -29,8 +34,91 @@ func TestReadXlsx(t *testing.T) {
 	t.Logf("第一题: ID=%s, Answer=%s, 选项A=%s", r.ID, r.Answer, r.OptionA)
 }
 
+func TestExportToXlsxWritesCompleteSheetDimension(t *testing.T) {
+	questions := []domain.A2Question{
+		{ID: "q1", ClinicalStem: "题目一", Options: []domain.Option{{Label: "A", Text: "甲"}}, Answer: "A"},
+		{ID: "q2", ClinicalStem: "题目二", Options: []domain.Option{{Label: "A", Text: "乙"}}, Answer: "A"},
+		{ID: "q3", ClinicalStem: "题目三", Options: []domain.Option{{Label: "A", Text: "丙"}}, Answer: "A"},
+	}
+	path := filepath.Join(t.TempDir(), "questions.xlsx")
+	if err := ExportToXlsx(questions, path); err != nil {
+		t.Fatalf("ExportToXlsx failed: %v", err)
+	}
+
+	file, err := excelize.OpenFile(path)
+	if err != nil {
+		t.Fatalf("open exported file: %v", err)
+	}
+	defer file.Close()
+	dimension, err := file.GetSheetDimension("题目")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dimension != "A1:P4" {
+		t.Fatalf("sheet dimension = %s, want A1:P4", dimension)
+	}
+	rows, err := file.GetRows("题目")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("exported rows = %d, want 4", len(rows))
+	}
+	checks := map[string]string{
+		"A1": "题号",
+		"C1": "A．",
+		"I1": "说明",
+		"P1": "命题人",
+		"P2": "朝阳医院AI",
+	}
+	for cell, want := range checks {
+		got, err := file.GetCellValue("题目", cell)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("%s = %q, want %q", cell, got, want)
+		}
+	}
+}
+
+func TestExportKnowledgePointsToXlsx(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "knowledge-points.xlsx")
+	points := []domain.KnowledgePoint{
+		{Category: "临床医学", Subject: "精神科", Topic: "社交焦虑障碍", OutlineCode: "KP-001", Keywords: []string{"焦虑", "社交"}},
+		{Category: "临床医学", Subject: "呼吸内科", Topic: "张力性气胸", OutlineCode: "KP-002"},
+	}
+	if err := ExportKnowledgePointsToXlsx(points, path); err != nil {
+		t.Fatalf("ExportKnowledgePointsToXlsx failed: %v", err)
+	}
+	file, err := excelize.OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if dimension, err := file.GetSheetDimension("知识点"); err != nil || dimension != "A1:G3" {
+		t.Fatalf("knowledge sheet dimension = %s, err=%v", dimension, err)
+	}
+	checks := map[string]string{
+		"A1": "分类",
+		"B1": "专业/系统",
+		"E2": "社交焦虑障碍",
+		"F2": "KP-001",
+		"G2": "焦虑，社交",
+	}
+	for cell, want := range checks {
+		got, err := file.GetCellValue("知识点", cell)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("%s = %q, want %q", cell, got, want)
+		}
+	}
+}
+
 func TestConvertToQuestions(t *testing.T) {
-	rows, err := ReadXlsx("../../2025执医a2.xlsx", true)
+	rows, err := ReadXlsx("../../data/samples/2025执医A2.xlsx", true)
 	if err != nil {
 		t.Fatalf("ReadXlsx failed: %v", err)
 	}

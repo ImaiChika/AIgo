@@ -162,7 +162,7 @@ func ReadExamOutline(path string) ([]domain.KnowledgePoint, error) {
 			}
 
 			p := domain.KnowledgePoint{
-				ID:          outlineCode,       // 用大纲代码作为唯一 ID
+				ID:          outlineCode,               // 用大纲代码作为唯一 ID
 				Category:    strings.TrimSpace(row[1]), // 分类：基础医学/临床综合
 				Subject:     strings.TrimSpace(row[2]), // 专业/系统
 				Unit:        strings.TrimSpace(row[3]), // 单元
@@ -183,21 +183,28 @@ func ReadExamOutline(path string) ([]domain.KnowledgePoint, error) {
 func ExportToXlsx(questions []domain.A2Question, path string) error {
 	f := excelize.NewFile()
 	sheet := "题目"
-	f.NewSheet(sheet)
-	f.DeleteSheet("Sheet1")
+	sheetIndex, err := f.NewSheet(sheet)
+	if err != nil {
+		return err
+	}
+	if err := f.DeleteSheet("Sheet1"); err != nil {
+		return err
+	}
+	f.SetActiveSheet(sheetIndex)
 
 	// 设置列宽
-	f.SetColWidth(sheet, "A", "A", 6)   // 序号
-	f.SetColWidth(sheet, "B", "B", 60)  // 题干
-	f.SetColWidth(sheet, "C", "G", 20)  // 选项
-	f.SetColWidth(sheet, "H", "H", 6)   // 答案
-	f.SetColWidth(sheet, "I", "I", 50)  // 解析
-	f.SetColWidth(sheet, "J", "J", 16)  // 大纲代码
-	f.SetColWidth(sheet, "K", "K", 10)  // 预估难度
-	f.SetColWidth(sheet, "L", "L", 12)  // 认知层次
-	f.SetColWidth(sheet, "M", "M", 30)  // 考核要点
-	f.SetColWidth(sheet, "N", "N", 10)  // 专业
-	f.SetColWidth(sheet, "O", "O", 10)  // 系统
+	f.SetColWidth(sheet, "A", "A", 6)  // 序号
+	f.SetColWidth(sheet, "B", "B", 60) // 题干
+	f.SetColWidth(sheet, "C", "G", 20) // 选项
+	f.SetColWidth(sheet, "H", "H", 6)  // 答案
+	f.SetColWidth(sheet, "I", "I", 50) // 解析
+	f.SetColWidth(sheet, "J", "J", 16) // 大纲代码
+	f.SetColWidth(sheet, "K", "K", 10) // 预估难度
+	f.SetColWidth(sheet, "L", "L", 12) // 认知层次
+	f.SetColWidth(sheet, "M", "M", 30) // 考核要点
+	f.SetColWidth(sheet, "N", "N", 10) // 专业
+	f.SetColWidth(sheet, "O", "O", 10) // 系统
+	f.SetColWidth(sheet, "P", "P", 16) // 命题人
 
 	// 表头样式
 	headerStyle, _ := f.NewStyle(&excelize.Style{
@@ -209,8 +216,8 @@ func ExportToXlsx(questions []domain.A2Question, path string) error {
 
 	// 写表头
 	headers := []string{
-		"序号", "题干", "选项A", "选项B", "选项C", "选项D", "选项E",
-		"答案", "解析", "大纲代码", "预估难度", "认知层次", "考核要点", "专业", "系统",
+		"题号", "题干", "A．", "B．", "C．", "D．", "E．",
+		"答案", "说明", "大纲代码", "预估难度", "认知层次", "考核要点", "专业", "系统", "命题人",
 	}
 	for i, h := range headers {
 		cell := cellName(i+1, 1)
@@ -226,23 +233,84 @@ func ExportToXlsx(questions []domain.A2Question, path string) error {
 			opts[o.Label] = o.Text
 		}
 
-		f.SetCellValue(sheet, cellName(1, row), idx+1)              // 序号
-		f.SetCellValue(sheet, cellName(2, row), q.ClinicalStem)     // 题干
-		f.SetCellValue(sheet, cellName(3, row), opts["A"])          // 选项A
-		f.SetCellValue(sheet, cellName(4, row), opts["B"])          // 选项B
-		f.SetCellValue(sheet, cellName(5, row), opts["C"])          // 选项C
-		f.SetCellValue(sheet, cellName(6, row), opts["D"])          // 选项D
-		f.SetCellValue(sheet, cellName(7, row), opts["E"])          // 选项E
-		f.SetCellValue(sheet, cellName(8, row), q.Answer)           // 答案
-		f.SetCellValue(sheet, cellName(9, row), q.Explanation)      // 解析
-		f.SetCellValue(sheet, cellName(10, row), q.OutlineCode)     // 大纲代码
-		f.SetCellValue(sheet, cellName(11, row), q.Difficulty)      // 预估难度
-		f.SetCellValue(sheet, cellName(12, row), q.CognitiveLevel)  // 认知层次
-		f.SetCellValue(sheet, cellName(13, row), q.ExamPoints)      // 考核要点
-		f.SetCellValue(sheet, cellName(14, row), q.Profession)      // 专业
-		f.SetCellValue(sheet, cellName(15, row), q.System)          // 系统
+		f.SetCellValue(sheet, cellName(1, row), idx+1)             // 序号
+		f.SetCellValue(sheet, cellName(2, row), q.ClinicalStem)    // 题干
+		f.SetCellValue(sheet, cellName(3, row), opts["A"])         // 选项A
+		f.SetCellValue(sheet, cellName(4, row), opts["B"])         // 选项B
+		f.SetCellValue(sheet, cellName(5, row), opts["C"])         // 选项C
+		f.SetCellValue(sheet, cellName(6, row), opts["D"])         // 选项D
+		f.SetCellValue(sheet, cellName(7, row), opts["E"])         // 选项E
+		f.SetCellValue(sheet, cellName(8, row), q.Answer)          // 答案
+		f.SetCellValue(sheet, cellName(9, row), q.Explanation)     // 解析
+		f.SetCellValue(sheet, cellName(10, row), q.OutlineCode)    // 大纲代码
+		f.SetCellValue(sheet, cellName(11, row), q.Difficulty)     // 预估难度
+		f.SetCellValue(sheet, cellName(12, row), q.CognitiveLevel) // 认知层次
+		f.SetCellValue(sheet, cellName(13, row), q.ExamPoints)     // 考核要点
+		f.SetCellValue(sheet, cellName(14, row), q.Profession)     // 专业
+		f.SetCellValue(sheet, cellName(15, row), q.System)         // 系统
+		f.SetCellValue(sheet, cellName(16, row), "朝阳医院AI")         // 命题人
+	}
+	// 显式写入使用范围。部分读取器会严格信任 worksheet dimension；
+	// 若维持默认 A1，即使单元格已经写入，也可能只显示或读取表头。
+	if err := f.SetSheetDimension(sheet, fmt.Sprintf("A1:P%d", len(questions)+1)); err != nil {
+		return err
 	}
 
+	return f.SaveAs(path)
+}
+
+// ExportKnowledgePointsToXlsx 将知识点导出为可再次导入的标准大纲 Excel。
+func ExportKnowledgePointsToXlsx(points []domain.KnowledgePoint, path string) error {
+	f := excelize.NewFile()
+	sheet := "知识点"
+	sheetIndex, err := f.NewSheet(sheet)
+	if err != nil {
+		return err
+	}
+	if err := f.DeleteSheet("Sheet1"); err != nil {
+		return err
+	}
+	f.SetActiveSheet(sheetIndex)
+
+	f.SetColWidth(sheet, "A", "A", 16)
+	f.SetColWidth(sheet, "B", "B", 20)
+	f.SetColWidth(sheet, "C", "D", 24)
+	f.SetColWidth(sheet, "E", "E", 48)
+	f.SetColWidth(sheet, "F", "F", 20)
+	f.SetColWidth(sheet, "G", "G", 36)
+
+	headerStyle, err := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true, Size: 10.5, Family: "宋体"},
+		Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center"},
+		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#DCEFE5"}, Pattern: 1},
+	})
+	if err != nil {
+		return err
+	}
+	headers := []string{"分类", "专业/系统", "单元", "细目", "要点", "大纲代码", "关键词"}
+	for i, header := range headers {
+		cell := cellName(i+1, 1)
+		f.SetCellValue(sheet, cell, header)
+		f.SetCellStyle(sheet, cell, cell, headerStyle)
+	}
+	for i, point := range points {
+		row := i + 2
+		values := []any{
+			point.Category,
+			point.Subject,
+			point.Unit,
+			point.SubItem,
+			point.Topic,
+			point.OutlineCode,
+			strings.Join(point.Keywords, "，"),
+		}
+		for column, value := range values {
+			f.SetCellValue(sheet, cellName(column+1, row), value)
+		}
+	}
+	if err := f.SetSheetDimension(sheet, fmt.Sprintf("A1:G%d", len(points)+1)); err != nil {
+		return err
+	}
 	return f.SaveAs(path)
 }
 

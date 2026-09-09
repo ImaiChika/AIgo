@@ -7,6 +7,12 @@
 import re
 import openpyxl
 from collections import OrderedDict
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+INPUT_XLSX = ROOT / "data" / "samples" / "2025执医A2.xlsx"
+OUTPUT_XLSX = ROOT / "data" / "samples" / "2025执医a2_含知识点.xlsx"
+KNOWLEDGE_XLSX = ROOT / "data" / "knowledge" / "知识点表.xlsx"
 
 # 系统分类关键词映射
 SYSTEM_KEYWORDS = {
@@ -195,7 +201,7 @@ def extract_keywords(stem: str, diagnosis: str, options: list) -> list:
 
 def main():
     print("读取原数据集...")
-    wb = openpyxl.load_workbook("2025执医a2.xlsx")
+    wb = openpyxl.load_workbook(INPUT_XLSX)
     ws = wb.active
 
     # 收集所有题目数据
@@ -272,8 +278,8 @@ def main():
                                     "kp_id", "kp_subject", "kp_system", "kp_name", "kp_keywords"], 1):
             ws_out.cell(row=row_idx, column=col, value=r[key])
 
-    wb_out.save("2025执医a2_含知识点.xlsx")
-    print("已保存: 2025执医a2_含知识点.xlsx")
+    wb_out.save(OUTPUT_XLSX)
+    print(f"已保存: {OUTPUT_XLSX}")
 
     # 写入知识点表
     print("写入知识点表...")
@@ -292,8 +298,8 @@ def main():
         ws_kp.cell(row=row_idx, column=4, value=kp["name"])
         ws_kp.cell(row=row_idx, column=5, value="、".join(kp["keywords"]))
 
-    wb_kp.save("知识点表.xlsx")
-    print(f"已保存: 知识点表.xlsx ({len(kp_set)} 个知识点)")
+    wb_kp.save(KNOWLEDGE_XLSX)
+    print(f"已保存: {KNOWLEDGE_XLSX} ({len(kp_set)} 个知识点)")
 
     # 统计
     print("\n=== 各系统知识点分布 ===")

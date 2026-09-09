@@ -1,8 +1,13 @@
 <script setup>
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, watch } from "vue";
 import { api } from "../api.js";
-import { getToken } from "../auth.js";
+import { hasPerm } from "../auth.js";
+import { useAICheckProgress } from "../aiCheckProgress.js";
 import KnowledgePointPicker from "../components/KnowledgePointPicker.vue";
+import AICheckScoreButton from "../components/AICheckScoreButton.vue";
+
+// AI 检查分段进度（生成成功后轮询，见 aiCheckProgress.js）
+const { progress: aiProgress, start: startAIProgress } = useAICheckProgress();
 
 // 知识点选择（单选，使用完善的知识点选择器：精确+模糊搜索）
 const selectedKPs = ref([]); // 单选模式下始终 0/1 个
@@ -11,8 +16,6 @@ const selectedKP = computed(() => (selectedKPs.value.length ? selectedKPs.value[
 // 出题配置
 const selectedCount = ref(1);
 const selectedDifficulty = ref("0.65");
-const needImages = ref(false);
-const imageCount = ref(3);
 const banks = ref([]);
 const selectedBank = ref("");
 
@@ -26,19 +29,68 @@ const stats = ref({ question_count: 0, knowledge_count: 0 });
 // 生成结果
 const generatedQuestions = ref([]);
 const currentIndex = ref(0);
-const currentQuestionId = ref("");
 const stem = ref("");
 const options = ref([]);
 const answer = ref("");
 const explanation = ref("");
 let optionIdCounter = 0;
 
-// 配图
-const imageLoading = ref(false);
-const imageProgress = ref("");
-const generatedImages = ref([]);
-const selectedImage = ref(-1);
-const promptText = ref("");
+// 展示列表：检查中被淘汰的题自动移出预览（淘汰原因单独展示）
+const displayQuestions = computed(() => {
+  const discarded = new Set((aiProgress.value?.items || []).filter((i) => i.discarded).map((i) => i.question_id));
+  if (!discarded.size) return generatedQuestions.value;
+  return generatedQuestions.value.filter((q) => !discarded.has(q.id));
+});
+// 当前题在展示列表中的序号（1 起）
+const displayIndex = computed(() => {
+  const q = generatedQuestions.value[currentIndex.value];
+  if (!q) return 0;
+  return displayQuestions.value.findIndex((x) => x.id === q.id);
+});
+function showDisplayQuestion(dIndex) {
+  const q = displayQuestions.value[dIndex];
+  if (!q) return;
+  const realIndex = generatedQuestions.value.findIndex((x) => x.id === q.id);
+  if (realIndex >= 0) showQuestion(realIndex);
+}
+function prevDisplay() {
+  if (displayIndex.value > 0) showDisplayQuestion(displayIndex.value - 1);
+}
+function nextDisplay() {
+  if (displayIndex.value < displayQuestions.value.length - 1) showDisplayQuestion(displayIndex.value + 1);
+}
+
+// 当前展示题目的 ID（供 AI 检查评分按钮查询检查结果）
+const currentQuestionId = computed(() => generatedQuestions.value[currentIndex.value]?.id || "");
+
+// 当前预览的题被淘汰时，自动跳回第一道通过的题
+watch(displayQuestions, (list) => {
+  const q = generatedQuestions.value[currentIndex.value];
+  if (q && !list.some((x) => x.id === q.id) && list.length) {
+    showDisplayQuestion(0);
+  }
+});
+
+const workflowSteps = computed(() => [
+  {
+    number: "01",
+    title: "AI 起草",
+    detail: selectedKP.value ? `围绕「${selectedKP.value.topic || selectedKP.value.outline_code}」生成` : "选择知识点与难度后开始",
+    state: stem.value ? "done" : selectedKP.value ? "active" : "waiting",
+  },
+  {
+    number: "02",
+    title: "自动质检",
+    detail: aiProgress.value?.checking > 0 ? `正在检查 ${aiProgress.value.checking} 道题` : aiProgress.value ? "格式、答案与医学质量已检查" : "落库后自动异步执行一次",
+    state: aiProgress.value?.checking > 0 ? "active" : aiProgress.value ? "done" : "waiting",
+  },
+  {
+    number: "03",
+    title: "进入待审核题库",
+    detail: aiProgress.value ? `通过 ${aiProgress.value.passed || 0} 道，淘汰 ${aiProgress.value.discarded || 0} 道` : "质检通过后可由管理员送审",
+    state: aiProgress.value && aiProgress.value.checking === 0 ? "done" : "waiting",
+  },
+]);
 
 function showToast(message) {
   toast.value = message;
@@ -47,8 +99,9 @@ function showToast(message) {
 }
 
 async function loadStats() {
+  if (!hasPerm("stats:view")) return;
   try {
-    stats.value = await api.stats();
+    stats.value = await api.stats("personal");
   } catch (e) {
     console.error(e);
     showToast("加载统计信息失败: " + e.message);
@@ -62,12 +115,12 @@ async function generateQuestion() {
     return;
   }
   loading.value = true;
-  progressMsg.value = "正在调用千问生成试题，请稍候...";
+  progressMsg.value = "正在生成试题，请稍候...";
   startTime.value = Date.now();
 
   const timer = setInterval(() => {
     const elapsed = ((Date.now() - startTime.value) / 1000).toFixed(0);
-    progressMsg.value = `千问生成中... 已等待 ${elapsed} 秒`;
+    progressMsg.value = `正在生成，已等待 ${elapsed} 秒`;
   }, 1000);
 
   try {
@@ -76,7 +129,9 @@ async function generateQuestion() {
       category: selectedKP.value.category || "",
       difficulty: selectedDifficulty.value,
       topic: selectedKP.value.topic,
-      outline_code: selectedKP.value.outline_code || selectedKP.value.id || "",
+      outline_code: selectedKP.value.outline_code || "",
+      knowledge_point_id: selectedKP.value.id,
+      version_id: selectedKP.value.version_id,
       count: selectedCount.value,
       bank_id: selectedBank.value,
     };
@@ -86,50 +141,20 @@ async function generateQuestion() {
     const elapsed = ((Date.now() - startTime.value) / 1000).toFixed(1);
     if (data.questions && data.questions.length > 0) {
       generatedQuestions.value = data.questions;
-      generatedQuestions.value.forEach(q => { q.images = []; });
       currentIndex.value = 0;
       showQuestion(0);
-      progressMsg.value = `✓ 已生成 ${data.count} 道题，耗时 ${elapsed} 秒`;
-      showToast(`已生成 ${data.count} 道题，耗时 ${elapsed} 秒`);
+      progressMsg.value = `已生成 ${data.count} 道题，耗时 ${elapsed} 秒，正在自动检查质量`;
+      showToast(`已生成 ${data.count} 道题，耗时 ${elapsed} 秒（AI 检查进行中）`);
+      startAIProgress((data.questions || []).map((q) => q.id));
       loadStats();
-
-      if (needImages.value) {
-        await generateImagesForAll();
-      }
     }
   } catch (e) {
     clearInterval(timer);
-    progressMsg.value = `✗ 生成失败: ${e.message}`;
+    progressMsg.value = `生成失败: ${e.message}`;
     showToast("生成失败: " + e.message);
   } finally {
     loading.value = false;
   }
-}
-
-// 为所有题目生成配图
-async function generateImagesForAll() {
-  imageLoading.value = true;
-  const total = generatedQuestions.value.length;
-  let done = 0;
-
-  for (const q of generatedQuestions.value) {
-    if (!q.id) continue;
-    imageProgress.value = `正在为第 ${done + 1}/${total} 道题生成配图...`;
-    try {
-      await api.imagePrompt(q.id);
-      const imgData = await api.imageGenerate(q.id, imageCount.value);
-      q.images = imgData.images || [];
-    } catch (e) {
-      q.images = [];
-      q.imageError = e.message;
-    }
-    done++;
-    imageProgress.value = `配图进度: ${done}/${total}`;
-  }
-
-  imageProgress.value = `✓ 配图完成: ${done} 道题`;
-  imageLoading.value = false;
-  showQuestion(currentIndex.value);
 }
 
 function showQuestion(index) {
@@ -140,130 +165,15 @@ function showQuestion(index) {
   options.value = (q.options || []).map((o) => ({ id: ++optionIdCounter, text: o.text }));
   answer.value = q.answer || "";
   explanation.value = q.explanation || "";
-  currentQuestionId.value = q.id || "";
-  generatedImages.value = q.images || [];
-  selectedImage.value = generatedImages.value.length > 0 ? 0 : -1;
-  promptText.value = "";
-}
-
-function prevQuestion() {
-  if (currentIndex.value > 0) showQuestion(currentIndex.value - 1);
-}
-
-function nextQuestion() {
-  if (currentIndex.value < generatedQuestions.value.length - 1) showQuestion(currentIndex.value + 1);
-}
-
-function removeOption(index) {
-  if (options.value.length <= 4) {
-    showToast("A2 单选题至少保留 4 个选项");
-    return;
-  }
-  options.value.splice(index, 1);
-}
-
-function addOption() {
-  if (options.value.length >= 5) {
-    showToast("A2 单选题最多保留 A-E 五个选项");
-    return;
-  }
-  options.value.push({ id: ++optionIdCounter, text: "新增选项" });
 }
 
 function optionLabel(index) {
   return String.fromCharCode(65 + index);
 }
 
-async function saveQuestion() {
-  if (!currentQuestionId.value) {
-    showToast("没有可保存的题目");
-    return;
-  }
-  try {
-    const data = await api.updateQuestion(currentQuestionId.value, {
-      clinical_stem: stem.value,
-      options: options.value.map((opt, i) => ({ label: String.fromCharCode(65 + i), text: opt.text })),
-      answer: answer.value,
-      explanation: explanation.value,
-    });
-    if (generatedQuestions.value[currentIndex.value]) {
-      generatedQuestions.value[currentIndex.value] = data;
-    }
-    showToast("已保存修改");
-  } catch (e) {
-    showToast("保存失败: " + e.message);
-  }
-}
-
-async function generatePrompt() {
-  if (!currentQuestionId.value) {
-    showToast("请先生成题目");
-    return;
-  }
-  try {
-    const data = await api.imagePrompt(currentQuestionId.value);
-    const lines = [
-      `图片用途：${data.purpose}`,
-      `图片类型：${data.image_type}`,
-      `医学主题：${data.subject}`,
-      `必须出现：${(data.must_include || []).join("、")}`,
-      `不能出现：${(data.must_exclude || []).join("、")}`,
-      `风格：${data.style}`,
-      `审核重点：${data.review_focus}`,
-    ];
-    promptText.value = lines.join("\n");
-    showToast("已生成结构化提示词");
-  } catch (e) {
-    showToast("生成提示词失败: " + e.message);
-  }
-}
-
-async function generateImages() {
-  if (!currentQuestionId.value) {
-    showToast("请先生成题目");
-    return;
-  }
-  imageLoading.value = true;
-  imageProgress.value = "正在调用生图模型，请稍候...";
-  const startTimeImg = Date.now();
-
-  const timer = setInterval(() => {
-    const elapsed = ((Date.now() - startTimeImg) / 1000).toFixed(0);
-    imageProgress.value = `生图中... 已等待 ${elapsed} 秒`;
-  }, 1000);
-
-  try {
-    const data = await api.imageGenerate(currentQuestionId.value, 4);
-    clearInterval(timer);
-    const elapsed = ((Date.now() - startTimeImg) / 1000).toFixed(1);
-    generatedImages.value = data.images || [];
-    selectedImage.value = 0;
-    imageProgress.value = `✓ 已生成 ${data.count} 张候选图，耗时 ${elapsed} 秒`;
-    showToast(`已生成 ${data.count} 张候选图`);
-  } catch (e) {
-    clearInterval(timer);
-    imageProgress.value = `✗ 生成失败: ${e.message}`;
-    showToast("生成图片失败: " + e.message);
-  } finally {
-    imageLoading.value = false;
-  }
-}
-
-function selectImage(index) {
-  selectedImage.value = index;
-  showToast(`已选择候选图 ${index + 1}`);
-}
-
-function imageSrc(path) {
-  if (!path) return "";
-  const filename = path.split("/").pop();
-  const token = getToken();
-  return `/images/${filename}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
-}
-
 async function loadBanks() {
   try {
-    const data = await api.listBanks();
+    const data = await api.listBanks(false);
     banks.value = data.banks || [];
   } catch (e) {
     console.error(e);
@@ -279,106 +189,109 @@ onMounted(() => {
 <template>
   <div class="main-grid">
     <div class="editor-column">
-      <!-- 多题切换 -->
-      <section v-if="generatedQuestions.length > 1" class="panel question-nav">
-        <button class="ghost-button" type="button" :disabled="currentIndex <= 0" @click="prevQuestion">← 上一题</button>
-        <span class="nav-info">第 {{ currentIndex + 1 }} / {{ generatedQuestions.length }} 题</span>
-        <button class="ghost-button" type="button" :disabled="currentIndex >= generatedQuestions.length - 1" @click="nextQuestion">下一题 →</button>
+      <!-- 多题切换（数字直达 + 左右切换；被淘汰的题自动移出） -->
+      <section v-if="displayQuestions.length" class="panel question-nav">
+        <button class="ghost-button" type="button" :disabled="displayIndex <= 0" @click="prevDisplay">←</button>
+        <button
+          v-for="(q, i) in displayQuestions"
+          :key="q.id"
+          class="nav-chip"
+          :class="{ active: i === displayIndex }"
+          type="button"
+          :title="`第 ${i + 1} 题`"
+          @click="showDisplayQuestion(i)"
+        >
+          {{ i + 1 }}
+        </button>
+        <button class="ghost-button" type="button" :disabled="displayIndex >= displayQuestions.length - 1" @click="nextDisplay">→</button>
+        <span class="nav-info">第 {{ displayIndex + 1 }} / {{ displayQuestions.length }} 题</span>
       </section>
 
-      <!-- 题干 -->
+      <!-- 生成结果（只读展示：AI 出题内容不可编辑，检查通过后进入题库） -->
       <section class="panel">
         <div class="section-heading">
           <span class="dot blue"></span>
-          <h2>题干编辑</h2>
-        </div>
-        <textarea v-model="stem" class="stem-input" placeholder="点击右侧「AI自动生成试题」或手动编辑题干"></textarea>
-      </section>
-
-      <!-- 选项 -->
-      <section class="panel">
-        <div class="section-heading">
-          <span class="dot blue"></span>
-          <h2>选项编辑</h2>
+          <h2>题目预览</h2>
           <small v-if="answer">正确答案：{{ answer }}</small>
+          <AICheckScoreButton v-if="currentQuestionId" class="preview-ai-score" :question-id="currentQuestionId" />
         </div>
-        <div class="options-list">
-          <div v-for="(opt, index) in options" :key="opt.id" class="option-row">
-            <span class="option-label">{{ optionLabel(index) }}</span>
-            <input v-model="opt.text" />
-            <button class="remove-btn" type="button" @click="removeOption(index)" :disabled="options.length <= 4" title="删除选项">×</button>
-          </div>
-        </div>
-        <button class="text-button" type="button" @click="addOption">+ 添加选项</button>
-
-        <div class="answer-row">
-          <label>正确答案：</label>
-          <select v-model="answer">
-            <option v-for="(opt, i) in options" :key="opt.id" :value="String.fromCharCode(65 + i)">
-              {{ String.fromCharCode(65 + i) }}
-            </option>
-          </select>
-        </div>
-      </section>
-
-      <!-- 解析 -->
-      <section v-if="explanation" class="panel">
-        <div class="section-heading">
-          <span class="dot teal"></span>
-          <h2>答案解析</h2>
-        </div>
-        <textarea v-model="explanation" class="explanation-input"></textarea>
-      </section>
-
-      <!-- 已入库提示 -->
-      <section v-if="currentQuestionId" class="panel save-section">
-        <span class="save-hint">✓ 题目已自动入库，可在题库页面查看和编辑</span>
-        <button class="ghost-button" type="button" @click="saveQuestion">保存修改</button>
-      </section>
-
-      <!-- AI配图 -->
-      <section class="panel">
-        <div class="section-heading">
-          <span class="dot teal"></span>
-          <h2>AI配图候选</h2>
-          <small>选择一张后提交专家审核</small>
-        </div>
-        <div class="image-prompt">
-          <label>结构化生图提示词</label>
-          <textarea v-model="promptText" placeholder="点击「生成提示词」自动生成"></textarea>
-          <div class="button-row">
-            <button class="outline-button" type="button" @click="generatePrompt" :disabled="!currentQuestionId">生成提示词</button>
-            <button class="outline-button" type="button" @click="generateImages" :disabled="!currentQuestionId || imageLoading">
-              {{ imageLoading ? "生成中..." : "生成4张候选图" }}
-            </button>
-          </div>
-        </div>
-
-        <div v-if="imageProgress" class="progress-bar">
-          <div class="progress-inner" :class="{ done: imageProgress.startsWith('✓'), error: imageProgress.startsWith('✗') }">
-            <span v-if="imageLoading" class="spinner"></span>
-            {{ imageProgress }}
-          </div>
-        </div>
-
-        <div v-if="generatedImages.length" class="candidate-grid">
-          <button
-            v-for="(img, index) in generatedImages"
-            :key="img.id"
-            class="candidate-card"
-            :class="{ selected: selectedImage === index }"
-            type="button"
-            @click="selectImage(index)"
-          >
-            <img v-if="img.image_path" :src="imageSrc(img.image_path)" class="candidate-img" :alt="`候选图${index+1}`" />
-            <div v-else class="candidate-placeholder">
-              <span>{{ index + 1 }}</span>
+        <template v-if="stem">
+          <p class="readonly-stem">{{ stem }}</p>
+          <div class="readonly-options">
+            <div v-for="(opt, index) in options" :key="opt.id" class="readonly-option" :class="{ correct: optionLabel(index) === answer }">
+              <span class="option-label">{{ optionLabel(index) }}</span>
+              <span>{{ opt.text }}</span>
+              <span v-if="optionLabel(index) === answer" class="correct-mark">✓ 正确答案</span>
             </div>
-            <div class="candidate-meta">
-              <span>{{ img.model_name }}</span>
-              <span class="status">{{ selectedImage === index ? "已选择" : img.status }}</span>
+          </div>
+          <div v-if="explanation" class="readonly-explanation">
+            <label>解析</label>
+            <p>{{ explanation }}</p>
+          </div>
+        </template>
+        <div v-else class="preview-empty">
+          <span class="preview-empty-mark">A2</span>
+          <div>
+            <strong>从右侧选择一个知识点开始命题</strong>
+            <p>系统将生成临床情境、4–5 个选项与唯一答案；生成结果只读，质量检查通过后进入待审核题库。</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- AI 检查进度与本次生题具体情况 -->
+      <div v-if="aiProgress" class="progress-bar ai-check-progress" :class="{ done: aiProgress.checking === 0 && !aiProgress.stalled, error: aiProgress.stalled || aiProgress.exhausted > 0 }">
+        <span v-if="aiProgress.checking > 0" class="spinner"></span>
+        <template v-if="aiProgress.checking > 0">AI 检查中（完成 {{ aiProgress.total - aiProgress.checking }}/{{ aiProgress.total }}）…</template>
+        <template v-else-if="aiProgress.stalled">AI 检查仍在后台进行，可稍后在题库中查看结果</template>
+        <template v-else>
+          本次生成 {{ aiProgress.total }} 道：通过 {{ aiProgress.passed }} · 淘汰 {{ aiProgress.discarded }}<template v-if="aiProgress.exhausted > 0"> · 检查异常 {{ aiProgress.exhausted }}（可重试）</template>
+        </template>
+      </div>
+
+      <!-- 淘汰明细：检查不通过的题目已自动删除，展示原因 -->
+      <section v-if="aiProgress && aiProgress.discarded > 0" class="panel discard-panel">
+        <div class="section-heading">
+          <span class="dot red"></span>
+          <h2>未通过检查的题目（已自动删除）</h2>
+        </div>
+        <div v-for="item in (aiProgress.items || []).filter(i => i.discarded)" :key="item.question_id" class="discard-item">
+          <p class="discard-stem">{{ item.stem_summary }}</p>
+          <p class="discard-verdict">
+            检查结论：{{ item.verdict === "reject" ? "不合格" : "存在问题" }}
+          </p>
+          <ul v-if="(item.issues || []).length" class="discard-issues">
+            <li v-for="(issue, i) in item.issues" :key="i">{{ issue.message }}</li>
+          </ul>
+          <p v-if="item.suggestion" class="discard-suggestion">AI 建议：{{ item.suggestion }}</p>
+        </div>
+        <p class="discard-hint">被淘汰的题目不会进入题库；可调整生成参数后重新出题。</p>
+      </section>
+
+      <section class="panel workflow-panel">
+        <div class="section-heading">
+          <span class="dot green"></span>
+          <h2>命题闭环</h2>
+          <small>本页只负责生成，修订与送审均按权限流转</small>
+        </div>
+        <div class="workflow-rail">
+          <div v-for="step in workflowSteps" :key="step.number" class="workflow-step" :class="step.state">
+            <div class="workflow-number">{{ step.state === "done" ? "✓" : step.number }}</div>
+            <div>
+              <strong>{{ step.title }}</strong>
+              <p>{{ step.detail }}</p>
             </div>
-          </button>
+          </div>
+        </div>
+        <div class="quality-contract">
+          <div>
+            <span class="quality-kicker">首次生成自动检查</span>
+            <strong>先筛除明显问题，再进入人工审核</strong>
+          </div>
+          <ul>
+            <li>题干完整</li>
+            <li>答案唯一</li>
+            <li>A2 题型匹配</li>
+          </ul>
         </div>
       </section>
     </div>
@@ -386,9 +299,9 @@ onMounted(() => {
     <!-- 右侧配置 -->
     <aside class="config-column">
       <section class="panel sticky-panel">
-        <h2>AI出题配置</h2>
+        <h2>生成设置</h2>
 
-        <div class="metric-row">
+        <div v-if="hasPerm('stats:view')" class="metric-row">
           <div>
             <span>题库题量</span>
             <strong>{{ stats.question_count }}道</strong>
@@ -446,36 +359,18 @@ onMounted(() => {
           />
         </div>
 
-        <!-- 配图选项 -->
-        <div class="image-options">
-          <label class="checkbox-row">
-            <input type="checkbox" v-model="needImages" />
-            <span>需要配图</span>
-          </label>
-          <div v-if="needImages" class="image-count-row">
-            <label>每题图片数：</label>
-            <select v-model.number="imageCount">
-              <option :value="1">1张</option>
-              <option :value="2">2张</option>
-              <option :value="3">3张</option>
-              <option :value="4">4张</option>
-              <option :value="5">5张</option>
-            </select>
-          </div>
-        </div>
-
         <button
           class="primary-button full"
           type="button"
           :disabled="loading || !selectedKP"
           @click="generateQuestion"
         >
-          {{ loading ? "生成中..." : "AI自动生成试题" }}
+          {{ loading ? "生成中..." : "生成试题" }}
         </button>
 
-        <!-- 进度条 -->
-        <div v-if="progressMsg" class="progress-bar">
-          <div class="progress-inner" :class="{ done: progressMsg.startsWith('✓'), error: progressMsg.startsWith('✗') }">
+        <!-- 生成进度提示 -->
+        <div v-if="progressMsg && !aiProgress" class="progress-bar">
+          <div class="progress-inner" :class="{ done: progressMsg.startsWith('已生成'), error: progressMsg.startsWith('生成失败') }">
             <span v-if="loading" class="spinner"></span>
             {{ progressMsg }}
           </div>
@@ -484,7 +379,7 @@ onMounted(() => {
         <section v-if="stem" class="preview-card">
           <div class="section-heading compact">
             <span class="dot blue"></span>
-            <h3>实时预览</h3>
+            <h3>题目预览</h3>
           </div>
           <p>{{ stem.slice(0, 150) }}{{ stem.length > 150 ? "..." : "" }}</p>
           <ol type="A">
@@ -699,7 +594,31 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 16px;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.nav-chip {
+  min-width: 30px;
+  height: 30px;
+  border: 1px solid #e5ebf3;
+  border-radius: 6px;
+  background: #fff;
+  color: #6e7b8f;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.nav-chip:hover {
+  border-color: #1385f8;
+  color: #1385f8;
+}
+
+.nav-chip.active {
+  background: #1385f8;
+  border-color: #1385f8;
+  color: #fff;
 }
 
 .nav-info {
@@ -778,28 +697,6 @@ onMounted(() => {
   color: #6e7b8f;
 }
 
-.button-row {
-  display: flex;
-  gap: 10px;
-}
-
-.candidate-img {
-  width: 100%;
-  aspect-ratio: 4 / 3;
-  object-fit: cover;
-  display: block;
-}
-
-.candidate-placeholder {
-  display: grid;
-  place-items: center;
-  aspect-ratio: 4 / 3;
-  background: #edf2f7;
-  color: #5f7087;
-  font-size: 32px;
-  font-weight: 700;
-}
-
 .progress-bar {
   margin-top: 10px;
 }
@@ -839,38 +736,224 @@ onMounted(() => {
   to { transform: rotate(360deg); }
 }
 
-.image-options {
-  margin-top: 10px;
-}
-
-.checkbox-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
+/* 生成结果只读展示 */
+.readonly-stem {
   font-size: 14px;
+  line-height: 1.7;
   color: #172033;
+  margin: 0 0 12px;
 }
 
-.checkbox-row input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
+.readonly-options {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
 }
 
-.image-count-row {
+.readonly-option {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 8px;
   font-size: 13px;
-  color: #6e7b8f;
+  color: #3a4658;
 }
 
-.image-count-row select {
-  height: 30px;
-  border: 1px solid #e5ebf3;
-  border-radius: 6px;
-  padding: 0 8px;
+.readonly-option.correct {
+  color: #087c55;
+  font-weight: 600;
+}
+
+.correct-mark {
+  font-size: 12px;
+  color: #087c55;
+}
+
+.readonly-explanation label {
+  font-size: 12px;
+  color: #9aa5b4;
+}
+
+.readonly-explanation p {
   font-size: 13px;
+  line-height: 1.7;
+  color: #3a4658;
+  margin: 4px 0 0;
+}
+
+.preview-empty {
+  min-height: 220px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-content: center;
+  align-items: center;
+  gap: 22px;
+  padding: 26px;
+  border: 1px dashed #c9d9ea;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #f8fbff 0%, #f2f8f6 100%);
+}
+
+.preview-empty-mark {
+  width: 74px;
+  height: 74px;
+  display: grid;
+  place-items: center;
+  border-radius: 22px 8px 22px 8px;
+  background: #103b61;
+  color: #fff;
+  font: 800 20px/1 Georgia, serif;
+  letter-spacing: 0.08em;
+  box-shadow: 0 12px 24px rgba(16, 59, 97, 0.18);
+}
+
+.preview-empty strong {
+  display: block;
+  margin-bottom: 8px;
+  color: #172033;
+  font-size: 17px;
+}
+
+.preview-empty p {
+  max-width: 620px;
+  margin: 0;
+  color: #607086;
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.workflow-panel {
+  overflow: hidden;
+  background: linear-gradient(160deg, #ffffff 0%, #f8fbff 62%, #f4faf7 100%);
+}
+
+.workflow-rail {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.workflow-step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 10px;
+  min-height: 112px;
+  padding: 15px;
+  border: 1px solid #e1e9f2;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.workflow-step.active {
+  border-color: #8dc7ff;
+  box-shadow: inset 0 0 0 1px rgba(19, 133, 248, 0.1);
+}
+
+.workflow-step.done {
+  border-color: #a9ddc8;
+  background: rgba(244, 252, 248, 0.9);
+}
+
+.workflow-number {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #edf2f7;
+  color: #78879a;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.workflow-step.active .workflow-number { background: #1385f8; color: #fff; }
+.workflow-step.done .workflow-number { background: #11835d; color: #fff; font-size: 15px; }
+
+.workflow-step strong {
+  display: block;
+  margin: 3px 0 6px;
+  color: #1c2a3d;
+  font-size: 14px;
+}
+
+.workflow-step p {
+  margin: 0;
+  color: #6e7b8f;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.quality-contract {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 12px;
+  padding: 13px 15px;
+  border-left: 3px solid #11835d;
+  background: rgba(235, 248, 242, 0.72);
+}
+
+.quality-contract strong { display: block; color: #17382d; font-size: 13px; }
+.quality-kicker { display: block; margin-bottom: 3px; color: #11835d; font-size: 10px; font-weight: 800; letter-spacing: 0.08em; }
+.quality-contract ul { display: flex; gap: 7px; margin: 0; padding: 0; list-style: none; flex-wrap: wrap; justify-content: flex-end; }
+.quality-contract li { padding: 4px 8px; border: 1px solid #b7dfcf; border-radius: 999px; color: #26634f; background: #fff; font-size: 11px; white-space: nowrap; }
+
+@media (max-width: 760px) {
+  .preview-empty { grid-template-columns: 1fr; min-height: 0; padding: 20px; }
+  .workflow-rail { grid-template-columns: 1fr; }
+  .workflow-step { min-height: 0; }
+  .quality-contract { align-items: flex-start; flex-direction: column; }
+  .quality-contract ul { justify-content: flex-start; }
+}
+
+/* 淘汰明细 */
+.discard-panel {
+  border-color: #f3d9b0;
+}
+
+.discard-item {
+  border: 1px solid #f3e2c2;
+  background: #fffdf7;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+
+.discard-stem {
+  font-size: 13px;
+  font-weight: 600;
+  color: #172033;
+  margin: 0 0 6px;
+}
+
+.discard-verdict {
+  font-size: 12px;
+  color: #c07b22;
+  margin: 0 0 6px;
+}
+
+.discard-issues {
+  margin: 0 0 6px;
+  padding-left: 18px;
+  font-size: 12px;
+  color: #3a4658;
+}
+
+.discard-suggestion {
+  font-size: 12px;
+  color: #6e7b8f;
+  margin: 0 0 4px;
+}
+
+.discard-hint {
+  font-size: 12px;
+  color: #9aa5b4;
+  margin: 4px 0 0;
+}
+
+/* 预览标题行右侧的 AI 检查评分按钮 */
+.preview-ai-score {
+  margin-left: auto;
 }
 </style>

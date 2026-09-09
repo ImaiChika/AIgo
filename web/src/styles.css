@@ -115,33 +115,6 @@ button {
   background: #edf6ff;
 }
 
-.nav-icon {
-  display: grid;
-  width: 22px;
-  height: 22px;
-  place-items: center;
-  border-radius: 6px;
-  background: #eef3f8;
-  color: currentColor;
-  font-size: 13px;
-}
-
-.sidebar-note {
-  margin-top: auto;
-  padding: 14px;
-  border-radius: 8px;
-  background: #f5f7fb;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.sidebar-note strong {
-  display: block;
-  margin-top: 5px;
-  color: var(--text);
-}
-
 .workspace {
   min-width: 0;
   padding: 22px 28px 34px;
@@ -192,6 +165,13 @@ button {
 
 .primary-button:hover {
   background: var(--blue-dark);
+}
+
+.primary-button:disabled,
+.ghost-button:disabled,
+.outline-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .ghost-button {
@@ -369,8 +349,7 @@ button {
   border-color: var(--blue);
 }
 
-.stem-input,
-.image-prompt textarea {
+.stem-input {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -383,60 +362,6 @@ button {
 .stem-input {
   min-height: 122px;
   padding: 14px;
-}
-
-.image-prompt {
-  display: grid;
-  gap: 10px;
-}
-
-.image-prompt label {
-  color: var(--muted);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.image-prompt textarea {
-  min-height: 136px;
-  padding: 12px;
-  font-size: 13px;
-}
-
-.candidate-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 14px;
-}
-
-.candidate-card {
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #fff;
-  padding: 0;
-  text-align: left;
-}
-
-.candidate-card.selected {
-  border-color: var(--blue);
-  box-shadow: 0 0 0 3px rgba(19, 133, 248, 0.14);
-}
-
-.candidate-art {
-  display: block;
-  width: 100%;
-  aspect-ratio: 4 / 3;
-  background: #edf2f7;
-}
-
-.candidate-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 10px;
-  color: var(--muted);
-  font-size: 12px;
 }
 
 .status {
@@ -641,10 +566,6 @@ button {
     overflow-x: auto;
   }
 
-  .sidebar-note {
-    display: none;
-  }
-
   .main-grid {
     grid-template-columns: 1fr;
   }
@@ -672,10 +593,6 @@ button {
   .notice-strip {
     align-items: flex-start;
     flex-direction: column;
-  }
-
-  .candidate-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .sidebar {

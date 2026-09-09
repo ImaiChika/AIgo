@@ -20,17 +20,28 @@ type Service struct {
 	client        llm.Client
 	questionStore storage.QuestionStore
 	aiReviewStore storage.AIReviewStore
+	taskStore     storage.AICheckTaskStore
 	modelName     string
+
+	// worker 配置（零值时使用默认，见 worker.go）
+	CheckTimeout time.Duration // 单次检查调用超时；任务租约 = 超时 + 缓冲
+	MaxAttempts  int           // 失败重试上限，耗尽标记最终失败
+	RetryBackoff time.Duration // 首次重试退避，按尝试次数指数递增
+
+	autoEnabled bool // 自动触发检查开关，见 worker.go
 }
 
 // NewService 创建 AI 检查服务。
-// client 为 LLM 客户端（可调换），modelName 为显示用的模型名。
-func NewService(client llm.Client, qs storage.QuestionStore, rs storage.AIReviewStore, model string) *Service {
+// client 为 LLM 客户端（可调换），modelName 为显示用的模型名；
+// taskStore 为持久化任务队列，nil 时仅支持同步检查（CheckQuestions）。
+func NewService(client llm.Client, qs storage.QuestionStore, rs storage.AIReviewStore, ts storage.AICheckTaskStore, model string) *Service {
 	return &Service{
 		client:        client,
 		questionStore: qs,
 		aiReviewStore: rs,
+		taskStore:     ts,
 		modelName:     model,
+		autoEnabled:   true,
 	}
 }
 
@@ -44,24 +55,39 @@ func (s *Service) CheckQuestion(ctx context.Context, questionID string) (*domain
 	if q == nil {
 		return nil, fmt.Errorf("题目不存在: %s", questionID)
 	}
+	strictQuestion := *q
+	strictQuestion.Options = append([]domain.Option(nil), q.Options...)
+	strictErr := strictQuestion.ValidateForReview()
 
 	// 2. 构建 prompt 并调用 LLM
 	prompt := buildCheckPrompt(q)
 	raw, err := s.client.Complete(ctx, []llm.Message{
 		{Role: llm.RoleSystem, Content: getCheckSystemPrompt()},
 		{Role: llm.RoleUser, Content: prompt},
-	}, llm.GenerateOptions{Temperature: 0.2, MaxTokens: 4000})
+	}, llm.GenerateOptions{Temperature: 0.2})
 	if err != nil {
 		return nil, fmt.Errorf("LLM 调用失败: %w", err)
 	}
 
 	// 3. 解析 LLM 响应
-	result, err := parseCheckResponse(raw, questionID, s.modelName)
+	result, err := parseCheckResponse(raw, questionID, s.currentModelName())
 	if err != nil {
 		return nil, fmt.Errorf("解析检查结果失败: %w", err)
 	}
 	// 记录检查时的题目版本号，用于判断结果是否过期
 	result.QuestionVersion = q.Version
+	if strictErr != nil {
+		result.Verdict = "reject"
+		if result.Scores.A2Fit > 50 {
+			result.Scores.A2Fit = 50
+		}
+		result.Issues = append(result.Issues, domain.ReviewIssue{
+			Field:    "expert_format",
+			Severity: "error",
+			Message:  strictErr.Error(),
+		})
+		result.Suggestion = "请先修正专家A2规范问题：" + strictErr.Error() + "。" + result.Suggestion
+	}
 
 	// 4. 持久化结果
 	if err := s.aiReviewStore.SaveReviewResult(ctx, *result); err != nil {
@@ -69,8 +95,10 @@ func (s *Service) CheckQuestion(ctx context.Context, questionID string) (*domain
 	}
 
 	// 5. 根据检查结果更新题目状态
-	// 注意：只能推进草稿态（ai_draft/auto_checked），不能回退人工审核后的状态
-	// （reviewing/approved/published 等状态由人工审核流程管理，AI 检查无权改动）
+	// AI 检查仅在题目首次创建时执行一次：通过则把草稿态推进为 ai_reviewed；
+	// 不通过时题目自动淘汰删除（不入题库），淘汰原因留档供生成页展示。
+	// 已通过检查（ai_reviewed）或进入人工流程的题目，即使之后被重新检查，
+	// 状态也不由 AI 检查改动——人工修改后的把关责任在专家审核环节。
 	if result.Verdict == "pass" {
 		switch q.Status {
 		case domain.StatusAIDraft, domain.StatusAutoChecked, domain.StatusAIReviewed:
@@ -82,9 +110,51 @@ func (s *Service) CheckQuestion(ctx context.Context, questionID string) (*domain
 		default:
 			// 已进入人工审核或更后状态，不修改题目状态，只保存检查结果
 		}
+		return result, nil
+	}
+	if q.Status == domain.StatusAIDraft {
+		// 首次检查不通过 → 淘汰：留档原因后删除题目（题库只保留检查通过的题）
+		discard := domain.AICheckDiscard{
+			ID:          fmt.Sprintf("aicd-%s-%d", questionID, time.Now().UnixNano()),
+			QuestionID:  questionID,
+			Verdict:     result.Verdict,
+			Scores:      result.Scores,
+			Issues:      result.Issues,
+			Suggestion:  result.Suggestion,
+			Model:       result.Model,
+			StemSummary: stemSummary(q.ClinicalStem, 60),
+			CreatedAt:   time.Now(),
+		}
+		if err := s.aiReviewStore.SaveDiscardResult(ctx, discard); err != nil {
+			return nil, fmt.Errorf("保存淘汰记录失败: %w", err)
+		}
+		if err := s.questionStore.DeleteQuestion(ctx, questionID); err != nil {
+			return nil, fmt.Errorf("删除未通过检查的题目失败: %w", err)
+		}
+		fmt.Printf("AI 检查淘汰题目 %s（%s）：已留档并删除\n", questionID, result.Verdict)
 	}
 
 	return result, nil
+}
+
+// currentModelName 支持动态 AI 检查配置。旧的固定客户端或测试 mock 没有
+// InfoProvider 时继续使用服务初始化时传入的模型名。
+func (s *Service) currentModelName() string {
+	if provider, ok := s.client.(llm.InfoProvider); ok {
+		if model := provider.Info().Model; strings.TrimSpace(model) != "" {
+			return model
+		}
+	}
+	return s.modelName
+}
+
+// stemSummary 生成题干摘要，用于淘汰记录展示。
+func stemSummary(stem string, limit int) string {
+	runes := []rune(strings.TrimSpace(stem))
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit]) + "…"
 }
 
 // CheckQuestions 批量检查多道题目。
@@ -98,7 +168,7 @@ func (s *Service) CheckQuestions(ctx context.Context, questionIDs []string) ([]d
 				QuestionID: id,
 				Verdict:    "error",
 				Suggestion: fmt.Sprintf("检查失败: %v", err),
-				Model:      s.modelName,
+				Model:      s.currentModelName(),
 				CreatedAt:  time.Now(),
 			})
 			continue
@@ -111,6 +181,20 @@ func (s *Service) CheckQuestions(ctx context.Context, questionIDs []string) ([]d
 // GetResult 获取某题最新的检查结果。
 func (s *Service) GetResult(ctx context.Context, questionID string) (*domain.AIReviewResult, error) {
 	return s.aiReviewStore.GetLatestByQuestionID(ctx, questionID)
+}
+
+// GetResultsByQuestionIDs 批量获取多题的最新检查结果，返回 questionID → 结果。
+// 供审核侧展示 AI 检查参考信息使用。
+func (s *Service) GetResultsByQuestionIDs(ctx context.Context, questionIDs []string) (map[string]domain.AIReviewResult, error) {
+	results, err := s.aiReviewStore.ListByQuestionIDs(ctx, questionIDs)
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[string]domain.AIReviewResult, len(results))
+	for _, r := range results {
+		m[r.QuestionID] = r
+	}
+	return m, nil
 }
 
 // ListResults 列出所有检查结果。
@@ -127,7 +211,15 @@ func getCheckSystemPrompt() string {
 2. **答案正确性**：给定的正确答案是否确实正确，是否有更好的答案
 3. **解析准确性**：解析是否正确说明了答案依据，是否正确解释了干扰项错误原因
 4. **逻辑性**：题干信息是否完整、是否有逻辑漏洞、选项是否互斥
-5. **A2 格式**：是否符合 A2 型题格式（临床情境题干、五选一）
+5. **A2 格式**：是否为A-E严格五选一；题干是否以性别、年龄开头；是否删除“主诉：/现病史：/提问：”等引导词；最后提问是否不用“哪个/什么”和问号
+6. **说明格式**：是否先写“正确答案为X”，给出诊断或结论及依据，逐项分析四个干扰项，并以“故选X”收尾
+7. **元数据**：难度是否为0.05倍数；认知层次是否合法；考核要点是否仅来自受控词表且不填写具体疾病名
+
+判定注意事项：
+- 解析是可选字段；没有解析不得仅因此判为不通过。有解析时再检查其准确性和专家格式。
+- “110/70mmHg”与“110/70 mmHg”等常见数值单位写法均可接受，不得仅因是否留空格判为warning或error。
+- 不影响医学正确性、答案唯一性或可用性的轻微排版建议只能标为info；info不影响pass。
+- 若存在另一个同样合理的选项，应按答案不唯一处理，至少判为issues_found；不要只验证给定答案本身是否成立。
 
 请严格按 JSON 格式返回检查结果，不要输出其他内容。`
 }
@@ -141,7 +233,7 @@ func buildCheckPrompt(q *domain.A2Question) string {
 
 	b.WriteString("【选项】\n")
 	for _, opt := range q.Options {
-		b.WriteString(fmt.Sprintf("%s. %s\n", opt.Label, opt.Text))
+		b.WriteString(fmt.Sprintf("%s．%s\n", opt.Label, opt.Text))
 	}
 	b.WriteString("\n")
 
@@ -153,6 +245,21 @@ func buildCheckPrompt(q *domain.A2Question) string {
 
 	if q.Difficulty != "" {
 		b.WriteString(fmt.Sprintf("【难度】\n%s\n\n", q.Difficulty))
+	}
+	if q.CognitiveLevel != "" {
+		b.WriteString(fmt.Sprintf("【认知层次】\n%s\n\n", q.CognitiveLevel))
+	}
+	if q.ExamPoints != "" {
+		b.WriteString(fmt.Sprintf("【考核要点】\n%s\n\n", q.ExamPoints))
+	}
+	if q.OutlineCode != "" {
+		b.WriteString(fmt.Sprintf("【大纲代码】\n%s\n\n", q.OutlineCode))
+	}
+	if q.Profession != "" {
+		b.WriteString(fmt.Sprintf("【专业】\n%s\n\n", q.Profession))
+	}
+	if q.System != "" {
+		b.WriteString(fmt.Sprintf("【系统】\n%s\n\n", q.System))
 	}
 
 	b.WriteString(`【输出格式】
@@ -191,8 +298,8 @@ verdict 判定规则：
 
 // checkResponse LLM 返回的检查结果结构。
 type checkResponse struct {
-	Verdict    string `json:"verdict"`
-	Scores     struct {
+	Verdict string `json:"verdict"`
+	Scores  struct {
 		Scientific int `json:"scientific"`
 		Logic      int `json:"logic"`
 		A2Fit      int `json:"a2_fit"`
@@ -239,7 +346,7 @@ func parseCheckResponse(raw, questionID, modelName string) (*domain.AIReviewResu
 	}
 
 	result := &domain.AIReviewResult{
-		ID: fmt.Sprintf("air-%s-%d", questionID, time.Now().UnixNano()),
+		ID:         fmt.Sprintf("air-%s-%d", questionID, time.Now().UnixNano()),
 		QuestionID: questionID,
 		Verdict:    resp.Verdict,
 		Scores: domain.ReviewScores{

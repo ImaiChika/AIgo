@@ -2,10 +2,12 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"aigo/internal/domain"
@@ -16,7 +18,76 @@ import (
 
 // Store PostgreSQL 存储实现。
 type Store struct {
-	db *sql.DB
+	db               *sql.DB
+	llmEncryptionKey []byte
+}
+
+type reviewTransactionContextKey struct{}
+
+type sqlExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+type sqlQueryExecer interface {
+	sqlExecer
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func reviewTransactionFromContext(ctx context.Context) *sql.Tx {
+	tx, _ := ctx.Value(reviewTransactionContextKey{}).(*sql.Tx)
+	return tx
+}
+
+func (s *Store) execContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if tx := reviewTransactionFromContext(ctx); tx != nil {
+		return tx.ExecContext(ctx, query, args...)
+	}
+	return s.db.ExecContext(ctx, query, args...)
+}
+
+func (s *Store) queryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if tx := reviewTransactionFromContext(ctx); tx != nil {
+		return tx.QueryContext(ctx, query, args...)
+	}
+	return s.db.QueryContext(ctx, query, args...)
+}
+
+func (s *Store) queryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	if tx := reviewTransactionFromContext(ctx); tx != nil {
+		return tx.QueryRowContext(ctx, query, args...)
+	}
+	return s.db.QueryRowContext(ctx, query, args...)
+}
+
+// WithReviewTransaction 在同一 PostgreSQL 事务中执行审核任务、审核记录和题目状态写入。
+func (s *Store) WithReviewTransaction(ctx context.Context, questionStore storage.QuestionStore, fn func(context.Context) error) (err error) {
+	questionPG, ok := questionStore.(*Store)
+	if !ok || questionPG != s {
+		return fmt.Errorf("审核事务要求审核存储与题目存储使用同一 PostgreSQL Store")
+	}
+	if reviewTransactionFromContext(ctx) != nil {
+		return fn(ctx)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("开始审核事务失败: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	txCtx := context.WithValue(ctx, reviewTransactionContextKey{}, tx)
+	if err := fn(txCtx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交审核事务失败: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 // New 创建 PostgreSQL 存储。
@@ -34,91 +105,6 @@ func New(dsn string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
-// InitSchema 初始化数据库表结构。
-// 先执行建表语句（CREATE TABLE IF NOT EXISTS），再执行幂等迁移，
-// 保证已有部署的旧库也能补充新增列和约束。
-func (s *Store) InitSchema(schemaSQL string) error {
-	if _, err := s.db.Exec(schemaSQL); err != nil {
-		return err
-	}
-	return s.runMigrations()
-}
-
-// runMigrations 幂等迁移：对已存在的旧表补充新增列/约束。
-// 每条迁移都必须可重复执行（IF NOT EXISTS / IF EXISTS 判断）。
-func (s *Store) runMigrations() error {
-	migrations := []string{
-		// ai_review_results 增加 question_version 列（AI 检查结果版本绑定）
-		`ALTER TABLE ai_review_results ADD COLUMN IF NOT EXISTS question_version INT NOT NULL DEFAULT 0`,
-		// 删除题目时级联清理关联数据
-		`DO $$ BEGIN
-			ALTER TABLE review_tasks DROP CONSTRAINT IF EXISTS review_tasks_question_id_fkey;
-			ALTER TABLE review_tasks ADD CONSTRAINT review_tasks_question_id_fkey
-				FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE;
-		END $$`,
-		`DO $$ BEGIN
-			ALTER TABLE review_records DROP CONSTRAINT IF EXISTS review_records_task_id_fkey;
-			ALTER TABLE review_records ADD CONSTRAINT review_records_task_id_fkey
-				FOREIGN KEY (task_id) REFERENCES review_tasks(id) ON DELETE CASCADE;
-			ALTER TABLE review_records DROP CONSTRAINT IF EXISTS review_records_question_id_fkey;
-			ALTER TABLE review_records ADD CONSTRAINT review_records_question_id_fkey
-				FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE;
-		END $$`,
-		`DO $$ BEGIN
-			ALTER TABLE image_prompts DROP CONSTRAINT IF EXISTS image_prompts_question_id_fkey;
-			ALTER TABLE image_prompts ADD CONSTRAINT image_prompts_question_id_fkey
-				FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE;
-		END $$`,
-		`DO $$ BEGIN
-			ALTER TABLE generated_images DROP CONSTRAINT IF EXISTS generated_images_prompt_id_fkey;
-			ALTER TABLE generated_images ADD CONSTRAINT generated_images_prompt_id_fkey
-				FOREIGN KEY (prompt_id) REFERENCES image_prompts(id) ON DELETE CASCADE;
-			ALTER TABLE generated_images DROP CONSTRAINT IF EXISTS generated_images_question_id_fkey;
-			ALTER TABLE generated_images ADD CONSTRAINT generated_images_question_id_fkey
-				FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE;
-		END $$`,
-		`DO $$ BEGIN
-			ALTER TABLE image_review_records DROP CONSTRAINT IF EXISTS image_review_records_image_id_fkey;
-			ALTER TABLE image_review_records ADD CONSTRAINT image_review_records_image_id_fkey
-				FOREIGN KEY (image_id) REFERENCES generated_images(id) ON DELETE CASCADE;
-		END $$`,
-		// 题库分库
-		`ALTER TABLE questions ADD COLUMN IF NOT EXISTS bank_id TEXT NOT NULL DEFAULT ''`,
-		`CREATE INDEX IF NOT EXISTS idx_questions_bank ON questions(bank_id)`,
-		`ALTER TABLE question_banks ADD COLUMN IF NOT EXISTS professions TEXT[] DEFAULT '{}'`,
-		// 题目-题库多对多（一道题可属于多个题库）：
-		// 先把旧单库归属迁入成员表，再删除旧列
-		`DO $$ BEGIN
-			CREATE TABLE IF NOT EXISTS question_bank_members (
-				question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
-				bank_id TEXT NOT NULL REFERENCES question_banks(id) ON DELETE CASCADE,
-				PRIMARY KEY (question_id, bank_id)
-			);
-		END $$`,
-		`INSERT INTO question_bank_members (question_id, bank_id)
-			SELECT id, bank_id FROM questions WHERE bank_id != ''
-			ON CONFLICT DO NOTHING`,
-		`ALTER TABLE questions DROP COLUMN IF EXISTS bank_id`,
-		// 用户权限体系
-		`ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions TEXT[] DEFAULT '{}'`,
-		`ALTER TABLE users ADD COLUMN IF NOT EXISTS bank_ids TEXT[] DEFAULT '{}'`,
-		// 审核流程：适用题库 + 最终把关人
-		`ALTER TABLE review_flows ADD COLUMN IF NOT EXISTS bank_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE review_flows ADD COLUMN IF NOT EXISTS final_reviewer_ids TEXT[] DEFAULT '{}'`,
-		`ALTER TABLE review_flows ADD COLUMN IF NOT EXISTS vote_rule TEXT NOT NULL DEFAULT ''`,
-		// 审核任务：最终把关人快照
-		`ALTER TABLE review_tasks ADD COLUMN IF NOT EXISTS final_reviewer_ids TEXT[] DEFAULT '{}'`,
-		`ALTER TABLE review_tasks ADD COLUMN IF NOT EXISTS final_decision JSONB DEFAULT 'null'`,
-		`ALTER TABLE review_tasks ADD COLUMN IF NOT EXISTS question_prev_status TEXT NOT NULL DEFAULT ''`,
-	}
-	for _, m := range migrations {
-		if _, err := s.db.Exec(m); err != nil {
-			return fmt.Errorf("数据库迁移失败: %w\nSQL: %s", err, m)
-		}
-	}
-	return nil
-}
-
 // Close 关闭数据库连接。
 func (s *Store) Close() error {
 	return s.db.Close()
@@ -129,144 +115,285 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
-// ===== 知识点 =====
-
-func (s *Store) SavePoints(ctx context.Context, points []domain.KnowledgePoint) (int, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
+// SetLLMEncryptionKey 设置系统级 AI 配置的加密密钥。
+// 生产环境由 JWT_SECRET 派生，必须在读取/写入 AI 配置前设置；密钥本身不落库。
+func (s *Store) SetLLMEncryptionKey(secret string) {
+	if strings.TrimSpace(secret) == "" {
+		s.llmEncryptionKey = nil
+		return
 	}
-	defer tx.Rollback()
+	sum := sha256.Sum256([]byte("aigo-ai-provider-config-v1:" + secret))
+	s.llmEncryptionKey = append([]byte(nil), sum[:]...)
+}
 
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO knowledge_points (id, category, subject, unit, sub_item, topic, outline_code, outline_ref, keywords)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (id) DO UPDATE SET
-			category=EXCLUDED.category, subject=EXCLUDED.subject, unit=EXCLUDED.unit,
-			sub_item=EXCLUDED.sub_item, topic=EXCLUDED.topic, outline_code=EXCLUDED.outline_code,
-			outline_ref=EXCLUDED.outline_ref, keywords=EXCLUDED.keywords
+// CheckReadiness 检查数据库连接以及当前业务运行所需的关键表/列。
+// LLM 和批量推理不是题库浏览/人工审核的强依赖，不纳入进程 readiness。
+func (s *Store) CheckReadiness(ctx context.Context) error {
+	if err := s.db.PingContext(ctx); err != nil {
+		return fmt.Errorf("数据库连接不可用: %w", err)
+	}
+	if err := s.CheckSchemaVersion(ctx); err != nil {
+		return err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			q.version, q.status,
+			q.owner_id,
+			qv.version,
+			rt.question_version, rt.status,
+			u.permissions, u.bank_ids,
+			r.permissions,
+			qb.professions,
+			kp.id, kp.version_id, kp.revision,
+			rf.rounds,
+			bj.backend,
+			ar.question_version,
+			act.status
+		FROM questions q
+		CROSS JOIN question_versions qv
+		CROSS JOIN review_tasks rt
+		CROSS JOIN users u
+		CROSS JOIN roles r
+		CROSS JOIN question_banks qb
+		CROSS JOIN knowledge_points kp
+		CROSS JOIN review_flows rf
+		CROSS JOIN batch_jobs bj
+			CROSS JOIN ai_review_results ar
+			CROSS JOIN ai_check_tasks act
+			CROSS JOIN question_share_requests qsr
+			CROSS JOIN auth_login_limits allm
+		LIMIT 0
 	`)
 	if err != nil {
-		return 0, err
+		return fmt.Errorf("关键数据库 Schema 不完整: %w", err)
 	}
-	defer stmt.Close()
+	return rows.Close()
+}
 
-	count := 0
-	for _, p := range points {
-		_, err := stmt.ExecContext(ctx, p.ID, p.Category, p.Subject, p.Unit, p.SubItem, p.Topic, p.OutlineCode, p.OutlineCode, pqArray(p.Keywords))
-		if err != nil {
-			return count, err
+// reviewMutationLockKey 是审核状态变更使用的数据库级全局锁。
+// 审核写入频率远低于题库查询，采用单锁可以避免为每个等待者长期占用连接，
+// 同时保证多进程部署下送审、投票、决断和撤销不会互相覆盖。
+const reviewMutationLockKey int64 = 0x4149474f5f524556 // "AIGO_REV"
+
+// AcquireReviewMutationLock 获取 PostgreSQL session advisory lock。
+// 等待者使用 try-lock 轮询并立即归还连接，防止连接池被等待锁的请求占满后死锁。
+func (s *Store) AcquireReviewMutationLock(ctx context.Context) (func() error, error) {
+	const retryInterval = 10 * time.Millisecond
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		count++
+
+		conn, err := s.db.Conn(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("获取审核锁连接失败: %w", err)
+		}
+		var acquired bool
+		err = conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, reviewMutationLockKey).Scan(&acquired)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("获取审核锁失败: %w", err)
+		}
+		if acquired {
+			var once sync.Once
+			var releaseErr error
+			return func() error {
+				once.Do(func() {
+					releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					var released bool
+					if err := conn.QueryRowContext(releaseCtx, `SELECT pg_advisory_unlock($1)`, reviewMutationLockKey).Scan(&released); err != nil {
+						releaseErr = fmt.Errorf("释放审核锁失败: %w", err)
+					} else if !released {
+						releaseErr = fmt.Errorf("释放审核锁失败: 当前连接未持有锁")
+					}
+					if err := conn.Close(); releaseErr == nil && err != nil {
+						releaseErr = err
+					}
+				})
+				return releaseErr
+			}, nil
+		}
+		conn.Close()
+
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
-	return count, tx.Commit()
 }
 
-func (s *Store) GetPoint(ctx context.Context, id string) (*domain.KnowledgePoint, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, category, subject, unit, sub_item, topic, outline_code, keywords FROM knowledge_points WHERE id=$1`, id)
-	return scanPoint(row)
-}
-
-func (s *Store) ListPoints(ctx context.Context) ([]domain.KnowledgePoint, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, category, subject, unit, sub_item, topic, outline_code, keywords FROM knowledge_points ORDER BY id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanPoints(rows)
-}
-
-func (s *Store) SearchPoints(ctx context.Context, keyword string) ([]domain.KnowledgePoint, error) {
-	kw := "%" + strings.ToLower(keyword) + "%"
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, category, subject, unit, sub_item, topic, outline_code, keywords
-		FROM knowledge_points
-		WHERE LOWER(topic) LIKE $1 OR LOWER(unit) LIKE $1 OR LOWER(sub_item) LIKE $1
-		   OR LOWER(outline_code) LIKE $1 OR LOWER(subject) LIKE $1
-		ORDER BY id
-	`, kw)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanPoints(rows)
-}
-
-func (s *Store) ListBySubject(ctx context.Context, subject string) ([]domain.KnowledgePoint, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, category, subject, unit, sub_item, topic, outline_code, keywords FROM knowledge_points WHERE subject=$1 ORDER BY id`, subject)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanPoints(rows)
-}
-
+// Count 返回题目总数。
 func (s *Store) Count(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM questions`).Scan(&n)
 	return n, err
 }
 
-// KPCount 知识点数量。
-func (s *Store) KPCount(ctx context.Context) (int, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM knowledge_points`).Scan(&n)
-	return n, err
-}
-
-func (s *Store) DeletePoint(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM knowledge_points WHERE id=$1`, id)
-	return err
+// ListProfessions 返回题目表中出现过的全部非空专业值（数据库端去重）。
+func (s *Store) ListProfessions(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT profession FROM questions WHERE profession <> '' ORDER BY profession`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		result = append(result, p)
+	}
+	return result, rows.Err()
 }
 
 // ===== 题目 =====
 
 func (s *Store) SaveQuestion(ctx context.Context, q domain.A2Question) error {
-	opts, _ := json.Marshal(q.Options)
-	refs, _ := json.Marshal(q.SourceRefs)
-	kps, _ := json.Marshal(q.KnowledgePoints)
-	media, _ := json.Marshal(q.MediaRefs)
+	if tx := reviewTransactionFromContext(ctx); tx != nil {
+		return s.saveQuestion(ctx, tx, q)
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO questions (id, clinical_stem, options, answer, explanation, source_refs, knowledge_points, media_refs, difficulty, cognitive_level, exam_points, outline_code, profession, system_name, status, version, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-		ON CONFLICT (id) DO UPDATE SET
-			clinical_stem=EXCLUDED.clinical_stem, options=EXCLUDED.options, answer=EXCLUDED.answer,
-			explanation=EXCLUDED.explanation, source_refs=EXCLUDED.source_refs,
-			knowledge_points=EXCLUDED.knowledge_points, media_refs=EXCLUDED.media_refs,
-			difficulty=EXCLUDED.difficulty, cognitive_level=EXCLUDED.cognitive_level,
-			exam_points=EXCLUDED.exam_points, outline_code=EXCLUDED.outline_code,
-			profession=EXCLUDED.profession, system_name=EXCLUDED.system_name,
-			status=EXCLUDED.status, version=EXCLUDED.version, updated_at=EXCLUDED.updated_at
-	`, q.ID, q.ClinicalStem, opts, q.Answer, q.Explanation, refs, kps, media,
-		q.Difficulty, q.CognitiveLevel, q.ExamPoints, q.OutlineCode, q.Profession, q.System,
-		q.Status, q.Version, q.CreatedAt, q.UpdatedAt)
-	if err != nil {
-		return err
-	}
-	// 更新题库归属（多对多）
-	if err := s.replaceBankMembers(ctx, tx, q.ID, q.BankIDs); err != nil {
+	if err := s.saveQuestion(ctx, tx, q); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
+func (s *Store) saveQuestion(ctx context.Context, executor sqlQueryExecer, q domain.A2Question) error {
+	q.Status = domain.CanonicalLifecycleStatus(q.Status)
+	if q.Version < 1 {
+		return fmt.Errorf("%w: 题目 %s 的版本号必须从 1 开始", domain.ErrQuestionVersionConflict, q.ID)
+	}
+	existing, err := s.getQuestionForUpdate(ctx, executor, q.ID)
+	if err != nil {
+		return err
+	}
+	contentChanged := existing == nil
+	if existing == nil {
+		if q.Version != 1 {
+			return fmt.Errorf("%w: 题目 %s 的初始版本必须为 1，实际为 %d", domain.ErrQuestionVersionConflict, q.ID, q.Version)
+		}
+		// 首次创建记录生成者（题目内容版本之外的身份字段，后续保存不覆盖）
+		if strings.TrimSpace(q.CreatedBy) == "" {
+			q.CreatedBy = storage.QuestionChangeFromContext(ctx).Actor
+		}
+		if strings.TrimSpace(q.CreatedBy) == "" {
+			q.CreatedBy = "system"
+		}
+		if strings.TrimSpace(q.OwnerID) == "" {
+			q.OwnerID = storage.QuestionChangeFromContext(ctx).OwnerID
+		}
+	} else {
+		q.OwnerID = existing.OwnerID
+		contentChanged = !domain.QuestionContentEqual(*existing, q)
+		if contentChanged && (existing.Status == domain.StatusReviewing || existing.Status == domain.StatusConflict) {
+			return fmt.Errorf("%w: 题目 %s 正在审核或等待决断，不能修改内容", domain.ErrQuestionVersionConflict, q.ID)
+		}
+		if contentChanged && q.Version != existing.Version+1 {
+			return fmt.Errorf("%w: 题目 %s 内容已变化，必须从版本 %d 递增到 %d，实际为 %d", domain.ErrQuestionVersionConflict, q.ID, existing.Version, existing.Version+1, q.Version)
+		}
+		if !contentChanged && q.Version != existing.Version {
+			return fmt.Errorf("%w: 题目 %s 内容未变化，版本号不能从 %d 变为 %d", domain.ErrQuestionVersionConflict, q.ID, existing.Version, q.Version)
+		}
+	}
+
+	opts, _ := json.Marshal(q.Options)
+	refs, _ := json.Marshal(q.SourceRefs)
+	kps, _ := json.Marshal(q.KnowledgePoints)
+	searchText := storage.BuildQuestionSearchText(q)
+
+	_, err = executor.ExecContext(ctx, `
+		INSERT INTO questions (id, clinical_stem, options, answer, explanation, source_refs, knowledge_points, difficulty, cognitive_level, exam_points, outline_code, profession, system_name, search_text, status, version, created_by, owner_id, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+		ON CONFLICT (id) DO UPDATE SET
+			clinical_stem=EXCLUDED.clinical_stem, options=EXCLUDED.options, answer=EXCLUDED.answer,
+			explanation=EXCLUDED.explanation, source_refs=EXCLUDED.source_refs,
+			knowledge_points=EXCLUDED.knowledge_points,
+			difficulty=EXCLUDED.difficulty, cognitive_level=EXCLUDED.cognitive_level,
+			exam_points=EXCLUDED.exam_points, outline_code=EXCLUDED.outline_code,
+			profession=EXCLUDED.profession, system_name=EXCLUDED.system_name,
+			search_text=EXCLUDED.search_text,
+			status=EXCLUDED.status, version=EXCLUDED.version, updated_at=EXCLUDED.updated_at
+	`, q.ID, q.ClinicalStem, opts, q.Answer, q.Explanation, refs, kps,
+		q.Difficulty, q.CognitiveLevel, q.ExamPoints, q.OutlineCode, q.Profession, q.System, searchText,
+		q.Status, q.Version, q.CreatedBy, q.OwnerID, q.CreatedAt, q.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	// 更新题库归属（多对多）
+	if err := s.replaceBankMembers(ctx, executor, q.ID, q.BankIDs); err != nil {
+		return err
+	}
+	if contentChanged {
+		if err := s.insertQuestionVersion(ctx, executor, q); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// questionSelectColumns 是题目查询的统一列清单（含多对多题库归属聚合）。
+const questionSelectColumns = `q.id, q.clinical_stem, q.options, q.answer, q.explanation, q.source_refs, q.knowledge_points, q.difficulty, q.cognitive_level, q.exam_points, q.outline_code, q.profession, q.system_name,
+	COALESCE(ARRAY(SELECT m.bank_id FROM question_bank_members m WHERE m.question_id = q.id ORDER BY m.bank_id), '{}') AS bank_ids,
+	q.status, q.version, q.created_by, q.owner_id, q.created_at, q.updated_at`
+
+func (s *Store) getQuestionForUpdate(ctx context.Context, executor sqlQueryExecer, id string) (*domain.A2Question, error) {
+	row := executor.QueryRowContext(ctx, `
+		SELECT `+questionSelectColumns+`
+		FROM questions q WHERE q.id=$1 FOR UPDATE
+	`, id)
+	return scanQuestion(row)
+}
+
+func (s *Store) insertQuestionVersion(ctx context.Context, executor sqlExecer, q domain.A2Question) error {
+	change := storage.QuestionChangeFromContext(ctx)
+	if change.Actor == "" {
+		change.Actor = "system"
+	}
+	if change.ChangeType == "" {
+		if q.Version == 1 {
+			change.ChangeType = "create"
+		} else {
+			change.ChangeType = "edit"
+		}
+	}
+	if change.CreatedAt.IsZero() {
+		change.CreatedAt = time.Now()
+	}
+	snapshot, err := json.Marshal(q)
+	if err != nil {
+		return fmt.Errorf("序列化题目版本失败: %w", err)
+	}
+	_, err = executor.ExecContext(ctx, `
+		INSERT INTO question_versions (id, question_id, version, snapshot, actor, change_type, change_note, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+	`, fmt.Sprintf("qv-%s-%d", q.ID, q.Version), q.ID, q.Version, snapshot, change.Actor, change.ChangeType, change.ChangeNote, change.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("保存题目 %s 版本 %d 失败: %w", q.ID, q.Version, err)
+	}
+	return nil
+}
+
 // replaceBankMembers 重建题目-题库成员关系。
-func (s *Store) replaceBankMembers(ctx context.Context, tx *sql.Tx, questionID string, bankIDs []string) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM question_bank_members WHERE question_id=$1`, questionID); err != nil {
+func (s *Store) replaceBankMembers(ctx context.Context, executor sqlExecer, questionID string, bankIDs []string) error {
+	if _, err := executor.ExecContext(ctx, `DELETE FROM question_bank_members WHERE question_id=$1`, questionID); err != nil {
 		return err
 	}
 	for _, b := range bankIDs {
 		if b == "" {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO question_bank_members (question_id, bank_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, questionID, b); err != nil {
+		if _, err := executor.ExecContext(ctx, `INSERT INTO question_bank_members (question_id, bank_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, questionID, b); err != nil {
 			return err
 		}
 	}
@@ -282,25 +409,41 @@ func (s *Store) SaveQuestions(ctx context.Context, questions []domain.A2Question
 
 	count := 0
 	for _, q := range questions {
-		opts, _ := json.Marshal(q.Options)
-		refs, _ := json.Marshal(q.SourceRefs)
-		kps, _ := json.Marshal(q.KnowledgePoints)
-		media, _ := json.Marshal(q.MediaRefs)
-
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO questions (id, clinical_stem, options, answer, explanation, source_refs, knowledge_points, media_refs, difficulty, cognitive_level, exam_points, outline_code, profession, system_name, status, version, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-			ON CONFLICT (id) DO UPDATE SET
-				clinical_stem=EXCLUDED.clinical_stem, options=EXCLUDED.options, answer=EXCLUDED.answer,
-				explanation=EXCLUDED.explanation,
-				status=EXCLUDED.status, updated_at=EXCLUDED.updated_at
-		`, q.ID, q.ClinicalStem, opts, q.Answer, q.Explanation, refs, kps, media,
-			q.Difficulty, q.CognitiveLevel, q.ExamPoints, q.OutlineCode, q.Profession, q.System,
-			q.Status, q.Version, q.CreatedAt, q.UpdatedAt)
+		existing, err := s.getQuestionForUpdate(ctx, tx, q.ID)
 		if err != nil {
 			return count, err
 		}
-		if err := s.replaceBankMembers(ctx, tx, q.ID, q.BankIDs); err != nil {
+		if existing != nil {
+			if domain.QuestionContentEqual(*existing, q) {
+				count++
+				continue
+			}
+			if existing.Status == domain.StatusReviewing || existing.Status == domain.StatusConflict {
+				return count, fmt.Errorf("题目 %s 正在审核或等待决断，不能通过导入覆盖内容", q.ID)
+			}
+			q.Version = existing.Version + 1
+			q.CreatedAt = existing.CreatedAt
+			q.Status = domain.StatusAIDraft
+			if len(q.BankIDs) == 0 {
+				q.BankIDs = append([]string(nil), existing.BankIDs...)
+			}
+		}
+		if q.Version < 1 {
+			q.Version = 1
+		}
+		if q.CreatedAt.IsZero() {
+			q.CreatedAt = time.Now()
+		}
+		q.UpdatedAt = time.Now()
+		change := storage.QuestionChangeFromContext(ctx)
+		if change.ChangeType == "" {
+			change.ChangeType = "import"
+		}
+		if change.Actor == "" {
+			change.Actor = "import"
+		}
+		questionCtx := storage.WithQuestionChange(ctx, change)
+		if err := s.saveQuestion(questionCtx, tx, q); err != nil {
 			return count, err
 		}
 		count++
@@ -309,13 +452,39 @@ func (s *Store) SaveQuestions(ctx context.Context, questions []domain.A2Question
 }
 
 func (s *Store) GetQuestion(ctx context.Context, id string) (*domain.A2Question, error) {
-	row := s.db.QueryRowContext(ctx, `
-		SELECT q.id, q.clinical_stem, q.options, q.answer, q.explanation, q.source_refs, q.knowledge_points, q.media_refs, q.difficulty, q.cognitive_level, q.exam_points, q.outline_code, q.profession, q.system_name,
-			COALESCE(ARRAY(SELECT m.bank_id FROM question_bank_members m WHERE m.question_id = q.id ORDER BY m.bank_id), '{}') AS bank_ids,
-			q.status, q.version, q.created_at, q.updated_at
+	row := s.queryRowContext(ctx, `
+		SELECT `+questionSelectColumns+`
 		FROM questions q WHERE q.id=$1
 	`, id)
 	return scanQuestion(row)
+}
+
+func (s *Store) ListQuestionVersions(ctx context.Context, questionID string) ([]domain.QuestionVersion, error) {
+	rows, err := s.queryContext(ctx, `
+		SELECT question_id, version, snapshot, actor, change_type, change_note, created_at
+		FROM question_versions WHERE question_id=$1 ORDER BY version DESC
+	`, questionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var versions []domain.QuestionVersion
+	for rows.Next() {
+		version, err := scanQuestionVersionRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		versions = append(versions, *version)
+	}
+	return versions, rows.Err()
+}
+
+func (s *Store) GetQuestionVersion(ctx context.Context, questionID string, version int) (*domain.QuestionVersion, error) {
+	row := s.queryRowContext(ctx, `
+		SELECT question_id, version, snapshot, actor, change_type, change_note, created_at
+		FROM question_versions WHERE question_id=$1 AND version=$2
+	`, questionID, version)
+	return scanQuestionVersion(row)
 }
 
 func (s *Store) DeleteQuestion(ctx context.Context, id string) error {
@@ -323,11 +492,142 @@ func (s *Store) DeleteQuestion(ctx context.Context, id string) error {
 	return err
 }
 
+// CreateQuestionShare 创建个人正式题目的一次性全局分享申请。
+func (s *Store) CreateQuestionShare(ctx context.Context, request domain.QuestionShareRequest) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO question_share_requests (id, question_id, owner_id, status, created_at)
+		VALUES ($1,$2,$3,$4,COALESCE($5,NOW()))
+	`, request.ID, request.QuestionID, request.OwnerID, request.Status, request.CreatedAt)
+	return err
+}
+
+func (s *Store) GetQuestionShareByQuestionID(ctx context.Context, questionID string) (*domain.QuestionShareRequest, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, question_id, owner_id, status, reviewed_by, review_note, created_at, reviewed_at
+		FROM question_share_requests WHERE question_id=$1
+	`, questionID)
+	return scanQuestionShareRequest(row)
+}
+
+// ListQuestionShares 返回分享申请及题目内容。题目 JSON 显式移除 created_by/owner_id，
+// 管理员审批页单独显示申请人，普通用户的申请列表不返回申请人字段。
+func (s *Store) ListQuestionShares(ctx context.Context, status, ownerID string) ([]storage.QuestionShareItem, error) {
+	where := []string{}
+	args := []any{}
+	addArg := func(value any) string {
+		args = append(args, value)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	if status != "" {
+		where = append(where, "sr.status="+addArg(status))
+	}
+	// 迁移登记的历史题目用于恢复全局三层展示，不是新的分享申请；
+	// 审批队列和申请历史不应把它们伪装成数千条待办申请。
+	where = append(where, "sr.reviewed_by <> 'migration'")
+	if ownerID != "" {
+		where = append(where, "sr.owner_id="+addArg(ownerID))
+	}
+	whereSQL := ""
+	if len(where) > 0 {
+		whereSQL = "WHERE " + strings.Join(where, " AND ")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT sr.id, sr.question_id, sr.owner_id, sr.status, sr.reviewed_by, sr.review_note,
+			sr.created_at, sr.reviewed_at,
+			(to_jsonb(q) - 'system_name' - 'created_by' - 'owner_id') || jsonb_build_object(
+				'system', q.system_name,
+				'bank_ids', ARRAY(SELECT m.bank_id FROM question_bank_members m WHERE m.question_id=q.id ORDER BY m.bank_id)
+			) AS question_json,
+			COALESCE(u.display_name,''), COALESCE(u.username,'')
+		FROM question_share_requests sr
+		JOIN questions q ON q.id=sr.question_id
+		LEFT JOIN users u ON u.id=sr.owner_id
+		`+whereSQL+`
+		ORDER BY sr.created_at DESC, sr.id DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []storage.QuestionShareItem
+	for rows.Next() {
+		var item storage.QuestionShareItem
+		var reviewedAt sql.NullTime
+		var questionJSON []byte
+		if err := rows.Scan(
+			&item.Request.ID, &item.Request.QuestionID, &item.Request.OwnerID, &item.Request.Status,
+			&item.Request.ReviewedBy, &item.Request.ReviewNote, &item.Request.CreatedAt, &reviewedAt,
+			&questionJSON, &item.OwnerName, &item.OwnerUsername,
+		); err != nil {
+			return nil, err
+		}
+		if reviewedAt.Valid {
+			value := reviewedAt.Time
+			item.Request.ReviewedAt = &value
+		}
+		if err := json.Unmarshal(questionJSON, &item.Question); err != nil {
+			return nil, fmt.Errorf("解析分享申请题目失败: %w", err)
+		}
+		item.Question.OwnerID = item.Request.OwnerID
+		item.Question.Status = domain.CanonicalLifecycleStatus(item.Question.Status)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+// ReviewQuestionShare 审批分享申请。按行锁保证同一申请只能被成功处理一次。
+func (s *Store) ReviewQuestionShare(ctx context.Context, id, reviewerID string, status domain.QuestionShareStatus, note string) (*domain.QuestionShareRequest, error) {
+	if status != domain.QuestionShareApproved && status != domain.QuestionShareRejected {
+		return nil, fmt.Errorf("无效的分享审批状态: %s", status)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var request domain.QuestionShareRequest
+	var reviewedAt sql.NullTime
+	var questionStatus domain.QuestionStatus
+	err = tx.QueryRowContext(ctx, `
+		SELECT sr.id, sr.question_id, sr.owner_id, sr.status, sr.reviewed_by, sr.review_note,
+			sr.created_at, sr.reviewed_at, q.status
+		FROM question_share_requests sr
+		JOIN questions q ON q.id=sr.question_id
+		WHERE sr.id=$1 FOR UPDATE
+	`, id).Scan(&request.ID, &request.QuestionID, &request.OwnerID, &request.Status,
+		&request.ReviewedBy, &request.ReviewNote, &request.CreatedAt, &reviewedAt, &questionStatus)
+	if err == sql.ErrNoRows {
+		return nil, storage.ErrQuestionShareNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if request.Status != domain.QuestionSharePending {
+		return nil, storage.ErrQuestionShareAlreadyReviewed
+	}
+	if questionStatus != domain.StatusPublished {
+		return nil, storage.ErrQuestionShareNotFormal
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE question_share_requests
+		SET status=$1, reviewed_by=$2, review_note=$3, reviewed_at=NOW()
+		WHERE id=$4 AND status='pending'
+	`, status, reviewerID, strings.TrimSpace(note), id); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	request.Status = status
+	request.ReviewedBy = reviewerID
+	request.ReviewNote = strings.TrimSpace(note)
+	now := time.Now()
+	request.ReviewedAt = &now
+	return &request, nil
+}
+
 func (s *Store) ListQuestions(ctx context.Context) ([]domain.A2Question, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT q.id, q.clinical_stem, q.options, q.answer, q.explanation, q.source_refs, q.knowledge_points, q.media_refs, q.difficulty, q.cognitive_level, q.exam_points, q.outline_code, q.profession, q.system_name,
-			COALESCE(ARRAY(SELECT m.bank_id FROM question_bank_members m WHERE m.question_id = q.id ORDER BY m.bank_id), '{}') AS bank_ids,
-			q.status, q.version, q.created_at, q.updated_at
+		SELECT `+questionSelectColumns+`
 		FROM questions q ORDER BY q.created_at DESC
 	`)
 	if err != nil {
@@ -335,6 +635,403 @@ func (s *Store) ListQuestions(ctx context.Context) ([]domain.A2Question, error) 
 	}
 	defer rows.Close()
 	return scanQuestions(rows)
+}
+
+// escapeLike 转义 LIKE/ILIKE 通配符，保证用户输入按字面匹配。
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
+// questionFilterWhere 把过滤条件拼成 WHERE 子句；所有值都走参数绑定。
+func questionFilterWhere(f storage.QuestionFilter) (string, []any) {
+	args := []any{}
+	placeholder := func(v any) string {
+		args = append(args, v)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	clauses := []string{}
+	if f.Status != "" {
+		clauses = append(clauses, "q.status = "+placeholder(f.Status))
+	}
+	if f.OwnerID != "" {
+		ownerClause := "q.owner_id = " + placeholder(f.OwnerID)
+		if f.IncludeLegacyOwner {
+			ownerClause = "(" + ownerClause + " OR q.owner_id='')"
+		}
+		clauses = append(clauses, ownerClause)
+	}
+	if len(f.GlobalStatuses) > 0 {
+		statuses := make([]string, 0, len(f.GlobalStatuses))
+		for _, status := range f.GlobalStatuses {
+			if status == string(domain.QuestionSharePending) || status == string(domain.QuestionShareApproved) || status == string(domain.QuestionShareRejected) {
+				statuses = append(statuses, status)
+			}
+		}
+		if len(statuses) == 0 {
+			clauses = append(clauses, "FALSE")
+		} else {
+			shareClause := "EXISTS (SELECT 1 FROM question_share_requests qs WHERE qs.question_id = q.id AND qs.status = ANY(" + placeholder(pq.Array(statuses)) + "))"
+			if f.IncludeLegacyGlobal {
+				legacyStatuses := []string{}
+				for _, status := range statuses {
+					switch status {
+					case string(domain.QuestionSharePending):
+						legacyStatuses = append(legacyStatuses, "'ai_draft'", "'auto_checked'", "'ai_reviewed'", "'reviewing'", "'conflict'", "'revision_required'")
+					case string(domain.QuestionShareApproved):
+						legacyStatuses = append(legacyStatuses, "'published'")
+					case string(domain.QuestionShareRejected):
+						legacyStatuses = append(legacyStatuses, "'rejected'", "'archived'")
+					}
+				}
+				if len(legacyStatuses) > 0 {
+					shareClause = "(" + shareClause + " OR (q.owner_id='' AND NOT EXISTS (SELECT 1 FROM question_share_requests qs_legacy WHERE qs_legacy.question_id=q.id) AND q.status IN (" + strings.Join(legacyStatuses, ",") + ")))"
+				}
+			}
+			clauses = append(clauses, shareClause)
+		}
+	}
+	if len(f.Tiers) > 0 {
+		statuses := map[string]bool{}
+		for _, tier := range f.Tiers {
+			for _, s := range domain.TierStatuses(domain.QuestionTier(tier)) {
+				statuses[string(s)] = true
+			}
+		}
+		list := make([]string, 0, len(statuses))
+		for s := range statuses {
+			list = append(list, s)
+		}
+		clauses = append(clauses, "q.status = ANY("+placeholder(pq.Array(list))+")")
+	}
+	if f.Difficulty != "" {
+		clauses = append(clauses, "q.difficulty = "+placeholder(f.Difficulty))
+	}
+	if f.DifficultyBand != "" {
+		numericDifficulty := `(q.difficulty ~ '^[0-9]+(\.[0-9]+)?$')`
+		switch f.DifficultyBand {
+		case "easy":
+			clauses = append(clauses, "(q.difficulty = 'easy' OR ("+numericDifficulty+" AND q.difficulty::numeric <= 0.60))")
+		case "medium":
+			clauses = append(clauses, "(q.difficulty = 'medium' OR ("+numericDifficulty+" AND q.difficulty::numeric > 0.60 AND q.difficulty::numeric <= 0.80))")
+		case "hard":
+			clauses = append(clauses, "(q.difficulty = 'hard' OR ("+numericDifficulty+" AND q.difficulty::numeric > 0.80))")
+		}
+	}
+	if len(f.Professions) > 0 {
+		clauses = append(clauses, "q.profession = ANY("+placeholder(pq.Array(f.Professions))+")")
+	}
+	if f.OutlineCode != "" {
+		clauses = append(clauses, "q.outline_code LIKE "+placeholder(escapeLike(f.OutlineCode)+"%"))
+	}
+	if f.Keyword != "" {
+		for _, token := range storage.SearchTokens(f.Keyword) {
+			p := placeholder("%" + escapeLike(token) + "%")
+			clauses = append(clauses, "q.search_text ILIKE "+p)
+		}
+	}
+	if f.BankID != "" {
+		clauses = append(clauses, "EXISTS (SELECT 1 FROM question_bank_members bm WHERE bm.question_id = q.id AND bm.bank_id = "+placeholder(f.BankID)+")")
+	}
+	if f.Unclassified {
+		clauses = append(clauses, "NOT EXISTS (SELECT 1 FROM question_bank_members bu WHERE bu.question_id = q.id)")
+	}
+	if f.ClassifiableOnly {
+		clauses = append(clauses, "q.status IN ('ai_draft','auto_checked','ai_reviewed','revision_required')")
+	}
+	if f.ScopeRestricted {
+		if len(f.BankScope) == 0 {
+			clauses = append(clauses, "FALSE")
+		} else {
+			clauses = append(clauses, "EXISTS (SELECT 1 FROM question_bank_members bs WHERE bs.question_id = q.id AND bs.bank_id = ANY("+placeholder(pq.Array(f.BankScope))+"))")
+		}
+	}
+	if len(clauses) == 0 {
+		return "", args
+	}
+	return "WHERE " + strings.Join(clauses, " AND "), args
+}
+
+// SearchQuestions 在数据库端完成过滤、计数和分页，避免整表载入内存。
+func (s *Store) SearchQuestions(ctx context.Context, filter storage.QuestionFilter, page, pageSize int) ([]domain.A2Question, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 100
+	}
+	where, args := questionFilterWhere(filter)
+
+	var total int
+	if err := s.queryRowContext(ctx, `SELECT COUNT(*) FROM questions q `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	pagedArgs := append(args, pageSize, (page-1)*pageSize)
+	rows, err := s.queryContext(ctx, `
+		SELECT `+questionSelectColumns+`
+		FROM questions q `+where+`
+		ORDER BY q.created_at DESC, q.id DESC
+		LIMIT $`+fmt.Sprint(len(args)+1)+` OFFSET $`+fmt.Sprint(len(args)+2), pagedArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	questions, err := scanQuestions(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return questions, total, nil
+}
+
+const reviewFinalStatusSQL = `CASE
+	WHEN q.status = 'published' THEN 'published'
+	WHEN q.status = 'rejected' THEN 'rejected'
+	WHEN lt.status = 'revision_required' THEN 'revision_required'
+	WHEN lt.status = 'conflict' THEN 'conflict'
+	WHEN q.status = 'reviewing' THEN 'reviewing'
+	ELSE 'pending'
+END`
+
+const latestReviewTasksCTE = `WITH latest_tasks AS (
+	SELECT DISTINCT ON (question_id) *
+	FROM review_tasks
+	ORDER BY question_id, created_at DESC
+)`
+
+func reviewResultWhere(filter storage.QuestionFilter, finalStatus string) (string, []any, error) {
+	where, args := questionFilterWhere(filter)
+	if finalStatus == "" {
+		return where, args, nil
+	}
+	switch finalStatus {
+	case "pending", "reviewing", "conflict", "revision_required", "rejected", "published":
+	default:
+		return "", nil, fmt.Errorf("无效的审核结果状态: %s", finalStatus)
+	}
+	condition := "(" + reviewFinalStatusSQL + ") = " + fmt.Sprintf("$%d", len(args)+1)
+	args = append(args, finalStatus)
+	if where == "" {
+		return "WHERE " + condition, args, nil
+	}
+	return where + " AND " + condition, args, nil
+}
+
+// SearchReviewResults 在 PostgreSQL 内完成最新任务关联、权限过滤、状态计算、统计和分页。
+// 避免审核记录页随题量增长把 questions/review_tasks 全表加载进 Go 内存。
+func (s *Store) SearchReviewResults(ctx context.Context, query storage.ReviewResultQuery) (*storage.ReviewResultPage, error) {
+	if query.Page < 1 {
+		query.Page = 1
+	}
+	if query.PageSize < 1 || query.PageSize > 500 {
+		query.PageSize = 50
+	}
+	where, args, err := reviewResultWhere(query.Filter, query.FinalStatus)
+	if err != nil {
+		return nil, err
+	}
+	result := &storage.ReviewResultPage{Stats: map[string]int{}}
+	if err := s.queryRowContext(ctx, latestReviewTasksCTE+`
+		SELECT COUNT(*)
+		FROM questions q LEFT JOIN latest_tasks lt ON lt.question_id=q.id `+where, args...).Scan(&result.Total); err != nil {
+		return nil, err
+	}
+
+	statsWhere, statsArgs := questionFilterWhere(query.StatsFilter)
+	rows, err := s.queryContext(ctx, latestReviewTasksCTE+`
+		SELECT final_status, COUNT(*)
+		FROM (
+			SELECT `+reviewFinalStatusSQL+` AS final_status
+			FROM questions q LEFT JOIN latest_tasks lt ON lt.question_id=q.id `+statsWhere+`
+		) visible_results
+		GROUP BY final_status`, statsArgs...)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		result.Stats[status] = count
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	pagedArgs := append(append([]any(nil), args...), query.PageSize, (query.Page-1)*query.PageSize)
+	rows, err = s.queryContext(ctx, latestReviewTasksCTE+`
+		SELECT
+			(to_jsonb(q) - 'system_name' - 'created_by' - 'owner_id') || jsonb_build_object(
+				'system', q.system_name,
+				'bank_ids', COALESCE(ARRAY(
+					SELECT m.bank_id FROM question_bank_members m
+					WHERE m.question_id=q.id ORDER BY m.bank_id
+				), '{}')
+			) AS question_json,
+			CASE WHEN lt.id IS NULL THEN NULL ELSE to_jsonb(lt) END AS task_json,
+			`+reviewFinalStatusSQL+` AS final_status
+		FROM questions q LEFT JOIN latest_tasks lt ON lt.question_id=q.id `+where+`
+		ORDER BY q.created_at DESC, q.id DESC
+		LIMIT $`+fmt.Sprint(len(args)+1)+` OFFSET $`+fmt.Sprint(len(args)+2), pagedArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var questionJSON, taskJSON []byte
+		var row storage.ReviewResultRow
+		if err := rows.Scan(&questionJSON, &taskJSON, &row.FinalStatus); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(questionJSON, &row.Question); err != nil {
+			return nil, fmt.Errorf("解析审核记录题目失败: %w", err)
+		}
+		row.Question.Status = domain.CanonicalLifecycleStatus(row.Question.Status)
+		if len(taskJSON) > 0 && string(taskJSON) != "null" {
+			var task domain.ReviewTask
+			if err := json.Unmarshal(taskJSON, &task); err != nil {
+				return nil, fmt.Errorf("解析审核任务失败: %w", err)
+			}
+			task.Status = domain.CanonicalLifecycleStatus(task.Status)
+			row.Task = &task
+		}
+		result.Rows = append(result.Rows, row)
+	}
+	return result, rows.Err()
+}
+
+// scanCounts 执行两列（key, count）的分组统计查询并累加到目标 map。
+func (s *Store) scanCounts(ctx context.Context, query string, args []any, into map[string]int) error {
+	rows, err := s.queryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		var n int
+		if err := rows.Scan(&key, &n); err != nil {
+			return err
+		}
+		into[key] = n
+	}
+	return rows.Err()
+}
+
+// CountQuestionsByStatus 按状态统计题目数量（存储端 GROUP BY，避免整表载入）。
+func (s *Store) CountQuestionsByStatus(ctx context.Context, filter storage.QuestionFilter) (map[string]int, error) {
+	where, args := questionFilterWhere(filter)
+	counts := map[string]int{}
+	if err := s.scanCounts(ctx, `SELECT q.status, COUNT(*) FROM questions q `+where+` GROUP BY q.status`, args, counts); err != nil {
+		return nil, err
+	}
+	return counts, nil
+}
+
+// AggregateQuestionStats 在存储端聚合题目统计分布。
+func (s *Store) AggregateQuestionStats(ctx context.Context, filter storage.QuestionFilter, days int) (*storage.QuestionStatsAggregate, error) {
+	if days <= 0 {
+		days = 30
+	}
+	agg := &storage.QuestionStatsAggregate{
+		ByStatus:     map[string]int{},
+		ByDifficulty: map[string]int{},
+		ByProfession: map[string]int{},
+		ByDay:        map[string]int{},
+		ByBank:       map[string]int{},
+	}
+	where, args := questionFilterWhere(filter)
+
+	// 状态分布与总数
+	if err := s.scanCounts(ctx, `SELECT q.status, COUNT(*) FROM questions q `+where+` GROUP BY q.status`, args, agg.ByStatus); err != nil {
+		return nil, err
+	}
+	for _, n := range agg.ByStatus {
+		agg.Total += n
+	}
+	// 难度分布
+	if err := s.scanCounts(ctx, `SELECT q.difficulty, COUNT(*) FROM questions q `+where+` GROUP BY q.difficulty`, args, agg.ByDifficulty); err != nil {
+		return nil, err
+	}
+	// 专业分布（按数量降序取前 12）
+	rows, err := s.queryContext(ctx, `
+		SELECT q.profession, COUNT(*) FROM questions q `+where+`
+		GROUP BY q.profession ORDER BY COUNT(*) DESC LIMIT 12
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var profession string
+		var n int
+		if err := rows.Scan(&profession, &n); err != nil {
+			return nil, err
+		}
+		agg.ByProfession[profession] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// 每日新增趋势（近 days 天）
+	dayWhere, dayArgs := where, args
+	dayCond := fmt.Sprintf("q.created_at >= NOW() - make_interval(days => $%d::int)", len(dayArgs)+1)
+	dayArgs = append(append([]any{}, dayArgs...), days)
+	if dayWhere == "" {
+		dayWhere = "WHERE " + dayCond
+	} else {
+		dayWhere += " AND " + dayCond
+	}
+	if err := s.scanCounts(ctx, `SELECT to_char(q.created_at, 'YYYY-MM-DD'), COUNT(*) FROM questions q `+dayWhere+` GROUP BY 1 ORDER BY 1`, dayArgs, agg.ByDay); err != nil {
+		return nil, err
+	}
+
+	// 分类子题库分布（多对多按归属计）
+	if err := s.scanCounts(ctx, `
+		SELECT bm.bank_id, COUNT(*) FROM question_bank_members bm
+		JOIN questions q ON q.id = bm.question_id `+where+`
+		GROUP BY bm.bank_id
+	`, args, agg.ByBank); err != nil {
+		return nil, err
+	}
+	// 未分类（不属于任何分类子题库）
+	uncWhere := where
+	if uncWhere == "" {
+		uncWhere = "WHERE NOT EXISTS (SELECT 1 FROM question_bank_members bm WHERE bm.question_id = q.id)"
+	} else {
+		uncWhere += " AND NOT EXISTS (SELECT 1 FROM question_bank_members bm WHERE bm.question_id = q.id)"
+	}
+	if err := s.queryRowContext(ctx, `SELECT COUNT(*) FROM questions q `+uncWhere, args...).Scan(&agg.Unclassified); err != nil {
+		return nil, err
+	}
+	return agg, nil
+}
+
+// CoveredKnowledgePointIDs 返回过滤范围内题目引用的知识点 ID 去重列表。
+func (s *Store) CoveredKnowledgePointIDs(ctx context.Context, filter storage.QuestionFilter) ([]string, error) {
+	where, args := questionFilterWhere(filter)
+	rows, err := s.queryContext(ctx, `
+		SELECT DISTINCT kp->>'id'
+		FROM questions q, jsonb_array_elements(q.knowledge_points) AS kp
+		`+where, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, rows.Err()
 }
 
 // ===== 专家 =====
@@ -398,7 +1095,7 @@ func (s *Store) SaveFlowConfig(ctx context.Context, f domain.ReviewFlowConfig) e
 }
 
 func (s *Store) GetFlowConfig(ctx context.Context, id string) (*domain.ReviewFlowConfig, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, description, subject, bank_id, final_reviewer_ids, vote_rule, rounds, created_at FROM review_flows WHERE id=$1`, id)
+	row := s.queryRowContext(ctx, `SELECT id, name, description, subject, bank_id, final_reviewer_ids, vote_rule, rounds, created_at FROM review_flows WHERE id=$1`, id)
 	return scanFlow(row)
 }
 
@@ -427,6 +1124,10 @@ func (s *Store) DeleteFlowConfig(ctx context.Context, id string) error {
 // ===== 审核任务 =====
 
 func (s *Store) SaveTask(ctx context.Context, t domain.ReviewTask) error {
+	t.Status = domain.CanonicalLifecycleStatus(t.Status)
+	if t.QuestionVersion < 1 {
+		return fmt.Errorf("%w: 审核任务 %s 必须绑定有效题目版本", domain.ErrQuestionVersionConflict, t.ID)
+	}
 	results, _ := json.Marshal(t.RoundResults)
 	var finalDecision []byte
 	if t.FinalDecision != nil {
@@ -434,26 +1135,39 @@ func (s *Store) SaveTask(ctx context.Context, t domain.ReviewTask) error {
 	} else {
 		finalDecision = []byte("null")
 	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO review_tasks (id, question_id, flow_id, current_round, status, assigned_to, final_reviewer_ids, final_decision, question_prev_status, round_results, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+	_, err := s.execContext(ctx, `
+		INSERT INTO review_tasks (id, question_id, flow_id, submission_bank_id, current_round, status, assigned_to, final_reviewer_ids, final_decision, question_prev_status, question_version, attempt, round_results, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		ON CONFLICT (id) DO UPDATE SET
+			submission_bank_id=EXCLUDED.submission_bank_id,
 			current_round=EXCLUDED.current_round, status=EXCLUDED.status,
 			assigned_to=EXCLUDED.assigned_to, final_reviewer_ids=EXCLUDED.final_reviewer_ids,
 			final_decision=EXCLUDED.final_decision,
 			question_prev_status=EXCLUDED.question_prev_status,
+			question_version=EXCLUDED.question_version,
+			attempt=EXCLUDED.attempt,
 			round_results=EXCLUDED.round_results, updated_at=EXCLUDED.updated_at
-	`, t.ID, t.QuestionID, t.FlowID, t.CurrentRound, t.Status, pqArray(t.AssignedTo), pqArray(t.FinalReviewerIDs), finalDecision, t.QuestionPrevStatus, results, t.CreatedAt, t.UpdatedAt)
+	`, t.ID, t.QuestionID, t.FlowID, t.SubmissionBankID, t.CurrentRound, t.Status, pqArray(t.AssignedTo), pqArray(t.FinalReviewerIDs), finalDecision, t.QuestionPrevStatus, t.QuestionVersion, attemptOrOne(t.Attempt), results, t.CreatedAt, t.UpdatedAt)
 	return err
 }
 
+// attemptOrOne 兼容历史内存数据：批次号缺省视为第 1 批。
+func attemptOrOne(attempt int) int {
+	if attempt < 1 {
+		return 1
+	}
+	return attempt
+}
+
+const taskColumns = `id, question_id, flow_id, submission_bank_id, current_round, status, assigned_to, final_reviewer_ids, final_decision, question_prev_status, question_version, attempt, round_results, created_at, updated_at`
+
 func (s *Store) GetTask(ctx context.Context, id string) (*domain.ReviewTask, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, question_id, flow_id, current_round, status, assigned_to, final_reviewer_ids, final_decision, question_prev_status, round_results, created_at, updated_at FROM review_tasks WHERE id=$1`, id)
+	row := s.queryRowContext(ctx, `SELECT `+taskColumns+` FROM review_tasks WHERE id=$1`, id)
 	return scanTask(row)
 }
 
 func (s *Store) GetTaskByQuestionID(ctx context.Context, questionID string) (*domain.ReviewTask, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, question_id, flow_id, current_round, status, assigned_to, final_reviewer_ids, final_decision, question_prev_status, round_results, created_at, updated_at FROM review_tasks WHERE question_id=$1 ORDER BY created_at DESC LIMIT 1`, questionID)
+	row := s.queryRowContext(ctx, `SELECT `+taskColumns+` FROM review_tasks WHERE question_id=$1 ORDER BY created_at DESC LIMIT 1`, questionID)
 	return scanTask(row)
 }
 
@@ -463,14 +1177,14 @@ func (s *Store) UpdateTask(ctx context.Context, t domain.ReviewTask) error {
 
 // DeleteTask 删除审核任务（级联删除其审核记录）。
 func (s *Store) DeleteTask(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM review_tasks WHERE id=$1`, id)
+	_, err := s.execContext(ctx, `DELETE FROM review_tasks WHERE id=$1`, id)
 	return err
 }
 
 func (s *Store) CountActiveTasksByFlow(ctx context.Context, flowID string) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM review_tasks WHERE flow_id=$1 AND status IN ('reviewing', 'revision_required')
+		SELECT COUNT(*) FROM review_tasks WHERE flow_id=$1 AND status IN ('reviewing', 'revision_required', 'conflict')
 	`, flowID).Scan(&count)
 	return count, err
 }
@@ -485,24 +1199,50 @@ func (s *Store) CountTasksByFlow(ctx context.Context, flowID string) (int, error
 
 // ===== 审核记录 =====
 
+// reviewRecordColumns 与 scanReviewRecord 保持一致。
+const reviewRecordColumns = `id, task_id, question_id, round_number, attempt, expert_id, expert_name, conclusion, opinion, comment, created_at`
+
+// scanReviewRecord 读取一条审核记录；comment 列为结构化评语 JSON（历史行可能是 NULL/'null'）。
+func scanReviewRecord(scanner interface{ Scan(dest ...any) error }) (domain.ReviewRecord, error) {
+	var r domain.ReviewRecord
+	var commentJSON []byte
+	if err := scanner.Scan(&r.ID, &r.TaskID, &r.QuestionID, &r.RoundNumber, &r.Attempt, &r.ExpertID, &r.ExpertName, &r.Conclusion, &r.Opinion, &commentJSON, &r.CreatedAt); err != nil {
+		return r, err
+	}
+	if r.Attempt < 1 {
+		r.Attempt = 1
+	}
+	if len(commentJSON) > 0 && string(commentJSON) != "null" {
+		var c domain.ReviewComment
+		if json.Unmarshal(commentJSON, &c) == nil && !c.IsEmpty() {
+			r.Comment = &c
+		}
+	}
+	return r, nil
+}
+
 func (s *Store) SaveRecord(ctx context.Context, r domain.ReviewRecord) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO review_records (id, task_id, question_id, round_number, expert_id, conclusion, opinion, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-	`, r.ID, r.TaskID, r.QuestionID, r.RoundNumber, r.ExpertID, r.Conclusion, r.Opinion, r.CreatedAt)
+	var commentJSON []byte
+	if r.Comment != nil {
+		commentJSON, _ = json.Marshal(r.Comment)
+	}
+	_, err := s.execContext(ctx, `
+		INSERT INTO review_records (id, task_id, question_id, round_number, attempt, expert_id, expert_name, conclusion, opinion, comment, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+	`, r.ID, r.TaskID, r.QuestionID, r.RoundNumber, attemptOrOne(r.Attempt), r.ExpertID, r.ExpertName, r.Conclusion, r.Opinion, commentJSON, r.CreatedAt)
 	return err
 }
 
 func (s *Store) ListRecordsByTaskID(ctx context.Context, taskID string) ([]domain.ReviewRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, question_id, round_number, expert_id, conclusion, opinion, created_at FROM review_records WHERE task_id=$1 ORDER BY created_at`, taskID)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+reviewRecordColumns+` FROM review_records WHERE task_id=$1 ORDER BY created_at`, taskID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var result []domain.ReviewRecord
 	for rows.Next() {
-		var r domain.ReviewRecord
-		if err := rows.Scan(&r.ID, &r.TaskID, &r.QuestionID, &r.RoundNumber, &r.ExpertID, &r.Conclusion, &r.Opinion, &r.CreatedAt); err != nil {
+		r, err := scanReviewRecord(rows)
+		if err != nil {
 			return nil, err
 		}
 		result = append(result, r)
@@ -512,7 +1252,7 @@ func (s *Store) ListRecordsByTaskID(ctx context.Context, taskID string) ([]domai
 
 // ListAllTasks 列出全部审核任务（含历史，审核结果汇总用）。
 func (s *Store) ListAllTasks(ctx context.Context) ([]domain.ReviewTask, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, question_id, flow_id, current_round, status, assigned_to, final_reviewer_ids, final_decision, question_prev_status, round_results, created_at, updated_at FROM review_tasks ORDER BY created_at DESC`)
+	rows, err := s.queryContext(ctx, `SELECT `+taskColumns+` FROM review_tasks ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -522,11 +1262,12 @@ func (s *Store) ListAllTasks(ctx context.Context) ([]domain.ReviewTask, error) {
 		var t domain.ReviewTask
 		var assignedTo, finalReviewerIDs []string
 		var resultsJSON, finalDecisionJSON []byte
-		if err := rows.Scan(&t.ID, &t.QuestionID, &t.FlowID, &t.CurrentRound, &t.Status, pqArrayScanner(&assignedTo), pqArrayScanner(&finalReviewerIDs), &finalDecisionJSON, &t.QuestionPrevStatus, &resultsJSON, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.QuestionID, &t.FlowID, &t.SubmissionBankID, &t.CurrentRound, &t.Status, pqArrayScanner(&assignedTo), pqArrayScanner(&finalReviewerIDs), &finalDecisionJSON, &t.QuestionPrevStatus, &t.QuestionVersion, &t.Attempt, &resultsJSON, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
 		t.AssignedTo = assignedTo
 		t.FinalReviewerIDs = finalReviewerIDs
+		t.Status = domain.CanonicalLifecycleStatus(t.Status)
 		json.Unmarshal(resultsJSON, &t.RoundResults)
 		if len(finalDecisionJSON) > 0 && string(finalDecisionJSON) != "null" {
 			var fd domain.ExpertReview
@@ -539,17 +1280,20 @@ func (s *Store) ListAllTasks(ctx context.Context) ([]domain.ReviewTask, error) {
 	return result, rows.Err()
 }
 
-// ListAllRecords 列出全部审核记录（审核结果汇总用）。
-func (s *Store) ListAllRecords(ctx context.Context) ([]domain.ReviewRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, question_id, round_number, expert_id, conclusion, opinion, created_at FROM review_records ORDER BY created_at DESC`)
+// ListRecordsByTaskIDs 批量列出多个任务的审核记录（审核结果汇总按页加载用）。
+func (s *Store) ListRecordsByTaskIDs(ctx context.Context, taskIDs []string) ([]domain.ReviewRecord, error) {
+	if len(taskIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+reviewRecordColumns+` FROM review_records WHERE task_id = ANY($1) ORDER BY created_at DESC`, pq.Array(taskIDs))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var result []domain.ReviewRecord
 	for rows.Next() {
-		var r domain.ReviewRecord
-		if err := rows.Scan(&r.ID, &r.TaskID, &r.QuestionID, &r.RoundNumber, &r.ExpertID, &r.Conclusion, &r.Opinion, &r.CreatedAt); err != nil {
+		r, err := scanReviewRecord(rows)
+		if err != nil {
 			return nil, err
 		}
 		result = append(result, r)
@@ -609,97 +1353,6 @@ func scanAuditLogs(rows *sql.Rows) ([]domain.AuditLog, error) {
 	return result, rows.Err()
 }
 
-// ===== 图片提示词 =====
-
-func (s *Store) SavePrompt(ctx context.Context, p domain.ImagePrompt) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO image_prompts (id, question_id, purpose, image_type, subject, must_include, must_exclude, style, knowledge_point, review_focus, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-		ON CONFLICT (id) DO UPDATE SET
-			purpose=EXCLUDED.purpose, image_type=EXCLUDED.image_type, subject=EXCLUDED.subject,
-			must_include=EXCLUDED.must_include, must_exclude=EXCLUDED.must_exclude,
-			style=EXCLUDED.style, knowledge_point=EXCLUDED.knowledge_point, review_focus=EXCLUDED.review_focus
-	`, p.ID, p.QuestionID, p.Purpose, p.ImageType, p.Subject, pqArray(p.MustInclude), pqArray(p.MustExclude), p.Style, p.KnowledgePoint, p.ReviewFocus, p.CreatedAt)
-	return err
-}
-
-func (s *Store) GetPrompt(ctx context.Context, id string) (*domain.ImagePrompt, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, question_id, purpose, image_type, subject, must_include, must_exclude, style, knowledge_point, review_focus, created_at FROM image_prompts WHERE id=$1`, id)
-	return scanImagePrompt(row)
-}
-
-func (s *Store) GetPromptByQuestionID(ctx context.Context, questionID string) (*domain.ImagePrompt, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, question_id, purpose, image_type, subject, must_include, must_exclude, style, knowledge_point, review_focus, created_at FROM image_prompts WHERE question_id=$1 ORDER BY created_at DESC LIMIT 1`, questionID)
-	return scanImagePrompt(row)
-}
-
-// ===== 候选图 =====
-
-func (s *Store) SaveImage(ctx context.Context, img domain.GeneratedImage) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO generated_images (id, prompt_id, question_id, image_path, model_name, model_version, status, review_note, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-		ON CONFLICT (id) DO UPDATE SET
-			status=EXCLUDED.status, review_note=EXCLUDED.review_note
-	`, img.ID, img.PromptID, img.QuestionID, img.ImagePath, img.ModelName, img.ModelVersion, img.Status, img.ReviewNote, img.CreatedAt)
-	return err
-}
-
-func (s *Store) GetImage(ctx context.Context, id string) (*domain.GeneratedImage, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, prompt_id, question_id, image_path, model_name, model_version, status, review_note, created_at FROM generated_images WHERE id=$1`, id)
-	return scanImage(row)
-}
-
-func (s *Store) ListImagesByQuestionID(ctx context.Context, questionID string) ([]domain.GeneratedImage, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, prompt_id, question_id, image_path, model_name, model_version, status, review_note, created_at FROM generated_images WHERE question_id=$1 ORDER BY created_at`, questionID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanImages(rows)
-}
-
-func (s *Store) ListImagesByPromptID(ctx context.Context, promptID string) ([]domain.GeneratedImage, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, prompt_id, question_id, image_path, model_name, model_version, status, review_note, created_at FROM generated_images WHERE prompt_id=$1 ORDER BY created_at`, promptID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanImages(rows)
-}
-
-func (s *Store) UpdateImageStatus(ctx context.Context, id string, status domain.ImageStatus, note string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE generated_images SET status=$1, review_note=$2 WHERE id=$3`, status, note, id)
-	return err
-}
-
-// ===== 图片审核记录 =====
-
-func (s *Store) SaveReviewRecord(ctx context.Context, r domain.ImageReviewRecord) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO image_review_records (id, image_id, expert_id, conclusion, opinion, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6)
-	`, r.ID, r.ImageID, r.ExpertID, r.Conclusion, r.Opinion, r.CreatedAt)
-	return err
-}
-
-func (s *Store) ListReviewRecordsByImageID(ctx context.Context, imageID string) ([]domain.ImageReviewRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, image_id, expert_id, conclusion, opinion, created_at FROM image_review_records WHERE image_id=$1 ORDER BY created_at`, imageID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var result []domain.ImageReviewRecord
-	for rows.Next() {
-		var r domain.ImageReviewRecord
-		if err := rows.Scan(&r.ID, &r.ImageID, &r.ExpertID, &r.Conclusion, &r.Opinion, &r.CreatedAt); err != nil {
-			return nil, err
-		}
-		result = append(result, r)
-	}
-	return result, rows.Err()
-}
-
 // ===== 工具函数 =====
 
 func pqArray(arr []string) interface{} {
@@ -752,41 +1405,13 @@ func (s *arrayScanner) Scan(src interface{}) error {
 	return fmt.Errorf("unsupported array source: %T", src)
 }
 
-func scanPoint(row *sql.Row) (*domain.KnowledgePoint, error) {
-	var p domain.KnowledgePoint
-	var keywords []string
-	err := row.Scan(&p.ID, &p.Category, &p.Subject, &p.Unit, &p.SubItem, &p.Topic, &p.OutlineCode, pqArrayScanner(&keywords))
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	p.Keywords = keywords
-	return &p, nil
-}
-
-func scanPoints(rows *sql.Rows) ([]domain.KnowledgePoint, error) {
-	var result []domain.KnowledgePoint
-	for rows.Next() {
-		var p domain.KnowledgePoint
-		var keywords []string
-		if err := rows.Scan(&p.ID, &p.Category, &p.Subject, &p.Unit, &p.SubItem, &p.Topic, &p.OutlineCode, pqArrayScanner(&keywords)); err != nil {
-			return nil, err
-		}
-		p.Keywords = keywords
-		result = append(result, p)
-	}
-	return result, rows.Err()
-}
-
 func scanQuestion(row *sql.Row) (*domain.A2Question, error) {
 	var q domain.A2Question
-	var optsJSON, refsJSON, kpsJSON, mediaJSON []byte
+	var optsJSON, refsJSON, kpsJSON []byte
 	var bankIDs []string
-	err := row.Scan(&q.ID, &q.ClinicalStem, &optsJSON, &q.Answer, &q.Explanation, &refsJSON, &kpsJSON, &mediaJSON,
+	err := row.Scan(&q.ID, &q.ClinicalStem, &optsJSON, &q.Answer, &q.Explanation, &refsJSON, &kpsJSON,
 		&q.Difficulty, &q.CognitiveLevel, &q.ExamPoints, &q.OutlineCode, &q.Profession, &q.System,
-		pqArrayScanner(&bankIDs), &q.Status, &q.Version, &q.CreatedAt, &q.UpdatedAt)
+		pqArrayScanner(&bankIDs), &q.Status, &q.Version, &q.CreatedBy, &q.OwnerID, &q.CreatedAt, &q.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -794,29 +1419,72 @@ func scanQuestion(row *sql.Row) (*domain.A2Question, error) {
 		return nil, err
 	}
 	q.BankIDs = bankIDs
+	q.Status = domain.CanonicalLifecycleStatus(q.Status)
 	json.Unmarshal(optsJSON, &q.Options)
 	json.Unmarshal(refsJSON, &q.SourceRefs)
 	json.Unmarshal(kpsJSON, &q.KnowledgePoints)
-	json.Unmarshal(mediaJSON, &q.MediaRefs)
 	return &q, nil
+}
+
+func scanQuestionShareRequest(row *sql.Row) (*domain.QuestionShareRequest, error) {
+	var request domain.QuestionShareRequest
+	var reviewedAt sql.NullTime
+	err := row.Scan(&request.ID, &request.QuestionID, &request.OwnerID, &request.Status,
+		&request.ReviewedBy, &request.ReviewNote, &request.CreatedAt, &reviewedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if reviewedAt.Valid {
+		value := reviewedAt.Time
+		request.ReviewedAt = &value
+	}
+	return &request, nil
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanQuestionVersion(row rowScanner) (*domain.QuestionVersion, error) {
+	var version domain.QuestionVersion
+	var snapshot []byte
+	err := row.Scan(&version.QuestionID, &version.Version, &snapshot, &version.Actor, &version.ChangeType, &version.ChangeNote, &version.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(snapshot, &version.Snapshot); err != nil {
+		return nil, fmt.Errorf("解析题目版本快照失败: %w", err)
+	}
+	version.Snapshot.Status = domain.CanonicalLifecycleStatus(version.Snapshot.Status)
+	return &version, nil
+}
+
+func scanQuestionVersionRow(rows *sql.Rows) (*domain.QuestionVersion, error) {
+	return scanQuestionVersion(rows)
 }
 
 func scanQuestions(rows *sql.Rows) ([]domain.A2Question, error) {
 	var result []domain.A2Question
 	for rows.Next() {
 		var q domain.A2Question
-		var optsJSON, refsJSON, kpsJSON, mediaJSON []byte
+		var optsJSON, refsJSON, kpsJSON []byte
 		var bankIDs []string
-		if err := rows.Scan(&q.ID, &q.ClinicalStem, &optsJSON, &q.Answer, &q.Explanation, &refsJSON, &kpsJSON, &mediaJSON,
+		if err := rows.Scan(&q.ID, &q.ClinicalStem, &optsJSON, &q.Answer, &q.Explanation, &refsJSON, &kpsJSON,
 			&q.Difficulty, &q.CognitiveLevel, &q.ExamPoints, &q.OutlineCode, &q.Profession, &q.System,
-			pqArrayScanner(&bankIDs), &q.Status, &q.Version, &q.CreatedAt, &q.UpdatedAt); err != nil {
+			pqArrayScanner(&bankIDs), &q.Status, &q.Version, &q.CreatedBy, &q.OwnerID, &q.CreatedAt, &q.UpdatedAt); err != nil {
 			return nil, err
 		}
 		q.BankIDs = bankIDs
+		q.Status = domain.CanonicalLifecycleStatus(q.Status)
 		json.Unmarshal(optsJSON, &q.Options)
 		json.Unmarshal(refsJSON, &q.SourceRefs)
 		json.Unmarshal(kpsJSON, &q.KnowledgePoints)
-		json.Unmarshal(mediaJSON, &q.MediaRefs)
 		result = append(result, q)
 	}
 	return result, rows.Err()
@@ -850,7 +1518,7 @@ func scanTask(row *sql.Row) (*domain.ReviewTask, error) {
 	var t domain.ReviewTask
 	var assignedTo, finalReviewerIDs []string
 	var resultsJSON, finalDecisionJSON []byte
-	err := row.Scan(&t.ID, &t.QuestionID, &t.FlowID, &t.CurrentRound, &t.Status, pqArrayScanner(&assignedTo), pqArrayScanner(&finalReviewerIDs), &finalDecisionJSON, &t.QuestionPrevStatus, &resultsJSON, &t.CreatedAt, &t.UpdatedAt)
+	err := row.Scan(&t.ID, &t.QuestionID, &t.FlowID, &t.SubmissionBankID, &t.CurrentRound, &t.Status, pqArrayScanner(&assignedTo), pqArrayScanner(&finalReviewerIDs), &finalDecisionJSON, &t.QuestionPrevStatus, &t.QuestionVersion, &t.Attempt, &resultsJSON, &t.CreatedAt, &t.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -859,6 +1527,7 @@ func scanTask(row *sql.Row) (*domain.ReviewTask, error) {
 	}
 	t.AssignedTo = assignedTo
 	t.FinalReviewerIDs = finalReviewerIDs
+	t.Status = domain.CanonicalLifecycleStatus(t.Status)
 	json.Unmarshal(resultsJSON, &t.RoundResults)
 	if len(finalDecisionJSON) > 0 && string(finalDecisionJSON) != "null" {
 		var fd domain.ExpertReview
@@ -900,71 +1569,40 @@ func scanFlowRow(rows *sql.Rows) (*domain.ReviewFlowConfig, error) {
 	return &f, nil
 }
 
-func scanImagePrompt(row *sql.Row) (*domain.ImagePrompt, error) {
-	var p domain.ImagePrompt
-	var include, exclude []string
-	err := row.Scan(&p.ID, &p.QuestionID, &p.Purpose, &p.ImageType, &p.Subject, pqArrayScanner(&include), pqArrayScanner(&exclude), &p.Style, &p.KnowledgePoint, &p.ReviewFocus, &p.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	p.MustInclude = include
-	p.MustExclude = exclude
-	return &p, nil
-}
-
-func scanImage(row *sql.Row) (*domain.GeneratedImage, error) {
-	var img domain.GeneratedImage
-	err := row.Scan(&img.ID, &img.PromptID, &img.QuestionID, &img.ImagePath, &img.ModelName, &img.ModelVersion, &img.Status, &img.ReviewNote, &img.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &img, nil
-}
-
-func scanImages(rows *sql.Rows) ([]domain.GeneratedImage, error) {
-	var result []domain.GeneratedImage
-	for rows.Next() {
-		var img domain.GeneratedImage
-		if err := rows.Scan(&img.ID, &img.PromptID, &img.QuestionID, &img.ImagePath, &img.ModelName, &img.ModelVersion, &img.Status, &img.ReviewNote, &img.CreatedAt); err != nil {
-			return nil, err
-		}
-		result = append(result, img)
-	}
-	return result, rows.Err()
-}
-
 // ===== 批量任务 =====
 
 func (s *Store) SaveBatchJob(ctx context.Context, job storage.BatchJobRecord) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO batch_jobs (id, job_name, status, total_count, completed, failed, output_file_id, points_json, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
+		INSERT INTO batch_jobs (id, backend, backend_profile, model, job_name, status, total_count, completed, failed, output_file_id, points_json, owner_id, created_at, updated_at)
+		VALUES ($1,COALESCE(NULLIF($2,''),'dashscope'),COALESCE(NULLIF($3,''),'dashscope-default'),$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),NOW())
 		ON CONFLICT (id) DO UPDATE SET
+			backend=COALESCE(NULLIF(EXCLUDED.backend,''),batch_jobs.backend),
+			backend_profile=COALESCE(NULLIF(EXCLUDED.backend_profile,''),batch_jobs.backend_profile),
+			model=COALESCE(NULLIF(EXCLUDED.model,''),batch_jobs.model),
 			job_name=EXCLUDED.job_name, status=EXCLUDED.status,
 			total_count=EXCLUDED.total_count, completed=EXCLUDED.completed, failed=EXCLUDED.failed,
-			output_file_id=EXCLUDED.output_file_id, updated_at=NOW()
-	`, job.ID, job.JobName, job.Status, job.TotalCount, job.Completed, job.Failed, job.OutputFileID, job.PointsJSON)
+			output_file_id=EXCLUDED.output_file_id,
+			owner_id=COALESCE(NULLIF(EXCLUDED.owner_id,''), batch_jobs.owner_id), updated_at=NOW()
+	`, job.ID, job.Backend, job.BackendProfile, job.Model, job.JobName, job.Status, job.TotalCount, job.Completed, job.Failed, job.OutputFileID, job.PointsJSON, job.OwnerID)
 	return err
 }
 
 func (s *Store) UpdateBatchJob(ctx context.Context, job storage.BatchJobRecord) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE batch_jobs SET status=$1, total_count=$2, completed=$3, failed=$4, output_file_id=$5, updated_at=NOW()
-		WHERE id=$6
-	`, job.Status, job.TotalCount, job.Completed, job.Failed, job.OutputFileID, job.ID)
+		UPDATE batch_jobs SET
+			backend=COALESCE(NULLIF($1,''),backend),
+			backend_profile=COALESCE(NULLIF($2,''),backend_profile),
+			model=COALESCE(NULLIF($3,''),model),
+			status=$4, total_count=$5, completed=$6, failed=$7, output_file_id=$8, updated_at=NOW()
+		WHERE id=$9
+	`, job.Backend, job.BackendProfile, job.Model, job.Status, job.TotalCount, job.Completed, job.Failed, job.OutputFileID, job.ID)
 	return err
 }
 
 func (s *Store) GetBatchJob(ctx context.Context, id string) (*storage.BatchJobRecord, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, job_name, status, total_count, completed, failed, output_file_id, points_json, created_at, updated_at FROM batch_jobs WHERE id=$1`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, backend, backend_profile, model, job_name, status, total_count, completed, failed, output_file_id, points_json, owner_id, COALESCE(imported_at::text, ''), COALESCE(import_result::text, ''), created_at, updated_at FROM batch_jobs WHERE id=$1`, id)
 	var j storage.BatchJobRecord
-	err := row.Scan(&j.ID, &j.JobName, &j.Status, &j.TotalCount, &j.Completed, &j.Failed, &j.OutputFileID, &j.PointsJSON, &j.CreatedAt, &j.UpdatedAt)
+	err := row.Scan(&j.ID, &j.Backend, &j.BackendProfile, &j.Model, &j.JobName, &j.Status, &j.TotalCount, &j.Completed, &j.Failed, &j.OutputFileID, &j.PointsJSON, &j.OwnerID, &j.ImportedAt, &j.ImportResult, &j.CreatedAt, &j.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -978,7 +1616,7 @@ func (s *Store) ListBatchJobs(ctx context.Context, limit int) ([]storage.BatchJo
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, job_name, status, total_count, completed, failed, output_file_id, points_json, created_at, updated_at FROM batch_jobs ORDER BY created_at DESC LIMIT $1`, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, backend, backend_profile, model, job_name, status, total_count, completed, failed, output_file_id, points_json, owner_id, COALESCE(imported_at::text, ''), COALESCE(import_result::text, ''), created_at, updated_at FROM batch_jobs ORDER BY created_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -986,7 +1624,7 @@ func (s *Store) ListBatchJobs(ctx context.Context, limit int) ([]storage.BatchJo
 	var result []storage.BatchJobRecord
 	for rows.Next() {
 		var j storage.BatchJobRecord
-		if err := rows.Scan(&j.ID, &j.JobName, &j.Status, &j.TotalCount, &j.Completed, &j.Failed, &j.OutputFileID, &j.PointsJSON, &j.CreatedAt, &j.UpdatedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.Backend, &j.BackendProfile, &j.Model, &j.JobName, &j.Status, &j.TotalCount, &j.Completed, &j.Failed, &j.OutputFileID, &j.PointsJSON, &j.OwnerID, &j.ImportedAt, &j.ImportResult, &j.CreatedAt, &j.UpdatedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, j)
@@ -998,8 +1636,18 @@ func (s *Store) SearchBatchJobs(ctx context.Context, name string, limit int) ([]
 	if limit <= 0 {
 		limit = 50
 	}
-	kw := "%" + strings.ToLower(name) + "%"
-	rows, err := s.db.QueryContext(ctx, `SELECT id, job_name, status, total_count, completed, failed, output_file_id, points_json, created_at, updated_at FROM batch_jobs WHERE LOWER(job_name) LIKE $1 ORDER BY created_at DESC LIMIT $2`, kw, limit)
+	clauses := []string{}
+	args := []any{}
+	for _, token := range storage.SearchTokens(name) {
+		args = append(args, "%"+escapeLike(token)+"%")
+		clauses = append(clauses, fmt.Sprintf("LOWER(job_name) LIKE $%d", len(args)))
+	}
+	where := ""
+	if len(clauses) > 0 {
+		where = " WHERE " + strings.Join(clauses, " AND ")
+	}
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, backend, backend_profile, model, job_name, status, total_count, completed, failed, output_file_id, points_json, owner_id, COALESCE(imported_at::text, ''), COALESCE(import_result::text, ''), created_at, updated_at FROM batch_jobs`+where+` ORDER BY created_at DESC LIMIT $`+fmt.Sprint(len(args)), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1007,12 +1655,41 @@ func (s *Store) SearchBatchJobs(ctx context.Context, name string, limit int) ([]
 	var result []storage.BatchJobRecord
 	for rows.Next() {
 		var j storage.BatchJobRecord
-		if err := rows.Scan(&j.ID, &j.JobName, &j.Status, &j.TotalCount, &j.Completed, &j.Failed, &j.OutputFileID, &j.PointsJSON, &j.CreatedAt, &j.UpdatedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.Backend, &j.BackendProfile, &j.Model, &j.JobName, &j.Status, &j.TotalCount, &j.Completed, &j.Failed, &j.OutputFileID, &j.PointsJSON, &j.OwnerID, &j.ImportedAt, &j.ImportResult, &j.CreatedAt, &j.UpdatedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, j)
 	}
 	return result, rows.Err()
+}
+
+// ClaimBatchJobImport 抢占式标记任务为已导入。依赖数据库行级更新原子性：
+// 并发触发导入时只有一个调用能把 imported_at 从 NULL 更新为当前时间。
+func (s *Store) ClaimBatchJobImport(ctx context.Context, id string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE batch_jobs SET imported_at=NOW(), updated_at=NOW() WHERE id=$1 AND imported_at IS NULL`, id)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+// SaveBatchJobImportResult 在导入完成后覆盖写入导入结果 JSON，供重复触发时重放。
+func (s *Store) SaveBatchJobImportResult(ctx context.Context, id string, resultJSON string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE batch_jobs SET import_result=$2::jsonb, imported_at=NOW(), updated_at=NOW() WHERE id=$1
+	`, id, resultJSON)
+	return err
+}
+
+// ReleaseBatchJobImport 释放导入标记，仅在尚未写入任何题目的前置失败后调用，
+// 允许后续重试；已保存过导入结果的任务不会被释放。
+func (s *Store) ReleaseBatchJobImport(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE batch_jobs SET imported_at=NULL WHERE id=$1 AND import_result IS NULL`, id)
+	return err
 }
 
 // ===== AI 检查结果 =====
@@ -1099,6 +1776,185 @@ func (s *Store) ListAll(ctx context.Context, limit int) ([]domain.AIReviewResult
 		results = append(results, r)
 	}
 	return results, rows.Err()
+}
+
+// ===== AI 检查任务队列 =====
+
+const aiCheckTaskColumns = `id, question_id, question_version, status, attempts, max_attempts, last_error, leased_until, created_at, updated_at`
+
+func scanAICheckTask(scanner interface{ Scan(dest ...any) error }) (domain.AICheckTask, error) {
+	var t domain.AICheckTask
+	// leased_until 在 pending（未入租约）和 succeeded/exhausted（回收）状态下为 NULL
+	var leasedUntil sql.NullTime
+	err := scanner.Scan(&t.ID, &t.QuestionID, &t.QuestionVersion, &t.Status, &t.Attempts, &t.MaxAttempts,
+		&t.LastError, &leasedUntil, &t.CreatedAt, &t.UpdatedAt)
+	if err != nil {
+		return t, err
+	}
+	t.LeasedUntil = leasedUntil.Time
+	return t, nil
+}
+
+func (s *Store) EnqueueCheckTask(ctx context.Context, task domain.AICheckTask) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO ai_check_tasks (id, question_id, question_version, status, attempts, max_attempts, last_error, leased_until, created_at, updated_at)
+		SELECT $1, $2, $3, $4, 0, $5, '', NULL, NOW(), NOW()
+		WHERE NOT EXISTS (
+			SELECT 1 FROM ai_check_tasks WHERE question_id = $2 AND status IN ('pending','running')
+		)
+	`, task.ID, task.QuestionID, task.QuestionVersion, task.Status, task.MaxAttempts)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+func (s *Store) ClaimNextCheckTask(ctx context.Context, lease time.Duration) (*domain.AICheckTask, error) {
+	row := s.db.QueryRowContext(ctx, `
+		UPDATE ai_check_tasks SET status='running', attempts=attempts+1, leased_until=$1, updated_at=NOW()
+		WHERE id = (
+			SELECT id FROM ai_check_tasks
+			WHERE (status='pending' AND (leased_until IS NULL OR leased_until <= NOW()))
+			   OR (status='running' AND leased_until <= NOW())
+			ORDER BY created_at
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING `+aiCheckTaskColumns, time.Now().Add(lease))
+	task, err := scanAICheckTask(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &task, nil
+}
+
+func (s *Store) CompleteCheckTask(ctx context.Context, taskID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE ai_check_tasks SET status='succeeded', leased_until=NULL, last_error='', updated_at=NOW()
+		WHERE id=$1
+	`, taskID)
+	return err
+}
+
+func (s *Store) FailCheckTask(ctx context.Context, taskID string, errMsg string, backoff time.Duration) error {
+	// $2 需显式标注 timestamptz：CASE 中与 NULL 混用时 PG 会把参数推断为 text
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE ai_check_tasks SET
+			status = CASE WHEN attempts >= max_attempts THEN 'exhausted' ELSE 'pending' END,
+			leased_until = CASE WHEN attempts >= max_attempts THEN NULL ELSE $2::timestamptz END,
+			last_error = $3,
+			updated_at = NOW()
+		WHERE id=$1
+	`, taskID, time.Now().Add(backoff), errMsg)
+	return err
+}
+
+func (s *Store) LatestCheckTasksByQuestionIDs(ctx context.Context, questionIDs []string) (map[string]domain.AICheckTask, error) {
+	if len(questionIDs) == 0 {
+		return map[string]domain.AICheckTask{}, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT ON (question_id) `+aiCheckTaskColumns+`
+		FROM ai_check_tasks WHERE question_id = ANY($1)
+		ORDER BY question_id, created_at DESC, id DESC
+	`, pq.Array(questionIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]domain.AICheckTask, len(questionIDs))
+	for rows.Next() {
+		t, err := scanAICheckTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[t.QuestionID] = t
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CountCheckTasksByStatus(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM ai_check_tasks GROUP BY status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		out[status] = count
+	}
+	return out, rows.Err()
+}
+
+// ===== AI 检查淘汰记录 =====
+
+func (s *Store) SaveDiscardResult(ctx context.Context, discard domain.AICheckDiscard) error {
+	scoresJSON, _ := json.Marshal(discard.Scores)
+	issuesJSON, _ := json.Marshal(discard.Issues)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO ai_check_discards (id, question_id, verdict, scores, issues, suggestion, model, stem_summary, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+	`, discard.ID, discard.QuestionID, discard.Verdict, string(scoresJSON), string(issuesJSON),
+		discard.Suggestion, discard.Model, discard.StemSummary)
+	return err
+}
+
+// CountReviewResultsByVerdict 按 verdict 统计 AI 检查结果数量（存储端聚合）。
+func (s *Store) CountReviewResultsByVerdict(ctx context.Context) (map[string]int, error) {
+	counts := map[string]int{}
+	if err := s.scanCounts(ctx, `SELECT verdict, COUNT(*) FROM ai_review_results GROUP BY verdict`, nil, counts); err != nil {
+		return nil, err
+	}
+	return counts, nil
+}
+
+// CountDiscardResults 统计 AI 检查淘汰留档总数。
+func (s *Store) CountDiscardResults(ctx context.Context) (int, error) {
+	var n int
+	if err := s.queryRowContext(ctx, `SELECT COUNT(*) FROM ai_check_discards`).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func (s *Store) ListDiscardResultsByQuestionIDs(ctx context.Context, questionIDs []string) (map[string]domain.AICheckDiscard, error) {
+	if len(questionIDs) == 0 {
+		return map[string]domain.AICheckDiscard{}, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT ON (question_id) id, question_id, verdict, scores, issues, suggestion, model, stem_summary, created_at
+		FROM ai_check_discards WHERE question_id = ANY($1)
+		ORDER BY question_id, created_at DESC
+	`, pq.Array(questionIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]domain.AICheckDiscard, len(questionIDs))
+	for rows.Next() {
+		var d domain.AICheckDiscard
+		var scoresJSON, issuesJSON string
+		if err := rows.Scan(&d.ID, &d.QuestionID, &d.Verdict, &scoresJSON, &issuesJSON,
+			&d.Suggestion, &d.Model, &d.StemSummary, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		json.Unmarshal([]byte(scoresJSON), &d.Scores)
+		json.Unmarshal([]byte(issuesJSON), &d.Issues)
+		out[d.QuestionID] = d
+	}
+	return out, rows.Err()
 }
 
 // ===== 角色模板 =====

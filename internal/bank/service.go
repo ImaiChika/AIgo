@@ -1,7 +1,7 @@
-// Package bank 提供题库（分库）管理服务。
-// 题库是大题库的子集：一道题可属于多个题库（多对多）。
+// Package bank 提供分类子题库管理服务。
+// 分类子题库与生命周期题库分层正交：一道待审核题可属于多个分类子题库（多对多）。
 // 创建题库时可指定专业范围（professions）自动归纳题目，
-// 也可人工搜索题目单个/批量加入（含所有状态），或从题库移出。
+// 也可人工搜索待审核层题目单个/批量加入，或从题库移出。
 package bank
 
 import (
@@ -83,8 +83,35 @@ func (s *Service) UpdateBank(ctx context.Context, id, name, description string, 
 
 // DeleteBank 删除题库（题目保留，仅解除成员关系）。
 func (s *Service) DeleteBank(ctx context.Context, id string) error {
-	if _, err := s.store.GetBank(ctx, id); err != nil {
+	bank, err := s.store.GetBank(ctx, id)
+	if err != nil {
 		return err
+	}
+	if bank == nil {
+		return fmt.Errorf("题库 %s 不存在", id)
+	}
+	questions, err := s.questionStore.ListQuestions(ctx)
+	if err != nil {
+		return err
+	}
+	for i := range questions {
+		q := &questions[i]
+		belongs := false
+		for _, bankID := range q.BankIDs {
+			if bankID == id {
+				belongs = true
+				break
+			}
+		}
+		if !belongs {
+			continue
+		}
+		if q.Tier() != domain.TierWorking {
+			return fmt.Errorf("题库含有%s题目 %s，删除会破坏已固化分类，禁止删除", q.Tier().Name(), q.ID)
+		}
+		if q.Status == domain.StatusReviewing || q.Status == domain.StatusConflict {
+			return fmt.Errorf("题库含有审核中的题目 %s，请先完成或撤销审核", q.ID)
+		}
 	}
 	return s.store.DeleteBank(ctx, id)
 }
@@ -100,6 +127,7 @@ func (s *Service) GetBank(ctx context.Context, id string) (*domain.QuestionBank,
 }
 
 // Collect 归纳：把"专业匹配且尚未在本库"的题目加入本库（不抢其他库，多对多共享）。
+// 分类子题库只作用于待审核题库：正式题库（已定稿）与淘汰题库（终态留档）不参与归纳。
 func (s *Service) Collect(ctx context.Context, bank domain.QuestionBank) (int, error) {
 	if len(bank.Professions) == 0 {
 		return 0, nil
@@ -116,6 +144,9 @@ func (s *Service) Collect(ctx context.Context, bank domain.QuestionBank) (int, e
 	for i := range questions {
 		q := &questions[i]
 		if !profSet[q.Profession] {
+			continue
+		}
+		if ensureBankAdjustable(q) != nil {
 			continue
 		}
 		already := false
@@ -158,6 +189,7 @@ func (s *Service) AssignBank(ctx context.Context, q *domain.A2Question) error {
 }
 
 // AddQuestionToBank 把题目加入指定题库（已存在则忽略，不影响其他库归属）。
+// 仅待审核题库题目可加入：正式题库已定稿、淘汰题库已终态锁定，均不再做分类调整。
 func (s *Service) AddQuestionToBank(ctx context.Context, questionID, bankID string) error {
 	if bankID == "" {
 		return fmt.Errorf("请指定题库")
@@ -176,6 +208,9 @@ func (s *Service) AddQuestionToBank(ctx context.Context, questionID, bankID stri
 	if q == nil {
 		return fmt.Errorf("题目 %s 不存在", questionID)
 	}
+	if err := ensureBankAdjustable(q); err != nil {
+		return err
+	}
 	for _, id := range q.BankIDs {
 		if id == bankID {
 			return nil // 已在库
@@ -187,6 +222,7 @@ func (s *Service) AddQuestionToBank(ctx context.Context, questionID, bankID stri
 }
 
 // AddQuestionsToBankBatch 批量把题目加入题库（高效 SQL，一次完成，多对多）。
+// 任一题目属于正式/淘汰题库时整体拒绝，避免批量操作绕过单题校验。
 func (s *Service) AddQuestionsToBankBatch(ctx context.Context, questionIDs []string, bankID string) (int, error) {
 	if bankID == "" {
 		return 0, fmt.Errorf("请指定题库")
@@ -194,10 +230,26 @@ func (s *Service) AddQuestionsToBankBatch(ctx context.Context, questionIDs []str
 	if len(questionIDs) == 0 {
 		return 0, nil
 	}
+	questions, err := s.questionStore.ListQuestions(ctx)
+	if err != nil {
+		return 0, err
+	}
+	byID := make(map[string]*domain.A2Question, len(questions))
+	for i := range questions {
+		byID[questions[i].ID] = &questions[i]
+	}
+	for _, id := range questionIDs {
+		if q := byID[id]; q != nil {
+			if err := ensureBankAdjustable(q); err != nil {
+				return 0, err
+			}
+		}
+	}
 	return s.store.AddQuestionsToBank(ctx, questionIDs, bankID)
 }
 
 // RemoveQuestionFromBank 把题目从指定题库移出（不影响其他库归属）。
+// 与加入一致：正式/淘汰题库题目不再调整分类。
 func (s *Service) RemoveQuestionFromBank(ctx context.Context, questionID, bankID string) error {
 	q, err := s.questionStore.GetQuestion(ctx, questionID)
 	if err != nil {
@@ -205,6 +257,9 @@ func (s *Service) RemoveQuestionFromBank(ctx context.Context, questionID, bankID
 	}
 	if q == nil {
 		return fmt.Errorf("题目 %s 不存在", questionID)
+	}
+	if err := ensureBankAdjustable(q); err != nil {
+		return err
 	}
 	removed := false
 	out := q.BankIDs[:0]
@@ -221,4 +276,15 @@ func (s *Service) RemoveQuestionFromBank(ctx context.Context, questionID, bankID
 	q.BankIDs = out
 	q.UpdatedAt = time.Now()
 	return s.questionStore.SaveQuestion(ctx, *q)
+}
+
+// ensureBankAdjustable 分类子题库操作只允许尚未进入审核任务的待审核题目。
+func ensureBankAdjustable(q *domain.A2Question) error {
+	if tier := q.Tier(); tier != domain.TierWorking {
+		return fmt.Errorf("%s题目不可调整分类子题库（仅待审核题库题目可归类）", tier.Name())
+	}
+	if q.Status == domain.StatusReviewing || q.Status == domain.StatusConflict {
+		return fmt.Errorf("审核中或待决断题目不可调整分类子题库；当前任务使用提交时的题库快照")
+	}
+	return nil
 }

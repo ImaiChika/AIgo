@@ -5,7 +5,7 @@
 set -euo pipefail
 
 branch="$(git branch --show-current)"
-base="origin/main"
+base=""
 threshold_mb=50
 dry_run=0
 allow_large=0
@@ -23,7 +23,8 @@ Push the current branch to origin with a history-size preflight.
 
 Options:
   --branch NAME       Branch to push. Default: current branch.
-  --base REF          Base ref used for the size estimate. Default: origin/main.
+  --base REF          Base ref used for the size estimate. Default: current branch's
+                     upstream; falls back to origin/main when no upstream exists.
   --threshold-mb N    Stop above this estimated size unless --allow-large is set.
                      Default: 50.
   --allow-large       Permit an estimated upload above the threshold.
@@ -63,6 +64,13 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1" >&2; usage >&2; exit 64 ;;
   esac
 done
+
+if [[ -z "$base" ]]; then
+  base="$(git rev-parse --abbrev-ref --symbolic-full-name "${branch}@{upstream}" 2>/dev/null || true)"
+  if [[ -z "$base" ]]; then
+    base="origin/main"
+  fi
+fi
 
 if ! [[ "$threshold_mb" =~ ^[1-9][0-9]*$ && "$retries" =~ ^[1-9][0-9]*$ && "$retry_delay" =~ ^[1-9][0-9]*$ ]]; then
   echo "--threshold-mb, --retries, and --retry-delay must be positive integers." >&2

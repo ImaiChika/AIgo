@@ -13,11 +13,17 @@ const route = useRoute();
 const showProfile = ref(false);
 const editName = ref("");
 const profileMsg = ref("");
+const oldPassword = ref("");
+const newPassword = ref("");
+const confirmPassword = ref("");
 
 function openProfile() {
   mobileNavigationOpen.value = false;
   editName.value = currentUser.value?.display_name || "";
   profileMsg.value = "";
+  oldPassword.value = "";
+  newPassword.value = "";
+  confirmPassword.value = "";
   showProfile.value = true;
 }
 
@@ -31,6 +37,31 @@ async function saveProfile() {
     setAuth(getToken(), user);
     profileMsg.value = "已保存";
     setTimeout(() => { showProfile.value = false; }, 800);
+  } catch (e) {
+    profileMsg.value = e.message;
+  }
+}
+
+async function changePassword() {
+  profileMsg.value = "";
+  if (!oldPassword.value) {
+    profileMsg.value = "请输入当前密码";
+    return;
+  }
+  if (newPassword.value.length < 8) {
+    profileMsg.value = "新密码至少8位";
+    return;
+  }
+  if (newPassword.value !== confirmPassword.value) {
+    profileMsg.value = "两次输入的新密码不一致";
+    return;
+  }
+  try {
+    await api.changePassword(oldPassword.value, newPassword.value);
+    oldPassword.value = "";
+    newPassword.value = "";
+    confirmPassword.value = "";
+    profileMsg.value = "密码已修改，下次登录请使用新密码";
   } catch (e) {
     profileMsg.value = e.message;
   }
@@ -112,10 +143,10 @@ const isLoginPage = computed(() => route.path === "/login");
     </main>
   </div>
 
-  <!-- 昵称编辑弹窗 -->
+  <!-- 个人设置弹窗 -->
   <div v-if="showProfile" class="modal-overlay" @click.self="showProfile = false">
     <div class="modal-card">
-      <h3>修改昵称</h3>
+      <h3>个人设置</h3>
       <div class="modal-field">
         <label>当前角色：{{ roleName(currentUser?.role) }}</label>
       </div>
@@ -125,8 +156,26 @@ const isLoginPage = computed(() => route.path === "/login");
       </div>
       <div v-if="profileMsg" class="modal-msg">{{ profileMsg }}</div>
       <div class="modal-actions">
-        <button class="primary-button" type="button" @click="saveProfile">保存</button>
-        <button class="ghost-button" type="button" @click="showProfile = false">取消</button>
+        <button class="primary-button" type="button" @click="saveProfile">保存昵称</button>
+      </div>
+
+      <div class="modal-divider"></div>
+      <h4>修改密码</h4>
+      <div class="modal-field">
+        <label>当前密码</label>
+        <input v-model="oldPassword" type="password" placeholder="输入当前密码" autocomplete="current-password" />
+      </div>
+      <div class="modal-field">
+        <label>新密码</label>
+        <input v-model="newPassword" type="password" placeholder="至少8位新密码" autocomplete="new-password" />
+      </div>
+      <div class="modal-field">
+        <label>确认新密码</label>
+        <input v-model="confirmPassword" type="password" placeholder="再次输入新密码" autocomplete="new-password" @keyup.enter="changePassword" />
+      </div>
+      <div class="modal-actions">
+        <button class="primary-button" type="button" @click="changePassword">修改密码</button>
+        <button class="ghost-button" type="button" @click="showProfile = false">关闭</button>
       </div>
     </div>
   </div>
@@ -173,13 +222,14 @@ const isLoginPage = computed(() => route.path === "/login");
 }
 
 .logout-btn {
-  width: 32px;
+  min-width: 44px;
   height: 32px;
   border: 1px solid #e5ebf3;
   border-radius: 6px;
   background: #fff;
   color: #c54858;
-  font-size: 16px;
+  padding: 0 10px;
+  font-size: 12px;
   cursor: pointer;
   display: grid;
   place-items: center;
@@ -210,6 +260,18 @@ const isLoginPage = computed(() => route.path === "/login");
   margin: 0 0 20px;
   font-size: 18px;
   color: #172033;
+}
+
+.modal-card h4 {
+  margin: 0 0 14px;
+  font-size: 15px;
+  color: #172033;
+}
+
+.modal-divider {
+  height: 1px;
+  margin: 20px 0;
+  background: #e5ebf3;
 }
 
 .modal-field {

@@ -1,208 +1,333 @@
 package api
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
-	"time"
+	"strings"
 
+	"aigo/internal/auth"
 	"aigo/internal/domain"
+	"aigo/internal/importer"
 	"aigo/internal/knowledge"
+	"aigo/internal/storage"
 )
 
-// handleListKP 列出知识点（支持分页和按专业筛选）。
-// 查询参数：subject=专业名，page=页码，page_size=每页数量。
-func (s *Server) handleListKP(w http.ResponseWriter, r *http.Request) {
-	subject := r.URL.Query().Get("subject")
-	ctx := r.Context()
-
-	// 按专业筛选或列出全部
-	var points []domain.KnowledgePoint
-	var err error
-	if subject != "" {
-		points, err = s.kpSvc.ListBySubject(ctx, subject)
-	} else {
-		points, err = s.kpSvc.ListAll(ctx)
+func kpError(w http.ResponseWriter, err error) {
+	status := http.StatusBadRequest
+	if errors.Is(err, storage.ErrKnowledgeNotFound) {
+		status = 404
 	}
-	if err != nil {
-		writeError(w, 500, err.Error())
-		return
+	if errors.Is(err, storage.ErrKnowledgeConflict) {
+		status = 409
 	}
-
-	// 分页处理
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 || pageSize > 100 {
-		pageSize = 20
-	}
-	start := (page - 1) * pageSize
-	end := start + pageSize
-	if start > len(points) {
-		start = len(points)
-	}
-	if end > len(points) {
-		end = len(points)
-	}
-
-	writeJSON(w, 200, map[string]any{
-		"points":    points[start:end],
-		"total":     len(points),
-		"page":      page,
-		"page_size": pageSize,
-	})
+	writeError(w, status, err.Error())
 }
-
-// handleSearchKP 搜索知识点（模糊 + 精确组合，支持分页）。
-// 查询参数：
-//
-//	q=关键词（模糊匹配 topic/unit/sub_item/subject/大纲代码）
-//	subject=专业（精确）、category=分类（精确）、outline_code=大纲代码前缀（精确）
-//	page=页码、page_size=每页数量（默认50，最大200）
+func (s *Server) logKnowledge(r *http.Request, action, detail string) {
+	if s.auditSvc != nil {
+		_ = s.auditSvc.Log(r.Context(), "", "knowledge_"+action, auth.GetUsername(r.Context()), detail)
+	}
+}
+func (s *Server) handleListKP(w http.ResponseWriter, r *http.Request) { s.handleSearchKP(w, r) }
 func (s *Server) handleSearchKP(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query().Get("q")
-	subject := r.URL.Query().Get("subject")
-	category := r.URL.Query().Get("category")
-	outlineCode := r.URL.Query().Get("outline_code")
-	ctx := r.Context()
-
-	points, err := s.kpSvc.SearchFiltered(ctx, knowledge.KPSearchOptions{
-		Keyword:     q,
-		Subject:     subject,
-		Category:    category,
-		OutlineCode: outlineCode,
-	})
-	if err != nil {
-		writeError(w, 500, err.Error())
+	q := r.URL.Query()
+	var path []string
+	if value := q.Get("path"); value != "" {
+		if err := json.Unmarshal([]byte(value), &path); err != nil || len(path) > 4 {
+			writeError(w, 400, "目录路径无效")
+			return
+		}
+	}
+	v, err := s.kpSvc.ResolveVersion(r.Context(), q.Get("version_id"))
+	if errors.Is(err, storage.ErrKnowledgeNoDefault) {
+		size, _ := strconv.Atoi(q.Get("page_size"))
+		if size < 1 || size > 200 {
+			size = 50
+		}
+		writeJSON(w, 200, map[string]any{"points": []domain.KnowledgePoint{}, "total": 0, "page": 1, "page_size": size, "has_more": false, "version": nil})
 		return
 	}
-
-	// 分页
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	if err != nil {
+		kpError(w, err)
+		return
+	}
+	points, err := s.kpSvc.SearchFiltered(r.Context(), knowledge.KPSearchOptions{VersionID: v.ID, Keyword: q.Get("q"), Subject: q.Get("subject"), Category: q.Get("category"), OutlineCode: q.Get("outline_code"), Path: path})
+	if err != nil {
+		kpError(w, err)
+		return
+	}
+	page, _ := strconv.Atoi(q.Get("page"))
+	size, _ := strconv.Atoi(q.Get("page_size"))
 	if page < 1 {
 		page = 1
 	}
-	if pageSize < 1 || pageSize > 200 {
-		pageSize = 50
+	if size < 1 || size > 200 {
+		size = 50
 	}
-	total := len(points)
-	start := (page - 1) * pageSize
-	if start > total {
-		start = total
+	// Clamp before multiplying to avoid integer overflow on hostile page numbers.
+	pages := (len(points) + size - 1) / size
+	if pages < 1 {
+		pages = 1
 	}
-	end := start + pageSize
-	if end > total {
-		end = total
+	if page > pages {
+		page = pages
 	}
-
-	writeJSON(w, 200, map[string]any{
-		"points":    points[start:end],
-		"total":     total,
-		"page":      page,
-		"page_size": pageSize,
-		"has_more":  end < total,
-	})
+	start := (page - 1) * size
+	end := min(start+size, len(points))
+	writeJSON(w, 200, map[string]any{"points": points[start:end], "total": len(points), "page": page, "page_size": size, "has_more": end < len(points), "version": v})
 }
-
-// handleKPMeta 返回分类与专业列表（知识点搜索筛选下拉用）。
 func (s *Server) handleKPMeta(w http.ResponseWriter, r *http.Request) {
-	categories, subjects, err := s.kpSvc.ListCategoriesAndSubjects(r.Context())
-	if err != nil {
-		writeError(w, 500, err.Error())
+	v, err := s.kpSvc.ResolveVersion(r.Context(), r.URL.Query().Get("version_id"))
+	if errors.Is(err, storage.ErrKnowledgeNoDefault) {
+		writeJSON(w, 200, map[string]any{"categories": []string{}, "subjects": []string{}, "version": nil})
 		return
 	}
-	writeJSON(w, 200, map[string]any{
-		"categories": categories,
-		"subjects":   subjects,
-	})
+	if err != nil {
+		kpError(w, err)
+		return
+	}
+	categories, subjects, err := s.kpSvc.ListCategoriesAndSubjects(r.Context(), v.ID)
+	if err != nil {
+		kpError(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"categories": categories, "subjects": subjects, "version": v})
 }
-
-// handleCreateKP 创建单个知识点。
-// 请求：{"topic": "充血的概念和类型", "subject": "病理", "unit": "二、局部血液循环障碍", "keywords": ["充血","淤血"]}
-func (s *Server) handleCreateKP(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleKPTree(w http.ResponseWriter, r *http.Request) {
+	v, err := s.kpSvc.ResolveVersion(r.Context(), r.URL.Query().Get("version_id"))
+	if errors.Is(err, storage.ErrKnowledgeNoDefault) {
+		writeJSON(w, 200, map[string]any{"tree": []*knowledge.TreeNode{}, "version": nil})
+		return
+	}
+	if err != nil {
+		kpError(w, err)
+		return
+	}
+	tree, err := s.kpSvc.Tree(r.Context(), v.ID)
+	if err != nil {
+		kpError(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"tree": tree, "version": v})
+}
+func (s *Server) handleKPVersions(w http.ResponseWriter, r *http.Request) {
+	versions, err := s.kpSvc.Versions(r.Context())
+	if err != nil {
+		kpError(w, err)
+		return
+	}
+	latest := ""
+	for _, v := range versions {
+		if v.Status == "published" {
+			latest = v.ID
+			break
+		}
+	}
+	writeJSON(w, 200, map[string]any{"versions": versions, "default_version_id": latest})
+}
+func (s *Server) handleCreateKPVersion(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID          string   `json:"id"`           // 可选，不填自动生成
-		Category    string   `json:"category"`     // 分类：基础医学/临床综合
-		Subject     string   `json:"subject"`      // 专业/系统
-		Unit        string   `json:"unit"`         // 单元
-		SubItem     string   `json:"sub_item"`     // 细目
-		Topic       string   `json:"topic"`        // 要点（必填）
-		OutlineCode string   `json:"outline_code"` // 大纲代码
-		Keywords    []string `json:"keywords"`     // 关键词列表
+		Name        string `json:"name"`
+		Year        int    `json:"year"`
+		Description string `json:"description"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, 400, "请求格式错误")
 		return
 	}
-	if req.Topic == "" {
-		writeError(w, 400, "知识点名称不能为空")
+	v, err := s.kpSvc.CreateVersion(r.Context(), req.Name, req.Year, req.Description)
+	if err != nil {
+		kpError(w, err)
 		return
 	}
-	if req.ID == "" {
-		req.ID = fmt.Sprintf("kp-custom-%d", time.Now().UnixNano())
-	}
-
-	kp := domain.KnowledgePoint{
-		ID:          req.ID,
-		Category:    req.Category,
-		Subject:     req.Subject,
-		Unit:        req.Unit,
-		SubItem:     req.SubItem,
-		Topic:       req.Topic,
-		OutlineCode: req.OutlineCode,
-		Keywords:    req.Keywords,
-	}
-	if _, err := s.kpSvc.SavePoints(r.Context(), []domain.KnowledgePoint{kp}); err != nil {
-		writeError(w, 500, "保存失败: "+err.Error())
-		return
-	}
-	writeJSON(w, 201, kp)
+	s.logKnowledge(r, "version_create", fmt.Sprintf("创建 %s (%d)", v.Name, v.Year))
+	writeJSON(w, 201, v)
 }
-
-// handleDeleteKP 根据 ID 删除知识点。
+func (s *Server) handlePublishKPVersion(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.kpSvc.PublishVersion(r.Context(), id); err != nil {
+		kpError(w, err)
+		return
+	}
+	s.logKnowledge(r, "version_publish", "启用大纲版本 "+id)
+	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+func (s *Server) handleCreateKP(w http.ResponseWriter, r *http.Request) {
+	var req domain.KnowledgePoint
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, "请求格式错误")
+		return
+	}
+	p, err := s.kpSvc.CreatePoint(r.Context(), req)
+	if err != nil {
+		kpError(w, err)
+		return
+	}
+	s.logKnowledge(r, "create", fmt.Sprintf("%s / %s / %s", p.VersionName, p.OutlineCode, p.Topic))
+	writeJSON(w, 201, p)
+}
+func (s *Server) handleUpdateKP(w http.ResponseWriter, r *http.Request) {
+	var req domain.KnowledgePoint
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, "请求格式错误")
+		return
+	}
+	p, err := s.kpSvc.UpdatePoint(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		kpError(w, err)
+		return
+	}
+	s.logKnowledge(r, "update", fmt.Sprintf("%s / %s / 修订 %d / %s", p.VersionName, p.OutlineCode, p.Revision, p.Topic))
+	writeJSON(w, 200, p)
+}
 func (s *Server) handleDeleteKP(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := s.kpSvc.DeletePoint(r.Context(), id); err != nil {
-		writeError(w, 500, "删除失败: "+err.Error())
+	p, err := s.kpSvc.GetByID(r.Context(), id)
+	if err != nil {
+		kpError(w, err)
 		return
 	}
+	if p == nil {
+		kpError(w, storage.ErrKnowledgeNotFound)
+		return
+	}
+	if err := s.kpSvc.DeletePoint(r.Context(), id); err != nil {
+		kpError(w, err)
+		return
+	}
+	s.logKnowledge(r, "delete", fmt.Sprintf("%s / %s / %s", p.VersionName, p.OutlineCode, p.Topic))
 	writeJSON(w, 200, map[string]string{"status": "ok", "id": id})
 }
-
-// handleImportKP 从 Excel 文件批量导入知识点。
-// 请求格式：multipart/form-data，字段名 "file"。
 func (s *Server) handleImportKP(w http.ResponseWriter, r *http.Request) {
-	file, header, err := r.FormFile("file")
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		writeError(w, 400, "上传失败，文件总大小不得超过 32 MB")
+		return
+	}
+	defer r.MultipartForm.RemoveAll()
+	files := r.MultipartForm.File["files"]
+	files = append(files, r.MultipartForm.File["file"]...)
+	if len(files) == 0 || len(files) > 20 {
+		writeError(w, 400, "请选择 1–20 个文件")
+		return
+	}
+	versionID := r.FormValue("version_id")
+	mode := r.FormValue("mode")
+	if mode != "" && mode != "merge" && mode != "replace" {
+		writeError(w, 400, "无效的导入方式")
+		return
+	}
+	dir, err := os.MkdirTemp("", "aigo-outline-*")
 	if err != nil {
-		writeError(w, 400, "缺少文件字段 file: "+err.Error())
+		writeError(w, 500, "无法创建导入临时目录")
 		return
 	}
-	defer file.Close()
-
-	// 保存到临时文件（防止路径穿越：只取文件名部分）
-	safeName := filepath.Base(header.Filename)
-	tmpPath := "/tmp/aigo_kp_import_" + safeName
-	if err := saveUploadedFile(tmpPath, file); err != nil {
-		writeError(w, 500, "保存临时文件失败: "+err.Error())
-		return
+	defer os.RemoveAll(dir)
+	paths := []string{}
+	names := []string{}
+	for i, header := range files {
+		name := filepath.Base(header.Filename)
+		ext := strings.ToLower(filepath.Ext(name))
+		if ext != ".xlsx" && ext != ".csv" && ext != ".docx" {
+			writeError(w, 400, name+"：仅支持 xlsx、csv、docx")
+			return
+		}
+		file, err := header.Open()
+		if err != nil {
+			writeError(w, 400, "无法读取 "+name)
+			return
+		}
+		// A separate directory per file preserves useful original names in diagnostics.
+		subdir := filepath.Join(dir, strconv.Itoa(i))
+		err = os.Mkdir(subdir, 0700)
+		if err != nil {
+			file.Close()
+			writeError(w, 500, "无法保存文件")
+			return
+		}
+		path := filepath.Join(subdir, name)
+		err = saveUploadedFile(path, file)
+		file.Close()
+		if err != nil {
+			writeError(w, 500, "保存文件失败")
+			return
+		}
+		paths = append(paths, path)
+		names = append(names, name)
 	}
-	defer os.Remove(tmpPath) // 导入完成后清理临时文件
-
-	// 调用知识点服务解析并导入
-	count, err := s.kpSvc.ImportFromXlsx(r.Context(), tmpPath)
+	inserted, updated, duplicated, err := s.kpSvc.ImportDocuments(r.Context(), versionID, paths, mode == "replace")
 	if err != nil {
-		writeError(w, 500, "导入失败: "+err.Error())
+		kpError(w, errors.New(strings.ReplaceAll(err.Error(), dir+string(filepath.Separator), "")))
+		return
+	}
+	v, err := s.kpSvc.ResolveVersion(r.Context(), versionID)
+	if err != nil {
+		kpError(w, err)
+		return
+	}
+	s.logKnowledge(r, "import", fmt.Sprintf("%s / %s / 文件 %s / 新增 %d，更新 %d，重复 %d", v.Name, mode, strings.Join(names, "、"), inserted, updated, duplicated))
+	writeJSON(w, 200, map[string]any{"imported": inserted, "updated": updated, "duplicated": duplicated, "total": v.PointCount, "version": v, "files": names})
+}
+
+// handleExportKP exports the selected syllabus version as a re-importable Excel file.
+func (s *Server) handleExportKP(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		VersionID string `json:"version_id"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	v, err := s.kpSvc.ResolveVersion(r.Context(), req.VersionID)
+	if err != nil {
+		kpError(w, err)
+		return
+	}
+	points, err := s.kpSvc.SearchFiltered(r.Context(), knowledge.KPSearchOptions{VersionID: v.ID})
+	if err != nil {
+		kpError(w, err)
+		return
+	}
+	if len(points) == 0 {
+		writeError(w, http.StatusBadRequest, "当前版本没有可导出的知识点")
 		return
 	}
 
-	total, _ := s.kpSvc.Count(r.Context())
-	writeJSON(w, 200, map[string]any{
-		"imported": count, // 本次导入数量
-		"total":    total, // 导入后总量
-	})
+	outputDir := "output/exports"
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		writeError(w, http.StatusInternalServerError, "无法创建导出目录")
+		return
+	}
+	// 使用 ASCII 文件名，避免部分浏览器将中文 Content-Disposition 按 Latin-1 解码。
+	filename := "knowledge-points_" + strings.TrimPrefix(newExportFilename("xlsx"), "题目_")
+	path := filepath.Join(outputDir, filename)
+	if err := importer.ExportKnowledgePointsToXlsx(points, path); err != nil {
+		writeError(w, http.StatusInternalServerError, "知识点导出失败: "+err.Error())
+		return
+	}
+	defer os.Remove(path)
+	s.logKnowledge(r, "export", fmt.Sprintf("导出 %s，共 %d 个知识点", v.Name, len(points)))
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	http.ServeFile(w, r, path)
+}
+
+func (s *Server) handleDeleteKPVersion(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	v, err := s.kpSvc.ResolveVersion(r.Context(), id)
+	if err != nil {
+		kpError(w, err)
+		return
+	}
+	count, err := s.kpSvc.DeleteVersion(r.Context(), id)
+	if err != nil {
+		kpError(w, err)
+		return
+	}
+	s.logKnowledge(r, "version_delete", fmt.Sprintf("删除大纲版本 %s / %s / %d 个知识点；保留历史题目与任务快照", id, v.Name, count))
+	writeJSON(w, 200, map[string]any{"id": id, "deleted_count": count, "status": "ok"})
 }

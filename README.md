@@ -6,8 +6,12 @@
 
 - `功能需求文档.txt` — 产品需求基准
 - `CLAUDE.md` — 开发约束
+- `docs/README.md` — 专家材料、项目指南与分析文档索引
+- `data/README.md` — 需求表、参考数据、样题与批量运行资料索引
 
 ## 快速启动
+
+开发模式：
 
 ```bash
 # 一键启动（PostgreSQL + 后端 + 前端）
@@ -17,11 +21,31 @@
 ./end.sh
 ```
 
+正式构建与前台运行（运行阶段不需要 Node/Vite，PostgreSQL 由外部管理）：
+
+```bash
+# 生成版本化发布目录 output/releases/<build-id>，并切换 output/production
+./build-production.sh
+
+# 正式运行默认不读取项目 .env；请由进程环境/Secrets 注入数据库和 JWT 配置。
+# 实时 Qwen 地址、API Key 和两个模型可在超级管理员登录后的“AI 服务配置”页面填写。
+export DB_DSN='postgres://localhost:5432/aigo?sslmode=disable'
+export JWT_SECRET='请替换为随机强密钥'
+
+# 先执行版本化迁移，再以前台单进程托管 API 和前端静态资源
+./run-production.sh
+```
+
+`run-production.sh` 默认监听 `127.0.0.1:8080`、开启自助注册并禁用 dotenv。新注册账号不带角色、业务权限或题库范围，管理员会在「用户管理」自动看到并负责授权。也可以设置 `AIGO_ENV_FILE=/secure/path/production.env` 读取发布目录之外的受控配置文件；文件不存在或不可读时会拒绝启动。
+
+单机构 Docker 交付使用 [deploy/README.md](deploy/README.md)：提供多阶段非 root 应用镜像、PostgreSQL、一次性迁移服务、Compose Secrets、Caddy HTTPS、带校验与恢复演练的逻辑备份，以及可选的 `age + S3` 客户端加密异机备份服务。该部署骨架不包含本地 Qwen 服务本身；客户实际对象存储的 Object Lock/凭证策略、集中监控和本地模型容量仍需部署验收。
+
 手动启动：
 ```bash
 # 1. 配置环境变量
 cp configs/example.env .env
-# 编辑 .env 填入 DASHSCOPE_API_KEY 和 DB_DSN
+# 首次启动也可以用环境变量预置 Qwen，服务会加密导入数据库；上线后可从“AI 服务配置”页面切换。
+# 两种模式都需配置 DB_DSN 和 JWT_SECRET；Batch 如继续使用百炼仍需保留独立 Batch 凭证。
 
 # 2. 启动 PostgreSQL
 brew services start postgresql@16
@@ -40,15 +64,50 @@ cd web && npm install && npm run dev
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `DASHSCOPE_API_KEY` | 阿里云百炼 API Key | 必填 |
-| `QWEN_BASE_URL` | 千问 API 地址 | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
-| `QWEN_MODEL` | 出题模型 | `qwen3.5-flash` |
+| `QWEN_DEPLOYMENT` | 实时文本推理位置：`cloud` / `local` | `cloud` |
+| `DASHSCOPE_API_KEY` | 兼容导入/回退凭证；也可供独立 Batch 使用 | UI 配置后实时调用不再以它为主 |
+| `QWEN_BASE_URL` | 首次启动兼容导入的实时 OpenAI-compatible 地址 | UI 配置后可留空；云端默认百炼地址 |
+| `QWEN_MODEL` | 首次启动兼容导入的生成模型 | UI 配置后可留空；云端默认 `qwen3.5-flash` |
+| `QWEN_API_KEY` | 首次启动兼容导入/回退的实时端点凭证 | UI 配置后可留空 |
+| `QWEN_LOCAL_API_KEY` | 兼容导入的本地实时端点凭证；不会回退云 Key | 本地无鉴权时可空 |
+| `QWEN_ENABLE_THINKING` | `true` / `false` / `auto` | `auto` |
+| `QWEN_BATCH_BACKEND` | `auto` / `dashscope` / `local`（预留）/ `disabled`；本地模式下 `auto` 不外发 | `auto` |
+| `QWEN_BATCH_API_KEY` | CLI 批量命令使用的独立百炼 Batch 凭证；空则使用 `DASHSCOPE_API_KEY` | 空 |
+| `QWEN_BATCH_BASE_URL` | 百炼 Batch base URL；cloud 下空则继承实时端点 | 空 |
+| `QWEN_BATCH_MODEL` | 百炼批量模型 | `qwen3.5-flash` |
+| `QWEN_BATCH_PROFILE` | 脱敏配置档名称，用于审计；多 profile 路由待后续 registry | `dashscope-default` |
 | `DB_DSN` | PostgreSQL 连接串 | `postgres://localhost:5432/aigo?sslmode=disable` |
 | `JWT_SECRET` | JWT 签名密钥 | `aigo-jwt-secret-default`（生产环境请更换） |
+| `AIGO_HTTP_ADDR` | 正式 HTTP 监听地址 | `127.0.0.1:8080` |
+| `AIGO_WEB_DIST_DIR` | Vite 生产构建目录；空时只提供 API | 空 |
+| `AIGO_ENV_FILE` | 外部 dotenv 路径；`-` 表示完全禁用 dotenv | `.env` |
+| `AIGO_REGISTER_ENABLED` | 是否开放自助注册；设为 `0/false` 可紧急关闭 | 默认 `1` |
+| `AIGO_TRUST_PROXY_HEADERS` | 是否信任 Caddy 写入的客户端IP头；直连部署不得开启 | 默认 `false`，Compose 内为 `true` |
+
+### 渐进迁移到本地推理
+
+实时出题和 AI 检查共用 `llm.Client`，可先迁到本地 OpenAI-compatible 服务；现有百炼 Batch 可独立保留：
+
+```env
+QWEN_DEPLOYMENT=local
+QWEN_BASE_URL=http://qwen-vllm.internal:8000/v1
+QWEN_MODEL=Qwen/Qwen3.5-35B-A3B
+QWEN_LOCAL_API_KEY=
+
+# 保留百炼批量时继续配置
+DASHSCOPE_API_KEY=
+QWEN_BATCH_BACKEND=dashscope
+QWEN_BATCH_MODEL=qwen3.5-flash
+```
+
+`qwen3.5-flash` 是百炼托管模型 ID；本地服务应填写实际开放权重或 `--served-model-name`，不能在业务代码里写死。当前 `local` 批量后端仅预留接口：本地实时推理可用，但本地持久任务队列尚未实现。实时部署地址、密钥和模型可由超级管理员在 Web 的“AI 服务配置”页面维护；本地模型进程、GPU 参数和网络连通性仍由部署运维管理。Batch 配置继续独立保留。
+
+Web 管理端的批量推理页面当前使用本地模拟执行器，只验证任务提交、进度轮询和导入幂等流程，不调用外部 API，也不写入真实题目；上述 `QWEN_BATCH_*` 变量仅保留给 CLI 批量命令兼容使用。
 
 ## CLI 命令
 
 ```bash
+go run ./cmd/aigo migrate            # 数据库迁移到当前版本
 go run ./cmd/aigo serve              # 启动 HTTP 服务
 go run ./cmd/aigo import <file.xlsx> # 导入题目
 go run ./cmd/aigo kp-import <file.xlsx> # 导入知识点
@@ -62,22 +121,43 @@ go run ./cmd/aigo doctor             # 检查系统状态
 | 模块 | 功能 |
 |------|------|
 | **AI 出题** | 千问生成 A2 型题，结构化 JSON 输出，批量生成 |
-| **AI 检查** | LLM 检查题目质量（科学性、答案、解析），四维评分 |
+| **AI 检查** | 生成/导入/编辑后自动触发，LLM 检查题目质量（科学性、答案、解析），四维评分；送审强制前置 |
 | **知识点管理** | Excel 批量导入、搜索、筛选 |
 | **题目管理** | CRUD、搜索、筛选、状态管理 |
 | **批量推理** | DashScope 批量 API，云端执行，任务持久化 |
-| **多轮审核** | 可配置流程、多轮审核、通过/驳回/退回修改 |
-| **题目发布** | 审核通过 → 管理员发布 → 正式题库 |
-| **生图** | z-image-turbo 真实生图，提示词生成，候选图审核 |
+| **多轮审核** | 可配置流程、多轮审核、通过/驳回/退回修改，审核侧展示 AI 检查参考 |
+| **题目通过** | 最终把关通过 → `published` 唯一成功终态 |
 | **导出** | Excel (.xlsx)、Word (.docx) 导出 |
-| **用户认证** | JWT 登录，RBAC 三种角色 (admin/expert/teacher) |
+| **用户认证** | JWT 登录，注册默认低权限，管理员RBAC授权，账号/IP渐进限速与失败审计 |
 | **操作日志** | 审计日志，按题目/操作人筛选 |
-| **数据库** | PostgreSQL，12 张数据表，启动自动建表 |
-| **前端** | Vue 3，9 个页面，全部对接后端 API |
+| **数据库** | PostgreSQL，独立版本化迁移、校验和与启动版本检查 |
+| **前端** | Vue 3 管理端；开发使用 Vite，正式构建由 Go 同源托管 |
+
+### 主流程
+
+```text
+AI 出题（单题 / 批量导入）→ 落库（ai_draft，题库中不可见为最终态）
+        ↓ 自动触发（后台异步，AIGO_AICHECK_AUTO）
+AI 检查（持久化任务队列：抢占执行 → 超时重试 3 次 → 耗尽标记最终失败）
+        ├─ 不通过 → 自动删除，原因留档并在生成页展示"本次生题具体情况"
+        └─ 通过 → ai_reviewed（送审强制前置，可配置关闭）
+专家多轮审核与决断
+        ├─ 需修改 → 题目恢复 ai_reviewed，退回生成者修改（「待我修改」页），改完提交修改回库，由管理员重新送审
+        ├─ 驳回 → rejected 终态锁定：禁止修改与重新提交
+        └─ 通过（全轮 + 把关人决断）→ published 定稿（管理员可在题库「撤回」回 ai_reviewed 修订）
+```
+
+- 题目唯一来源是 AI 生成；无手动新建。编辑窗口仅限"审核退回修改"的题目（「待我修改」页），生成页为纯展示。
+- 驳回与需修改语义分离：驳回是终态锁定；需修改是唯一的人工修订入口（无需 AI 检查，送审由管理员负责）。
+- AI 检查仅在题目首次生成时执行一次；退回修改后的编辑不触发复检。
+- 检查任务持久化在 `ai_check_tasks` 表：服务重启自动恢复，单次调用超时可配（默认 90s），失败自动重试（默认 3 次，指数退避），重试耗尽标记最终失败；卡死任务由租约到期自动回收。
+- 进度可见：生成页/批量页显示"检查中 x/N"分段进度与淘汰明细（短轮询）；题库页提供检查概况统计。
+- 分层可见性：手动补查按 `question:edit`（题目编辑）授权，强制通过/撤回按 `user:manage` 授权；`review:do`（审题）默认只见"AI 预审"折叠标识，可主动展开；`review:final`（最终把关，管理员天然具备，也可在用户管理中授予指定账户）在决断工作台可见 AI 报告与全部轮次专家评语。所有权限点均在权限矩阵中可分配。
+- 存量草稿可用 CLI 补查：`go run ./cmd/aigo ai-check --all-drafts`。
+- 检查与生成一样走 `llm.Client`（OpenAI 兼容）；切换自部署只需改 `QWEN_*`，或用 `AIGO_AICHECK_*` 让检查走独立端点/模型。
 
 ### 技术栈
 
 - **后端**: Go + PostgreSQL
 - **前端**: Vue 3 + Vite
 - **AI**: 阿里云百炼千问 (OpenAI 兼容接口)
-- **生图**: z-image-turbo

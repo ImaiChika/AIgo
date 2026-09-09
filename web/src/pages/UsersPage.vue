@@ -1,7 +1,7 @@
 <script setup>
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted } from "vue";
 import { api } from "../api.js";
-import { roleName } from "../auth.js";
+import { currentUser, permissionName } from "../auth.js";
 
 const toast = ref("");
 const users = ref([]);
@@ -33,7 +33,7 @@ async function loadAll() {
     const [userData, roleData, bankData, permData] = await Promise.all([
       api.listUsers(),
       api.listRoles(),
-      api.listBanks(),
+      api.listBanks(false),
       api.listPermissions(),
     ]);
     users.value = userData.users || [];
@@ -54,10 +54,35 @@ async function loadAll() {
 }
 
 function roleOptions() {
-  return [{ id: "", name: "无角色" }, ...roles.value];
+  // 超级管理员是系统唯一身份，只能由启动引导产生，不能作为用户管理中的可分配角色。
+  const available = roles.value.filter((r) => r.id !== "super_admin" &&
+    (currentUser.value?.role === "super_admin" || r.id !== "admin"));
+  return [{ id: "", name: "无角色" }, ...available];
 }
 
+function roleOptionsFor(u) {
+  if (u?.role === "super_admin") return roleOptions();
+  const options = roleOptions();
+  if (!u?.role || options.some((r) => r.id === u.role)) return options;
+  const current = roles.value.find((r) => r.id === u.role);
+  return current ? [current, ...options] : options;
+}
+
+function isProtectedUser(u) {
+  return u?.id === currentUser.value?.id || u?.role === "super_admin" ||
+    (u?.role === "admin" && currentUser.value?.role !== "super_admin");
+}
+
+function canAssignPermission(u, permission) {
+  return !isProtectedUser(u) &&
+    (currentUser.value?.role === "super_admin" || permission.code !== "role:manage");
+}
+
+const creating = ref(false); // 创建用户在途守卫，防重复提交
+
 async function createUser() {
+  if (creating.value) return;
+  creating.value = true;
   try {
     await api.createUser(newUser.value);
     showToast("创建成功");
@@ -66,11 +91,14 @@ async function createUser() {
     loadAll();
   } catch (e) {
     showToast("创建失败: " + e.message);
+  } finally {
+    creating.value = false;
   }
 }
 
 // 勾选/取消权限（立即保存整行）
 async function togglePerm(u, code) {
+  if (!canAssignPermission(u, { code })) return;
   const perms = new Set(u.direct_permissions || []);
   if (perms.has(code)) perms.delete(code);
   else perms.add(code);
@@ -78,6 +106,7 @@ async function togglePerm(u, code) {
 }
 
 async function toggleBank(u, bankId) {
+  if (isProtectedUser(u)) return;
   const banksArr = new Set(u.bank_ids || []);
   if (banksArr.has(bankId)) banksArr.delete(bankId);
   else banksArr.add(bankId);
@@ -85,10 +114,12 @@ async function toggleBank(u, bankId) {
 }
 
 async function changeRole(u, role) {
+  if (isProtectedUser(u)) return;
   await saveUser(u, { role });
 }
 
 async function toggleEnabled(u) {
+  if (isProtectedUser(u)) return;
   await saveUser(u, { enabled: !u.enabled });
 }
 
@@ -108,6 +139,19 @@ async function saveUser(u, patch) {
   }
 }
 
+async function deleteUser(u) {
+  if (isProtectedUser(u)) return;
+  if (!confirm(`确定删除用户「${u.username}」？删除后该账号将无法登录，历史审核记录保留。`)) return;
+  try {
+    await api.deleteUser(u.id);
+    users.value = users.value.filter((item) => item.id !== u.id);
+    if (expandedRow.value === u.id) expandedRow.value = "";
+    showToast(`已删除 ${u.username}`);
+  } catch (e) {
+    showToast("删除失败: " + e.message);
+  }
+}
+
 // 用户直接分配的权限（区别于角色模板权限）
 function directPerms(u) {
   return u.direct_permissions || [];
@@ -122,11 +166,14 @@ onMounted(loadAll);
       <div class="section-heading">
         <span class="dot blue"></span>
         <h2>用户管理</h2>
-        <small>{{ users.length }} 个用户（含自主注册）</small>
+        <small>{{ users.length }} 个用户</small>
         <button class="primary-button" type="button" @click="showCreate = !showCreate">
           {{ showCreate ? "取消" : "新建用户" }}
         </button>
       </div>
+      <p class="permission-summary">
+        超级管理员仅保留一名，负责角色模板和最高权限；管理员由超级管理员分配，可按题库范围管理人员、题库、审核流程并参与审核决断；审题专家只通过任务进行审核。
+      </p>
 
       <!-- 新建用户表单 -->
       <div v-if="showCreate" class="create-form">
@@ -150,7 +197,7 @@ onMounted(loadAll);
             </select>
           </div>
         </div>
-        <button class="primary-button" type="button" @click="createUser">确认创建</button>
+        <button class="primary-button" type="button" :disabled="creating" @click="createUser">{{ creating ? "创建中..." : "确认创建" }}</button>
         <span class="form-hint">创建后可在下方列表中继续勾选具体权限与题库范围</span>
       </div>
 
@@ -164,7 +211,7 @@ onMounted(loadAll);
             <th>状态</th>
             <th>权限</th>
             <th>创建时间</th>
-            <th></th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -176,12 +223,13 @@ onMounted(loadAll);
               </td>
               <td>{{ u.display_name }}</td>
               <td>
-                <select :value="u.role" @change="changeRole(u, $event.target.value)">
-                  <option v-for="r in roleOptions()" :key="r.id" :value="r.id">{{ r.name }}</option>
+                <span v-if="u.role === 'super_admin'" class="protected-role">超级管理员（系统唯一）</span>
+                <select v-else :value="u.role" :disabled="isProtectedUser(u)" @change="changeRole(u, $event.target.value)">
+                  <option v-for="r in roleOptionsFor(u)" :key="r.id" :value="r.id">{{ r.name }}</option>
                 </select>
               </td>
               <td>
-                <button class="toggle-btn" :class="u.enabled ? 'on' : 'off'" type="button" @click="toggleEnabled(u)">
+                <button class="toggle-btn" :class="u.enabled ? 'on' : 'off'" type="button" :disabled="isProtectedUser(u)" @click="toggleEnabled(u)">
                   {{ u.enabled ? "启用" : "禁用" }}
                 </button>
               </td>
@@ -193,6 +241,7 @@ onMounted(loadAll);
                 <button class="expand-btn" type="button" @click="expandedRow = expandedRow === u.id ? '' : u.id">
                   {{ expandedRow === u.id ? "收起权限" : "分配权限" }}
                 </button>
+                <button v-if="!isProtectedUser(u)" class="delete-user-btn" type="button" @click="deleteUser(u)">删除</button>
               </td>
             </tr>
             <!-- 权限矩阵行：一列列权限打勾分配 -->
@@ -206,9 +255,10 @@ onMounted(loadAll);
                         <input
                           type="checkbox"
                           :checked="directPerms(u).includes(p.code)"
+                          :disabled="!canAssignPermission(u, p)"
                           @change="togglePerm(u, p.code)"
                         />
-                        {{ p.name }}
+                        {{ permissionName(p) }}
                         <span v-if="p.bank_scope" class="scope-mark" title="可按题库限定范围">库</span>
                       </label>
                     </div>
@@ -217,8 +267,8 @@ onMounted(loadAll);
                   <!-- 题库范围 -->
                   <div class="perm-group bank-scope">
                     <div class="perm-group-title">
-                      题库范围
-                      <span class="scope-hint">（仅对「库」权限生效，不选 = 全部题库）</span>
+                      分类子题库范围
+                      <span class="scope-hint">（不选表示全部；对角色权限和直接权限都生效）</span>
                     </div>
                     <div class="bank-chips">
                       <button
@@ -226,6 +276,7 @@ onMounted(loadAll);
                         type="button"
                         class="bank-chip"
                         :class="{ selected: (u.bank_ids || []).includes(b.id) }"
+                        :disabled="isProtectedUser(u)"
                         @click="toggleBank(u, b.id)"
                       >
                         {{ b.name }}
@@ -235,8 +286,7 @@ onMounted(loadAll);
                   </div>
 
                   <p class="matrix-note">
-                    说明：角色模板带来的权限为全范围；此处勾选的权限可搭配题库范围。审核人 = 勾选「审题」权限的用户，
-                    审哪个库由题库范围决定。
+                    角色决定“能做什么”，题库范围决定“可在哪些专业子题库做”；审题与最终决断的题目内容按任务分配开放，不需要题库查看权限。
                   </p>
                 </div>
               </td>
@@ -261,6 +311,16 @@ onMounted(loadAll);
   border: 1px solid #dce8f7;
   border-radius: 8px;
   margin-bottom: 16px;
+}
+
+.permission-summary {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #eff8ff;
+  color: #49627d;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .form-row {
@@ -345,6 +405,12 @@ onMounted(loadAll);
   font-size: 13px;
 }
 
+.protected-role {
+  color: #6e7b8f;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
 .toggle-btn {
   padding: 3px 10px;
   border-radius: 4px;
@@ -366,6 +432,13 @@ onMounted(loadAll);
   border-color: #f3c2c2;
 }
 
+.toggle-btn:disabled,
+.users-table select:disabled,
+.perm-check input:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .perm-count {
   font-size: 12px;
   color: #1385f8;
@@ -384,6 +457,21 @@ onMounted(loadAll);
 
 .expand-btn:hover {
   background: #eff8ff;
+}
+
+.delete-user-btn {
+  margin-left: 6px;
+  padding: 4px 10px;
+  border: 1px solid #f3c2c2;
+  border-radius: 6px;
+  background: #fff;
+  color: #c54858;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.delete-user-btn:hover {
+  background: #fff0f0;
 }
 
 .perm-matrix-row td {
@@ -461,6 +549,11 @@ onMounted(loadAll);
   background: #1385f8;
   color: #fff;
   border-color: #1385f8;
+}
+
+.bank-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .no-bank {

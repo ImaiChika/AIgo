@@ -1,13 +1,83 @@
 <script setup>
 import { ref, onMounted, computed } from "vue";
 import { api } from "../api.js";
-import { hasPerm, getToken } from "../auth.js";
+import { hasPerm } from "../auth.js";
+import AICheckScoreButton from "../components/AICheckScoreButton.vue";
 
-// 权限判断
+// 权限判断。题目唯一来源是 AI 生成：无手动新建；编辑窗口仅限专家退回修改（待我修改页）。
+// AI 检查仅在首次生成时自动执行一次，本页不提供重新检查入口；强制通过/撤回按用户管理权限。
 const canDelete = computed(() => hasPerm("question:delete"));
-const canEdit = computed(() => hasPerm("question:edit"));
 const canDownload = computed(() => hasPerm("question:download"));
-const canCreate = computed(() => hasPerm("question:create"));
+const canForcePass = computed(() => hasPerm("user:manage"));
+const canUnpublish = computed(() => hasPerm("user:manage"));
+// 正式题库（已入库）为定稿密封区：删除需要专门权限（question:delete_formal）
+const canDeleteFormal = computed(() => hasPerm("question:delete_formal"));
+
+// 按题目状态选择删除权限：已入库（正式题库）走 question:delete_formal，其余走 question:delete
+function canDeleteQuestion(q) {
+  return q.status === "published" ? canDeleteFormal.value : canDelete.value;
+}
+
+// 个人题库按 owner_id 隔离，三个分层都由 question:view 控制；
+// 全局题库按分享申请状态推导三层，并额外要求 question:view_global。
+const PERSONAL_TIER_DEFS = [
+  { key: "formal", name: "正式题库", perm: "question:view" },
+  { key: "working", name: "待审核题库", perm: "question:view" },
+  { key: "eliminated", name: "淘汰题库", perm: "question:view" },
+];
+const GLOBAL_TIER_DEFS = [
+  { key: "formal", name: "正式题库", perm: "question:view_formal" },
+  { key: "working", name: "待审核题库", perm: "question:view" },
+  { key: "eliminated", name: "淘汰题库", perm: "question:view_eliminated" },
+];
+const canViewGlobal = computed(() => hasPerm("question:view_global"));
+const questionScope = ref(canViewGlobal.value ? "global" : "personal");
+const isGlobalScope = computed(() => questionScope.value === "global");
+const visibleTiers = computed(() => (isGlobalScope.value ? GLOBAL_TIER_DEFS : PERSONAL_TIER_DEFS).filter((t) => hasPerm(t.perm)));
+const activeTier = ref(visibleTiers.value[0]?.key || "");
+
+// 各分类下可选的状态筛选
+const TIER_STATUS_OPTIONS = {
+  formal: [{ value: "published", label: "已入库" }],
+  working: [
+    { value: "ai_draft", label: "AI草稿" },
+    { value: "auto_checked", label: "已初评" },
+    { value: "ai_reviewed", label: "AI已检查" },
+    { value: "reviewing", label: "审核中" },
+    { value: "conflict", label: "待决断" },
+    { value: "revision_required", label: "需修改" },
+  ],
+  eliminated: [
+    { value: "rejected", label: "已驳回" },
+    { value: "archived", label: "已归档" },
+  ],
+};
+const statusOptions = computed(() => TIER_STATUS_OPTIONS[activeTier.value] || []);
+
+// 切换分类题库：重置筛选与选择后重新加载
+function switchTier(tier) {
+  if (!tier || tier === activeTier.value) return;
+  activeTier.value = tier;
+  filterStatus.value = "";
+  selectedIds.value.clear();
+  selectAll.value = false;
+  selectedQuestion.value = null;
+  doSearch();
+}
+
+function switchScope(scope) {
+  if (scope === questionScope.value || (scope === "global" && !canViewGlobal.value)) return;
+  questionScope.value = scope;
+  activeTier.value = visibleTiers.value[0]?.key || "";
+  filterStatus.value = "";
+  filterBank.value = "";
+  selectedIds.value.clear();
+  selectAll.value = false;
+  selectedQuestion.value = null;
+  loadShareRequests();
+  doSearch();
+}
+
 const toast = ref("");
 const questions = ref([]);
 const loading = ref(false);
@@ -18,20 +88,92 @@ const filterProfession = ref(""); // 专业筛选
 const professions = ref([]); // 专业列表
 const banks = ref([]); // 题库列表
 const selectedQuestion = ref(null);
-const selectedImages = ref([]);
-const lightboxImage = ref("");
-const editing = ref(false);
-const editForm = ref({ clinical_stem: "", options: [], answer: "", explanation: "" });
+const shareStatuses = ref({});
+let questionSearchTicket = 0;
 
-// 新建题目表单
-const showCreateForm = ref(false);
-const createForm = ref({ clinical_stem: "", options: [{ label: "A", text: "" }], answer: "", explanation: "", difficulty: "medium", bank_id: "" });
+// 强制通过：跳过 AI 检查门禁，草稿直接置为已检查（后端写审计留痕）
+const mutating = ref(false); // 强制通过/撤回/删除在途守卫，防重复事务
 
-// 分页
+async function forcePassSelected() {
+  const q = selectedQuestion.value;
+  if (!q) return;
+  if (mutating.value) return;
+  if (!confirm("确定跳过 AI 检查、强制将该题置为「已检查」？该操作会记录到审计日志。")) return;
+  mutating.value = true;
+  try {
+    const updated = await api.aiCheckOverride(q.id);
+    if (selectedQuestion.value?.id === q.id) selectedQuestion.value = updated;
+    showToast("已强制通过 AI 检查");
+    await loadQuestions(false);
+  } catch (e) {
+    showToast("强制通过失败: " + e.message);
+  } finally {
+    mutating.value = false;
+  }
+}
+
+// 管理员撤回已入库题目至 AI 检查通过状态
+async function unpublishSelected() {
+  const q = selectedQuestion.value;
+  if (!q) return;
+  if (mutating.value) return;
+  if (!confirm("确定撤回该已入库题目？撤回后状态回到「已检查」，可修订后重新送审。该操作会记录到审计日志。")) return;
+  mutating.value = true;
+  try {
+    const updated = await api.unpublishQuestion(q.id, "题库页撤回修订");
+    if (selectedQuestion.value?.id === q.id) selectedQuestion.value = updated;
+    showToast("已撤回至 AI 检查通过状态");
+    await loadQuestions(false);
+  } catch (e) {
+    showToast("撤回失败: " + e.message);
+  } finally {
+    mutating.value = false;
+  }
+}
+
+async function loadShareRequests() {
+  if (!hasPerm("question:share") || isGlobalScope.value) {
+    shareStatuses.value = {};
+    return;
+  }
+  try {
+    const data = await api.listQuestionShares("mine");
+    const next = {};
+    for (const item of data.items || []) next[item.request.question_id] = item.request.status;
+    shareStatuses.value = next;
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function shareStatus(questionID) {
+  return shareStatuses.value[questionID] || "";
+}
+
+function shareStatusText(status) {
+  return { pending: "待管理员审核", approved: "已进入全局正式库", rejected: "分享未通过" }[status] || "";
+}
+
+async function requestShare(q) {
+  if (!q || q.status !== "published" || shareStatus(q.id)) return;
+  if (!confirm("确认申请将这道个人正式题目分享至全局题库？每道题只能申请一次，审批后不能重复申请。")) return;
+  mutating.value = true;
+  try {
+    const data = await api.createQuestionShare(q.id);
+    shareStatuses.value = { ...shareStatuses.value, [q.id]: data.request?.status || "pending" };
+    showToast("分享申请已提交，等待管理员审批");
+  } catch (e) {
+    showToast("提交分享申请失败: " + e.message);
+  } finally {
+    mutating.value = false;
+  }
+}
+
+// 分页：固定每页 100 条，页码换页
 const page = ref(1);
 const pageSize = 100;
 const totalCount = ref(0);
-const hasMore = ref(false);
+const pageCount = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize)));
 
 // 批量选择
 const selectedIds = ref(new Set());
@@ -76,7 +218,7 @@ async function exportXlsx() {
   }
   exporting.value = true;
   try {
-    const data = await api.exportXlsx({ question_ids: ids });
+    const data = await api.exportXlsx({ question_ids: ids, scope: questionScope.value });
     showToast(`已导出 ${data.count} 道题`);
     downloadFile(data.filename);
   } catch (e) {
@@ -94,7 +236,7 @@ async function exportDocx() {
   }
   exporting.value = true;
   try {
-    const data = await api.exportDocx({ question_ids: ids });
+    const data = await api.exportDocx({ question_ids: ids, scope: questionScope.value });
     showToast(`已导出 ${data.count} 道题`);
     downloadFile(data.filename);
   } catch (e) {
@@ -107,8 +249,8 @@ async function exportDocx() {
 async function exportAllXlsx() {
   exporting.value = true;
   try {
-    const data = await api.exportXlsx({ export_all: true });
-    showToast(`已导出全部 ${data.count} 道题`);
+    const data = await api.exportXlsx({ export_all: true, scope: questionScope.value });
+    showToast(`已导出正式题库全部 ${data.count} 道题`);
     downloadFile(data.filename);
   } catch (e) {
     showToast("导出失败: " + e.message);
@@ -124,68 +266,45 @@ function showToast(msg) {
 }
 
 async function loadQuestions(resetPage = true) {
+  const ticket = ++questionSearchTicket;
   loading.value = true;
   if (resetPage) page.value = 1;
   try {
     let data;
     if (searchQuery.value || filterStatus.value || filterProfession.value) {
-      data = await api.searchQuestions(searchQuery.value, filterStatus.value, page.value, pageSize, filterBank.value, filterProfession.value ? [filterProfession.value] : []);
+      data = await api.searchQuestions(searchQuery.value, filterStatus.value, page.value, pageSize, filterBank.value, filterProfession.value ? [filterProfession.value] : [], "", "", activeTier.value, false, questionScope.value);
     } else {
-      data = await api.listQuestions(page.value, pageSize, filterBank.value);
+      data = await api.listQuestions(page.value, pageSize, filterBank.value, activeTier.value, questionScope.value);
     }
+    if (ticket !== questionSearchTicket) return;
     questions.value = data.questions || [];
     totalCount.value = data.total || 0;
-    hasMore.value = !!data.has_more;
   } catch (e) {
     showToast("加载失败: " + e.message);
   } finally {
-    loading.value = false;
+    if (ticket === questionSearchTicket) loading.value = false;
   }
 }
 
-async function loadMore() {
-  page.value += 1;
-  loading.value = true;
-  try {
-    let data;
-    if (searchQuery.value || filterStatus.value || filterProfession.value) {
-      data = await api.searchQuestions(searchQuery.value, filterStatus.value, page.value, pageSize, filterBank.value, filterProfession.value ? [filterProfession.value] : []);
-    } else {
-      data = await api.listQuestions(page.value, pageSize, filterBank.value);
-    }
-    questions.value = questions.value.concat(data.questions || []);
-    totalCount.value = data.total || 0;
-    hasMore.value = !!data.has_more;
-  } catch (e) {
-    showToast("加载失败: " + e.message);
-  } finally {
-    loading.value = false;
-  }
+// 页码换页：钳制页码范围后重新加载，并回到列表顶部
+function goPage(p) {
+  if (loading.value) return;
+  const target = Math.min(Math.max(1, p), pageCount.value);
+  if (target === page.value) return;
+  page.value = target;
+  loadQuestions(false);
+  const scroller = document.querySelector(".question-scroll");
+  if (scroller) scroller.scrollTop = 0;
 }
 
-async function selectQuestion(q) {
+function selectQuestion(q) {
   selectedQuestion.value = q;
-  selectedImages.value = [];
-  try {
-    const data = await api.listImages(q.id);
-    selectedImages.value = data.images || [];
-  } catch (e) {
-    selectedImages.value = [];
-  }
 }
-
-function imageSrc(path) {
-  if (!path) return "";
-  const filename = path.split("/").pop();
-  const token = getToken();
-  return `/images/${filename}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
-}
-
-function openImage(src) { lightboxImage.value = src; }
-function closeLightbox() { lightboxImage.value = ""; }
 
 async function deleteQuestion(q) {
+  if (mutating.value) return;
   if (!confirm(`确定删除题目？\n${(q.clinical_stem || "").slice(0, 50)}...`)) return;
+  mutating.value = true;
   try {
     await api.deleteQuestion(q.id);
     showToast("已删除");
@@ -194,53 +313,8 @@ async function deleteQuestion(q) {
     if (selectedQuestion.value?.id === q.id) selectedQuestion.value = null;
   } catch (e) {
     showToast("删除失败: " + e.message);
-  }
-}
-
-async function startEdit() {
-  editForm.value = {
-    clinical_stem: selectedQuestion.value.clinical_stem || "",
-    options: (selectedQuestion.value.options || []).map(o => ({ ...o })),
-    answer: selectedQuestion.value.answer || "",
-    explanation: selectedQuestion.value.explanation || "",
-  };
-  editing.value = true;
-}
-
-function cancelEdit() { editing.value = false; }
-
-function removeEditOption(index) {
-  if (editForm.value.options.length <= 4) {
-    showToast("至少保留4个选项");
-    return;
-  }
-  editForm.value.options.splice(index, 1);
-}
-
-function addEditOption() {
-  if (editForm.value.options.length >= 5) {
-    showToast("最多5个选项");
-    return;
-  }
-  const label = String.fromCharCode(65 + editForm.value.options.length);
-  editForm.value.options.push({ label, text: "" });
-}
-
-async function saveEdit() {
-  try {
-    const data = await api.updateQuestion(selectedQuestion.value.id, {
-      clinical_stem: editForm.value.clinical_stem,
-      options: editForm.value.options,
-      answer: editForm.value.answer,
-      explanation: editForm.value.explanation,
-    });
-    selectedQuestion.value = data;
-    const idx = questions.value.findIndex(q => q.id === data.id);
-    if (idx >= 0) questions.value[idx] = data;
-    editing.value = false;
-    showToast("已保存修改");
-  } catch (e) {
-    showToast("保存失败: " + e.message);
+  } finally {
+    mutating.value = false;
   }
 }
 
@@ -260,15 +334,25 @@ function clearSearch() {
 }
 
 function statusText(status) {
-  const map = {
+  const lifecycle = {
     ai_draft: "AI草稿", auto_checked: "已初评", ai_reviewed: "AI已检查",
-    reviewing: "审核中", conflict: "待决断", approved: "已通过", rejected: "已驳回",
+    reviewing: "审核中", conflict: "待决断", approved: "已通过", rejected: "专家审核已驳回",
     revision_required: "需修改", published: "已入库", archived: "已归档",
   };
-  return map[status] || status;
+  if (isGlobalScope.value) {
+    if (activeTier.value === "formal") return "已进入全局正式库";
+    // 新分享申请的题目本身已经 published；历史全局过程题保持真实审核状态。
+    if (activeTier.value === "working") return status === "published" ? "待管理员审核分享" : (lifecycle[status] || status);
+    // 分享被拒的个人题仍是 published；历史 rejected/archived 则来自专家审核流程。
+    if (activeTier.value === "eliminated") return status === "published" ? "分享未通过" : (lifecycle[status] || status);
+  }
+  return lifecycle[status] || status;
 }
 
 function statusClass(status) {
+  if (isGlobalScope.value && activeTier.value === "eliminated") return "status-bad";
+  if (isGlobalScope.value && activeTier.value === "working" && status === "published") return "status-warn";
+  if (isGlobalScope.value && activeTier.value === "formal") return "status-good";
   if (status === "approved" || status === "published" || status === "ai_reviewed") return "status-good";
   if (status === "rejected") return "status-bad";
   if (status === "reviewing") return "status-active";
@@ -282,8 +366,6 @@ async function selectQuestionById(id) {
     const q = await api.getQuestion(id);
     if (q) {
       selectedQuestion.value = q;
-      selectedImages.value = [];
-      startEdit();
     }
   } catch (e) {
     showToast("定位题目失败: " + e.message);
@@ -292,7 +374,7 @@ async function selectQuestionById(id) {
 
 async function loadBanks() {
   try {
-    const data = await api.listBanks();
+    const data = await api.listBanks(false);
     banks.value = data.banks || [];
   } catch (e) {
     console.error(e);
@@ -320,39 +402,8 @@ function questionBanks(ids) {
   return ids.map(bankName).join("、");
 }
 
-// 新建题目
-function addCreateOption() {
-  if (createForm.value.options.length >= 5) {
-    showToast("最多5个选项");
-    return;
-  }
-  const label = String.fromCharCode(65 + createForm.value.options.length);
-  createForm.value.options.push({ label, text: "" });
-}
-
-function removeCreateOption(index) {
-  if (createForm.value.options.length <= 1) {
-    showToast("至少需要一个选项");
-    return;
-  }
-  createForm.value.options.splice(index, 1);
-  createForm.value.options.forEach((o, i) => { o.label = String.fromCharCode(65 + i); });
-}
-
-async function submitCreate() {
-  try {
-    await api.createQuestion(createForm.value);
-    showToast("已创建题目（草稿状态）");
-    showCreateForm.value = false;
-    createForm.value = { clinical_stem: "", options: [{ label: "A", text: "" }], answer: "", explanation: "", difficulty: "medium", bank_id: filterBank.value };
-    loadQuestions();
-  } catch (e) {
-    showToast("创建失败: " + e.message);
-  }
-}
-
 onMounted(async () => {
-  await Promise.all([loadQuestions(), loadBanks(), loadProfessions()]);
+  await Promise.all([loadQuestions(), loadBanks(), loadProfessions(), loadShareRequests()]);
   // 支持从审核页「去修改题目」跳转：?edit=<题目ID> 自动定位并进入编辑
   const editId = new URLSearchParams(window.location.search).get("edit");
   if (editId) {
@@ -367,52 +418,64 @@ onMounted(async () => {
     <section class="panel bank-list-panel">
       <div class="section-heading">
         <span class="dot blue"></span>
-        <h2>题库</h2>
+        <h2>{{ isGlobalScope ? "全局题库" : "我的题库" }}</h2>
         <small>{{ questions.length }} 道</small>
       </div>
 
-      <div class="filter-row">
-        <input v-model="searchQuery" placeholder="搜索ID、题干或答案..." @keyup.enter="doSearch" class="search-input" />
-        <select v-model="filterProfession" @change="doSearch" title="按专业筛选">
-          <option value="">全部专业</option>
-          <option v-for="p in professions" :key="p" :value="p">{{ p }}</option>
-        </select>
-        <select v-model="filterStatus" @change="doSearch">
-          <option value="">全部状态</option>
-          <option value="ai_draft">AI草稿</option>
-          <option value="auto_checked">已初评</option>
-          <option value="ai_reviewed">AI已检查</option>
-          <option value="reviewing">审核中</option>
-          <option value="conflict">待决断</option>
-          <option value="approved">已通过</option>
-          <option value="rejected">已驳回</option>
-          <option value="revision_required">需修改</option>
-          <option value="published">已入库</option>
-        </select>
-        <button class="ghost-button" type="button" @click="doSearch">搜索</button>
-        <button class="ghost-button" type="button" @click="clearSearch">重置</button>
-      </div>
+      <!-- 筛选与题库栏固定：列表滚动时保持可见 -->
+      <div class="list-toolbar">
+        <div v-if="canViewGlobal" class="scope-tabs" aria-label="题库范围">
+          <button type="button" class="scope-tab" :class="{ active: questionScope === 'personal' }" @click="switchScope('personal')">我的题库</button>
+          <button type="button" class="scope-tab" :class="{ active: questionScope === 'global' }" @click="switchScope('global')">全局题库</button>
+        </div>
+        <!-- 题库分类：正式 / 待审核 / 淘汰（黑字精简样式） -->
+        <div v-if="visibleTiers.length" class="tier-tabs">
+          <button
+            v-for="t in visibleTiers"
+            :key="t.key"
+            type="button"
+            class="tier-tab"
+            :class="{ active: activeTier === t.key }"
+            @click="switchTier(t.key)"
+          >{{ t.name }}</button>
+        </div>
+        <div v-else class="empty">暂无题库访问权限，请联系管理员分配相应权限</div>
 
-      <!-- 题库筛选 -->
-      <div class="bank-filter-row">
-        <button
-          type="button"
-          class="bank-filter-chip"
-          :class="{ active: filterBank === '' }"
-          @click="filterBank = ''; doSearch()"
-        >
-          全部题库
-        </button>
-        <button
-          v-for="b in banks"
-          :key="b.id"
-          type="button"
-          class="bank-filter-chip"
-          :class="{ active: filterBank === b.id }"
-          @click="filterBank = b.id; doSearch()"
-        >
-          {{ b.name }}
-        </button>
+        <div class="filter-row">
+          <input v-model="searchQuery" placeholder="搜索题干、选项、解析、专业、系统、知识点或ID..." @keyup.enter="doSearch" class="search-input" />
+          <select v-model="filterProfession" @change="doSearch" title="按专业筛选">
+            <option value="">全部专业</option>
+            <option v-for="p in professions" :key="p" :value="p">{{ p }}</option>
+          </select>
+          <select v-model="filterStatus" @change="doSearch">
+            <option value="">全部状态</option>
+            <option v-for="opt in statusOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+          </select>
+          <button class="ghost-button" type="button" @click="doSearch">搜索</button>
+          <button class="ghost-button" type="button" @click="clearSearch">重置</button>
+        </div>
+
+        <!-- 题库筛选 -->
+        <div class="bank-filter-row">
+          <button
+            type="button"
+            class="bank-filter-chip"
+            :class="{ active: filterBank === '' }"
+            @click="filterBank = ''; doSearch()"
+          >
+            全部题库
+          </button>
+          <button
+            v-for="b in banks"
+            :key="b.id"
+            type="button"
+            class="bank-filter-chip"
+            :class="{ active: filterBank === b.id }"
+            @click="filterBank = b.id; doSearch()"
+          >
+            {{ b.name }}
+          </button>
+        </div>
       </div>
 
       <!-- 批量操作栏 -->
@@ -422,7 +485,8 @@ onMounted(async () => {
           <span>全选</span>
         </label>
         <span class="selected-count" v-if="selectedIds.size > 0">已选 {{ selectedIds.size }} 道</span>
-        <div class="export-btns" v-if="canDownload">
+        <!-- 导出仅包含已入库（正式题库）题目，由后端强制；仅正式题库页提供 -->
+        <div class="export-btns" v-if="canDownload && activeTier === 'formal'">
           <button class="ghost-button" type="button" @click="exportXlsx" :disabled="exporting || selectedIds.size === 0">
             {{ exporting ? "导出中..." : "导出 Excel" }}
           </button>
@@ -433,101 +497,58 @@ onMounted(async () => {
             导出全部 Excel
           </button>
         </div>
-        <button v-if="canCreate" class="ghost-button" type="button" @click="showCreateForm = !showCreateForm">
-          {{ showCreateForm ? "取消新建" : "+ 新建题目" }}
-        </button>
-      </div>
-
-      <!-- 新建题目表单 -->
-      <div v-if="showCreateForm" class="create-form">
-        <div class="create-field">
-          <label>题干 *</label>
-          <textarea v-model="createForm.clinical_stem" class="edit-textarea" placeholder="临床情境题干"></textarea>
-        </div>
-        <div class="create-field">
-          <label>选项 *（答案必须存在于选项中）</label>
-          <div v-for="(opt, i) in createForm.options" :key="i" class="edit-option-row">
-            <span class="opt-label">{{ opt.label }}</span>
-            <input v-model="opt.text" class="edit-input" />
-            <button class="remove-btn" type="button" @click="removeCreateOption(i)">×</button>
-          </div>
-          <button class="text-button" type="button" @click="addCreateOption">+ 添加选项</button>
-        </div>
-        <div class="create-field">
-          <label>正确答案 *</label>
-          <select v-model="createForm.answer" class="edit-select">
-            <option v-for="(opt, i) in createForm.options" :key="i" :value="opt.label">{{ opt.label }}</option>
-          </select>
-        </div>
-        <div class="create-field">
-          <label>解析（可选）</label>
-          <textarea v-model="createForm.explanation" class="edit-textarea"></textarea>
-        </div>
-        <div class="create-field">
-          <label>难度</label>
-          <select v-model="createForm.difficulty" class="edit-select">
-            <option value="easy">简单</option>
-            <option value="medium">中等</option>
-            <option value="hard">困难</option>
-          </select>
-        </div>
-        <div class="create-field">
-          <label>所属题库</label>
-          <select v-model="createForm.bank_id" class="edit-select">
-            <option value="">未分类</option>
-            <option v-for="b in banks" :key="b.id" :value="b.id">{{ b.name }}</option>
-          </select>
-        </div>
-        <div class="create-actions">
-          <button class="primary-button" type="button" @click="submitCreate">创建题目</button>
-        </div>
       </div>
 
       <div v-if="loading" class="loading">加载中...</div>
-      <div v-else class="question-list">
-        <div
-          v-for="q in questions"
-          :key="q.id"
-          class="question-item"
-          :class="{ active: selectedQuestion?.id === q.id, selected: selectedIds.has(q.id) }"
-        >
-          <input
-            type="checkbox"
-            :checked="selectedIds.has(q.id)"
-            @change="toggleSelect(q.id)"
-            @click.stop
-            class="q-checkbox"
-          />
+      <div v-else class="question-scroll">
+        <div class="question-list">
           <div
-            class="q-content"
-            role="button"
-            tabindex="0"
-            @click="selectQuestion(q)"
-            @keydown.enter="selectQuestion(q)"
+            v-for="q in questions"
+            :key="q.id"
+            class="question-item"
+            :class="{ active: selectedQuestion?.id === q.id, selected: selectedIds.has(q.id) }"
           >
-            <div class="q-info">
-              <span class="q-stem">{{ (q.clinical_stem || "").slice(0, 60) }}...</span>
-              <span class="q-meta">
-                答案: {{ q.answer }}
-                <span v-if="(q.bank_ids || []).length"> | 题库: {{ questionBanks(q.bank_ids) }}</span>
-                <span v-if="q.outline_code"> | 大纲: {{ q.outline_code }}</span>
-                <span v-if="q.profession"> | 专业: {{ q.profession }}</span>
-              </span>
-            </div>
-            <div class="q-actions">
-              <span class="q-status" :class="statusClass(q.status)">{{ statusText(q.status) }}</span>
-              <button v-if="canDelete" class="delete-btn" type="button" @click.stop="deleteQuestion(q)" title="删除">×</button>
+            <input
+              type="checkbox"
+              :checked="selectedIds.has(q.id)"
+              @change="toggleSelect(q.id)"
+              @click.stop
+              class="q-checkbox"
+            />
+            <div
+              class="q-content"
+              role="button"
+              tabindex="0"
+              @click="selectQuestion(q)"
+              @keydown.enter="selectQuestion(q)"
+            >
+              <div class="q-info">
+                <span class="q-stem">{{ (q.clinical_stem || "").slice(0, 60) }}{{ (q.clinical_stem || "").length > 60 ? "..." : "" }}</span>
+                <span class="q-meta">
+                  答案: {{ q.answer }}
+                  <span v-if="(q.bank_ids || []).length"> | 题库: {{ questionBanks(q.bank_ids) }}</span>
+                  <span v-if="q.outline_code"> | 大纲: {{ q.outline_code }}</span>
+                  <span v-if="q.profession"> | 专业: {{ q.profession }}</span>
+                </span>
+              </div>
+              <div class="q-actions">
+                <span class="q-status" :class="statusClass(q.status)">{{ statusText(q.status) }}</span>
+                <span v-if="!isGlobalScope && shareStatus(q.id)" class="share-status">{{ shareStatusText(shareStatus(q.id)) }}</span>
+                <button v-if="!isGlobalScope && canDeleteQuestion(q)" class="delete-btn" type="button" :disabled="mutating" @click.stop="deleteQuestion(q)" title="删除">×</button>
+              </div>
             </div>
           </div>
+          <div v-if="!questions.length" class="empty">暂无题目</div>
         </div>
-        <div v-if="!questions.length" class="empty">暂无题目</div>
-        <div v-else-if="hasMore" class="load-more">
-          <button class="ghost-button" type="button" @click="loadMore" :disabled="loading">
-            {{ loading ? "加载中..." : `加载更多（已显示 ${questions.length} / ${totalCount}）` }}
-          </button>
-        </div>
-        <div v-else-if="totalCount > questions.length" class="load-more-end">
-          已显示全部 {{ totalCount }} 道题目
+      </div>
+
+      <!-- 页码换页（固定在列表下方，无论题目多少始终显示） -->
+      <div class="list-footer">
+        <span class="page-total">共 {{ totalCount }} 条</span>
+        <div class="page-pager">
+          <button class="page-btn" type="button" :disabled="page <= 1 || loading" @click="goPage(page - 1)">‹ 上一页</button>
+          <span class="page-info">第 {{ page }} / {{ pageCount }} 页</span>
+          <button class="page-btn" type="button" :disabled="page >= pageCount || loading" @click="goPage(page + 1)">下一页 ›</button>
         </div>
       </div>
     </section>
@@ -536,17 +557,48 @@ onMounted(async () => {
     <section class="panel" v-if="selectedQuestion">
       <div class="section-heading">
         <span class="dot blue"></span>
-        <h2>{{ editing ? "编辑题目" : "题目详情" }}</h2>
+        <h2>题目详情</h2>
         <span class="q-status" :class="statusClass(selectedQuestion.status)">
           {{ statusText(selectedQuestion.status) }}
         </span>
-        <div class="edit-actions" v-if="!editing">
-          <button v-if="canEdit" class="ghost-button" type="button" @click="startEdit">编辑</button>
+        <AICheckScoreButton :question-id="selectedQuestion.id" />
+        <div class="edit-actions">
+          <button
+            v-if="!isGlobalScope && canForcePass && activeTier === 'working' && (selectedQuestion.status === 'ai_draft' || selectedQuestion.status === 'auto_checked')"
+            class="ghost-button ai-force-btn"
+            type="button"
+            title="跳过 AI 检查，直接置为已检查（写审计日志）"
+            :disabled="mutating"
+            @click="forcePassSelected"
+          >
+            {{ mutating ? "处理中..." : "强制通过" }}
+          </button>
+          <button
+            v-if="!isGlobalScope && canUnpublish && activeTier === 'formal' && selectedQuestion.status === 'published'"
+            class="ghost-button ai-force-btn"
+            type="button"
+            title="撤回已入库题目至 AI 检查通过状态（写审计日志）"
+            :disabled="mutating"
+            @click="unpublishSelected"
+          >
+            {{ mutating ? "处理中..." : "撤回" }}
+          </button>
+          <button
+            v-if="!isGlobalScope && hasPerm('question:share') && activeTier === 'formal' && selectedQuestion.status === 'published' && !shareStatus(selectedQuestion.id)"
+            class="ghost-button share-btn"
+            type="button"
+            :disabled="mutating"
+            @click="requestShare(selectedQuestion)"
+          >
+            申请分享至全局库
+          </button>
+          <span v-else-if="!isGlobalScope && activeTier === 'formal' && shareStatus(selectedQuestion?.id)" class="share-detail-status">
+            {{ shareStatusText(shareStatus(selectedQuestion.id)) }}
+          </span>
         </div>
       </div>
 
-      <!-- 查看模式 -->
-      <template v-if="!editing">
+      <!-- 详情（只读；修订入口在「待我修改」页） -->
         <!-- 试题参数 -->
         <div class="params-bar">
           <span v-if="selectedQuestion.outline_code" class="param-item">
@@ -602,60 +654,12 @@ onMounted(async () => {
           </div>
         </div>
 
-        <!-- 配图 -->
-        <div v-if="selectedImages.length" class="detail-field">
-          <label>配图（{{ selectedImages.length }} 张）</label>
-          <div class="image-grid">
-            <div v-for="(img, i) in selectedImages" :key="img.id" class="image-thumb">
-              <img :src="imageSrc(img.image_path)" :alt="`配图${i+1}`" @click="openImage(imageSrc(img.image_path))" />
-              <span class="image-status" :class="img.status">{{ img.status === "approved" ? "已通过" : img.status === "rejected" ? "已驳回" : "待审核" }}</span>
-            </div>
-          </div>
-        </div>
-
         <div class="detail-field">
           <label>元信息</label>
           <p class="meta-text">ID: {{ selectedQuestion.id }}</p>
           <p class="meta-text">版本: {{ selectedQuestion.version }}</p>
           <p class="meta-text">创建: {{ selectedQuestion.created_at }}</p>
         </div>
-
-      </template>
-
-      <!-- 编辑模式 -->
-      <template v-else>
-        <div class="detail-field">
-          <label>题干</label>
-          <textarea v-model="editForm.clinical_stem" class="edit-textarea"></textarea>
-        </div>
-
-        <div class="detail-field">
-          <label>选项</label>
-          <div v-for="(opt, i) in editForm.options" :key="i" class="edit-option-row">
-            <span class="opt-label">{{ String.fromCharCode(65 + i) }}</span>
-            <input v-model="opt.text" class="edit-input" />
-            <button class="remove-btn" type="button" @click="removeEditOption(i)" :disabled="editForm.options.length <= 4">×</button>
-          </div>
-          <button class="text-button" type="button" @click="addEditOption">+ 添加选项</button>
-        </div>
-
-        <div class="detail-field">
-          <label>正确答案</label>
-          <select v-model="editForm.answer" class="edit-select">
-            <option v-for="(opt, i) in editForm.options" :key="i" :value="opt.label">{{ opt.label }}</option>
-          </select>
-        </div>
-
-        <div class="detail-field">
-          <label>解析</label>
-          <textarea v-model="editForm.explanation" class="edit-textarea"></textarea>
-        </div>
-
-        <div class="edit-buttons">
-          <button class="primary-button" type="button" @click="saveEdit">保存修改</button>
-          <button class="ghost-button" type="button" @click="cancelEdit">取消</button>
-        </div>
-      </template>
     </section>
 
     <section v-else class="panel empty-panel">
@@ -665,12 +669,18 @@ onMounted(async () => {
 
   <div class="toast" :class="{ show: toast }" role="status" aria-live="polite">{{ toast }}</div>
 
-  <div v-if="lightboxImage" class="lightbox" @click="closeLightbox">
-    <img :src="lightboxImage" @click.stop />
-  </div>
 </template>
 
 <style scoped>
+.ai-force-btn {
+  color: #c07b22;
+  border-color: #f3d9b0;
+}
+
+.ai-force-btn:hover {
+  background: #fff8ec;
+}
+
 .bank-layout {
   display: grid;
   grid-template-columns: 420px minmax(0, 1fr);
@@ -678,18 +688,99 @@ onMounted(async () => {
 }
 
 .bank-list-panel {
+  display: flex;
+  flex-direction: column;
   max-height: calc(100vh - 180px);
+  overflow: hidden;
+}
+
+/* 面板内的固定部分不参与压缩，列表在独立滚动盒内滚动（不会钻到筛选栏后面） */
+.bank-list-panel .section-heading,
+.list-toolbar,
+.batch-bar,
+.list-footer {
+  flex-shrink: 0;
+}
+
+/* 筛选与题库栏：固定在列表上方 */
+.list-toolbar {
+	margin-bottom: 4px;
+}
+
+.scope-tabs {
+	display: flex;
+	gap: 16px;
+	margin: 0 0 13px;
+	border-bottom: 1px solid #dce8f7;
+}
+
+.scope-tab {
+	border: 0;
+	border-bottom: 2px solid transparent;
+	margin-bottom: -1px;
+	padding: 0 2px 9px;
+	background: none;
+	color: #6e7b8f;
+	font-size: 13px;
+	cursor: pointer;
+}
+
+.scope-tab.active {
+	border-bottom-color: #1385f8;
+	color: #172033;
+	font-weight: 700;
+}
+
+.scope-tab:hover {
+	color: #1385f8;
+}
+
+/* 题库分类切换：黑字精简，仅下划线指示当前分类 */
+.tier-tabs {
+  display: flex;
+  gap: 18px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid #eef2f7;
+}
+
+.tier-tab {
+  border: 0;
+  background: none;
+  padding: 0 2px 8px;
+  margin-bottom: -1px;
+  color: #172033;
+  font-size: 13px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.tier-tab:hover {
+  color: #000;
+}
+
+.tier-tab.active {
+  color: #172033;
+  font-weight: 600;
+  border-bottom-color: #172033;
+}
+
+/* 列表滚动盒 */
+.question-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
 }
 
 .filter-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 12px;
 }
 
 .search-input {
   flex: 1;
+  min-width: 140px;
   height: 36px;
   border: 1px solid #e5ebf3;
   border-radius: 7px;
@@ -703,6 +794,49 @@ onMounted(async () => {
   border-radius: 7px;
   padding: 0 8px;
   font-size: 13px;
+}
+
+/* 页码换页 */
+.list-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0 2px;
+  border-top: 1px solid #eef2f7;
+  font-size: 13px;
+  color: #556;
+}
+
+.page-pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.page-btn {
+  border: 1px solid #e5ebf3;
+  border-radius: 7px;
+  background: #fff;
+  color: #556;
+  font-size: 12px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.page-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.page-btn:not(:disabled):hover {
+  border-color: #9fc3f5;
+  color: #0571dc;
+}
+
+.page-info {
+  font-size: 12px;
+  color: #556;
 }
 
 /* 批量操作栏 */
@@ -858,7 +992,8 @@ onMounted(async () => {
   margin-left: auto;
 }
 
-.question-list { display: grid; gap: 6px; }
+/* 单列网格：minmax(0,1fr) 强制行宽等于面板宽，题干超长时省略号截断而不是横向撑开 */
+.question-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
 
 .question-item {
   display: flex;
@@ -911,6 +1046,12 @@ onMounted(async () => {
 
 .q-meta { font-size: 11px; color: #6e7b8f; }
 
+.share-status,
+.share-detail-status { color: #a16618; font-size: 11px; white-space: nowrap; }
+
+.share-btn { color: #087c55; border-color: #bdecd9; }
+.share-btn:hover { background: #f0fff8; }
+
 .q-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
 .q-status {
@@ -941,6 +1082,8 @@ onMounted(async () => {
 }
 
 .delete-btn:hover { background: #fff0f0; border-color: #c54858; }
+
+.delete-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .publish-btn {
   padding: 2px 8px;
@@ -1064,8 +1207,6 @@ onMounted(async () => {
 
 .empty-panel { display: grid; place-items: center; color: #6e7b8f; }
 .empty, .loading { text-align: center; color: #6e7b8f; padding: 30px; }
-.load-more { text-align: center; padding: 16px; }
-.load-more-end { text-align: center; color: #9aa5b4; font-size: 12px; padding: 12px; }
 .edit-actions { margin-left: auto; }
 
 .edit-textarea {
@@ -1133,51 +1274,4 @@ onMounted(async () => {
 .remove-btn:hover:not(:disabled) { background: #fff0f0; }
 .remove-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
-.image-grid { display: flex; gap: 10px; flex-wrap: wrap; }
-
-.image-thumb {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  align-items: center;
-}
-
-.image-thumb img {
-  width: 150px; height: 120px;
-  object-fit: cover;
-  border: 1px solid #e5ebf3;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.image-thumb img:hover { border-color: #1385f8; }
-
-.image-status {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: #f0f3f7;
-  color: #6e7b8f;
-}
-
-.image-status.approved { background: #f0fff8; color: #087c55; }
-.image-status.rejected { background: #fff0f0; color: #c54858; }
-
-.lightbox {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.85);
-  display: grid;
-  place-items: center;
-  z-index: 200;
-  cursor: pointer;
-}
-
-.lightbox img {
-  max-width: 90vw;
-  max-height: 90vh;
-  border-radius: 8px;
-  cursor: default;
-}
 </style>

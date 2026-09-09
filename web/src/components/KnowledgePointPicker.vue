@@ -1,6 +1,8 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, onMounted, onBeforeUnmount, nextTick, useId, computed } from "vue";
 import { api } from "../api.js";
+import KnowledgeVersionDialog from "./KnowledgeVersionDialog.vue";
+import { subscribeKnowledgeVersions } from "../knowledgeVersions.js";
 
 // 知识点选择器：模糊搜索（关键词）+ 精确筛选（分类/专业/大纲代码前缀）+ 分页 + 多选勾选
 // 支持单选（multiple=false）与多选（multiple=true），已选项以标签展示可移除，
@@ -12,6 +14,15 @@ const props = defineProps({
 });
 const emit = defineEmits(["update:modelValue"]);
 
+const versions = ref([]);
+const versionDialog = ref(null), versionsLoading = ref(false), versionsError = ref("");
+const currentVersion = computed(() => versions.value.find(v => v.id === versionId.value));
+let versionsTicket = 0, unsubscribeVersions, disposed = false;
+const versionId = ref("");
+const defaultVersionId = ref("");
+const addingCodes = ref(false);
+const pickerId = useId();
+let searchTicket = 0, metaTicket = 0;
 const keyword = ref("");
 const subject = ref("");
 const category = ref("");
@@ -24,6 +35,7 @@ const page = ref(1);
 const pageCount = ref(1);
 const loading = ref(false);
 const showResults = ref(false);
+const resultsScroll = ref(null);
 let debounceTimer = null;
 
 // 已选大纲代码输入（逗号分隔）
@@ -57,9 +69,12 @@ function onFilterChange() {
 }
 
 async function search(p = 1) {
+  if (!versionId.value) return;
+  const ticket = ++searchTicket;
   loading.value = true;
   try {
     const data = await api.searchKPFiltered({
+      version_id: versionId.value,
       q: keyword.value.trim(),
       subject: subject.value,
       category: category.value,
@@ -67,15 +82,22 @@ async function search(p = 1) {
       page: p,
       page_size: 50,
     });
+    if (ticket !== searchTicket) return;
     results.value = data.points || [];
     total.value = data.total || 0;
-    page.value = p;
+    page.value = data.page;
     pageCount.value = Math.max(1, Math.ceil(total.value / 50));
     showResults.value = true;
+    await nextTick();
+    resultsScroll.value?.scrollTo({ top: 0 });
   } catch (e) {
-    showToast("搜索失败: " + e.message);
+    if (ticket === searchTicket) {
+      results.value = []; total.value = 0;
+      if (e.status === 404) { emit("update:modelValue", []); await loadVersions(); }
+      else showToast("搜索失败: " + e.message);
+    }
   } finally {
-    loading.value = false;
+    if (ticket === searchTicket) loading.value = false;
   }
 }
 
@@ -117,37 +139,39 @@ function removeSelected(id) {
 
 // 逗号分隔大纲代码批量加入（精确匹配，可包含名称片段？仅大纲代码精确）
 async function addByCodes() {
-  const codes = codeInput.value.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
-  if (!codes.length) return;
-  const list = [...props.modelValue];
-  let added = 0;
-  for (const code of codes) {
-    try {
-      const data = await api.searchKPFiltered({ outline_code: code, page: 1, page_size: 50 });
-      // 取大纲代码完全匹配或前缀匹配的第一个
-      const kp = (data.points || []).find((x) => x.outline_code === code);
-      if (kp && !list.some((x) => x.id === kp.id)) {
-        list.push(kp);
-        added++;
-      } else if (!kp) {
-        // 未找到精确匹配，尝试列表里前缀匹配
-        const pre = (data.points || []).find((x) => x.outline_code.startsWith(code));
-        if (pre && !list.some((x) => x.id === pre.id)) {
-          list.push(pre);
-          added++;
-        }
-      }
-    } catch (e) {
-      // ignore
+  const codes = [...new Set(codeInput.value.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean))];
+  if (!codes.length || !versionId.value || addingCodes.value) return;
+  const selectedVersion = versionId.value;
+  const list = [...props.modelValue]; const missing = []; let added = 0;
+  addingCodes.value = true;
+  try {
+    for (const code of codes) {
+      const data = await api.searchKPFiltered({ version_id: selectedVersion, outline_code: code, page: 1, page_size: 200 });
+      if (selectedVersion !== versionId.value) return;
+      const kp = (data.points || []).find(x => x.outline_code === code);
+      if (!kp) { missing.push(code); continue; }
+      if (!list.some(x => x.id === kp.id)) { if (!props.multiple) list.splice(0); list.push(kp); added++; }
+      if (!props.multiple) break;
     }
-  }
-  if (added > 0) {
     emit("update:modelValue", list);
-    showToast(`已加入 ${added} 个知识点（共 ${list.length} 个）`);
-  } else {
-    showToast("未找到匹配的大纲代码");
-  }
-  codeInput.value = "";
+    showToast(missing.length ? `已加入 ${added} 个；当前版本未找到：${missing.join("、")}` : `已加入 ${added} 个知识点`);
+    codeInput.value = "";
+  } catch (e) { showToast("代码查找失败：" + e.message); }
+  finally { addingCodes.value = false; }
+}
+
+async function changeVersion() {
+  const ticket = ++metaTicket;
+  ++searchTicket;
+  results.value = []; total.value = 0; page.value = 1;
+  keyword.value = ""; subject.value = ""; category.value = ""; outlineCode.value = ""; codeInput.value = "";
+  emit("update:modelValue", []);
+  meta.value = { categories: [], subjects: [] };
+  pageCount.value = 1; showResults.value = true; loading.value = false;
+  if (!versionId.value) return;
+  try { const data = await api.kpMeta(versionId.value); if (ticket !== metaTicket) return; meta.value = data; }
+  catch (e) { if (ticket === metaTicket) { if (e.status === 404) { await loadVersions(); return; } showToast(e.message); } }
+  if (ticket === metaTicket) search(1);
 }
 
 function reset() {
@@ -158,19 +182,32 @@ function reset() {
   search(1);
 }
 
-onMounted(async () => {
+async function loadVersions() {
+  if (disposed) return;
+  const ticket = ++versionsTicket; versionsLoading.value = true; versionsError.value = "";
   try {
-    meta.value = await api.kpMeta();
-  } catch (e) {
-    console.error(e);
-  }
-  // 初始展示全部（第一页），便于浏览选择
-  search(1);
-});
+    const data = await api.kpVersions(); if (ticket !== versionsTicket) return;
+    versions.value = (data.versions || []).filter(v => v.status === "published");
+    defaultVersionId.value = data.default_version_id || "";
+    const previous = versionId.value;
+    if (!versions.value.some(v => v.id === previous)) versionId.value = defaultVersionId.value;
+    if (previous !== versionId.value || !showResults.value) await changeVersion();
+  } catch (e) { if (ticket === versionsTicket) versionsError.value = "大纲版本加载失败：" + e.message; }
+  finally { if (ticket === versionsTicket) versionsLoading.value = false; }
+}
+async function chooseVersion(id) {
+  if (id === versionId.value || !versions.value.some(v => v.id === id)) return;
+  versionId.value = id; await changeVersion();
+}
+onMounted(async () => { await loadVersions(); if (!disposed) unsubscribeVersions = subscribeKnowledgeVersions(loadVersions); });
+onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTicket++; metaTicket++; versionsTicket++; unsubscribeVersions?.(); });
 </script>
 
 <template>
   <div class="kp-picker">
+    <div class="kp-version-row"><div><span>出题大纲</span><strong>{{ currentVersion?.name || '暂无已启用大纲' }}</strong><small v-if="currentVersion?.id === defaultVersionId && currentVersion">默认</small></div><button class="kp-btn ghost" type="button" @click="versionDialog.open()">切换版本</button></div>
+    <p v-if="!currentVersion && !versionsLoading" class="kp-version-empty">{{ versionsError || '请先在知识点管理中创建并启用大纲版本，再选择知识点出题。' }}</p>
+    <KnowledgeVersionDialog ref="versionDialog" :versions="versions" :current-id="versionId" :default-id="defaultVersionId" :loading="versionsLoading" :error="versionsError" @refresh="loadVersions" @select="chooseVersion" />
     <!-- 搜索区：模糊 + 精确 -->
     <div class="kp-search-row">
       <input v-model="keyword" :placeholder="props.placeholder" @input="onKeywordInput" class="kp-input" />
@@ -183,7 +220,7 @@ onMounted(async () => {
         <option v-for="s in meta.subjects" :key="s" :value="s">{{ s }}</option>
       </select>
       <input v-model="outlineCode" placeholder="大纲代码前缀" @input="onKeywordInput" class="kp-input kp-code-input" />
-      <button class="kp-btn" type="button" @click="search(1)" :disabled="loading">{{ loading ? "搜索中..." : "搜索" }}</button>
+      <button class="kp-btn" type="button" @click="search(1)" :disabled="loading || !versionId">{{ loading ? "搜索中..." : "搜索" }}</button>
       <button class="kp-btn ghost" type="button" @click="reset">重置</button>
     </div>
 
@@ -192,24 +229,19 @@ onMounted(async () => {
       <div class="kp-results-head">
         <span>共 {{ total }} 个知识点</span>
       </div>
-      <div v-if="loading" class="kp-loading">搜索中...</div>
-      <div v-else-if="!results.length" class="kp-empty">无匹配结果</div>
-      <div v-else class="kp-list">
-        <label v-for="kp in results" :key="kp.id" class="kp-item" :class="{ checked: isSelected(kp) }">
-          <input
-            v-if="multiple"
-            type="checkbox"
-            :checked="isSelected(kp)"
-            @change="toggleSelect(kp)"
-            class="kp-checkbox"
-          />
-          <span class="kp-radio" v-else :class="{ active: isSelected(kp) }" @click="toggleSelect(kp)"></span>
-          <span class="kp-item-main" @click="toggleSelect(kp)">
-            <span class="kp-topic">{{ kp.topic }}</span>
-            <span class="kp-sub">{{ kp.subject }}</span>
-            <code class="kp-code">{{ kp.outline_code }}</code>
-          </span>
-        </label>
+      <div ref="resultsScroll" class="kp-results-scroll">
+        <div v-if="loading" class="kp-loading">搜索中...</div>
+        <div v-else-if="!results.length" class="kp-empty">无匹配结果</div>
+        <div v-else class="kp-list">
+          <label v-for="kp in results" :key="kp.id" class="kp-item" :class="{ checked: isSelected(kp) }">
+            <input :type="multiple ? 'checkbox' : 'radio'" :name="`${pickerId}-point`" :checked="isSelected(kp)" @change="toggleSelect(kp)" class="kp-checkbox" />
+            <span class="kp-item-main">
+              <span class="kp-topic">{{ kp.topic }}</span>
+              <span class="kp-sub">{{ kp.subject }}</span>
+              <code class="kp-code">{{ kp.outline_code }}</code>
+            </span>
+          </label>
+        </div>
       </div>
       <!-- 分页 -->
       <div v-if="pageCount > 1" class="kp-pagination">
@@ -243,12 +275,19 @@ onMounted(async () => {
     <!-- 逗号分隔大纲代码加入 -->
     <div class="kp-code-add">
       <input v-model="codeInput" placeholder="按大纲代码加入：110.2.1.1, 110.2.1.2, ...（逗号分隔）" class="kp-input" @keyup.enter="addByCodes" />
-      <button class="kp-btn" type="button" @click="addByCodes">按代码加入</button>
+      <button class="kp-btn" type="button" :disabled="addingCodes || !versionId" @click="addByCodes">{{ addingCodes ? "查找中…" : "按代码加入" }}</button>
     </div>
   </div>
 </template>
 
 <style scoped>
+.kp-version-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 0 15px; border-bottom: 1px solid #e7eee9; margin-bottom: 7px; font-size: 12px; color: #526773; }
+.kp-version-row > div { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.kp-version-row span { color: #94a1a9; font-size: 11px; }
+.kp-version-row strong { color: #3d5c4b; font-weight: 500; font-size: 13px; }
+.kp-version-row small { color: #5a896c; background: #edf5ec; font-size: 10px; padding: 2px 5px; border-radius: 3px; }
+.kp-version-empty { padding: 12px; background: #f6f8f3; color: #899879; font-size: 12px; line-height: 1.8; }
+
 .kp-picker {
   display: grid;
   gap: 8px;
@@ -308,18 +347,31 @@ onMounted(async () => {
 }
 
 .kp-results {
+  display: flex;
+  flex-direction: column;
   border: 1px solid #e5ebf3;
   border-radius: 8px;
   padding: 8px;
   max-height: 320px;
-  overflow-y: auto;
+  overflow: hidden;
   background: #fff;
 }
 
 .kp-results-head {
+  flex: 0 0 auto;
   font-size: 12px;
   color: #6e7b8f;
   padding: 0 4px 6px;
+}
+
+.kp-results-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 3px;
+  scrollbar-gutter: stable;
 }
 
 .kp-list {
@@ -403,10 +455,13 @@ onMounted(async () => {
 }
 
 .kp-pagination {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 3px;
   margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #edf1f6;
   flex-wrap: wrap;
 }
 

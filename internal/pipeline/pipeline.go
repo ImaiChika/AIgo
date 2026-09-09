@@ -10,28 +10,32 @@ import (
 	"aigo/internal/evaluator"
 	"aigo/internal/exporter"
 	"aigo/internal/generator"
-	"aigo/internal/image"
 	"aigo/internal/importer"
 	"aigo/internal/knowledge"
 	"aigo/internal/review"
 	"aigo/internal/storage"
 )
 
+// DraftChecker 草稿自动检查接口，由 aicheck.Service 实现（CheckAsync 入队后台检查）。
+// 通过 SetDraftChecker 注入，使 pipeline 与检查实现解耦：CLI 路径不注入即不触发。
+type DraftChecker interface {
+	CheckAsync(questionIDs ...string)
+}
+
 type Pipeline struct {
 	generator *generator.Service
 	evaluator *evaluator.Service
 	review    *review.Service
-	imageSvc  *image.Service
 	kpSvc     *knowledge.Service
 	store     storage.QuestionStore
+	checker   DraftChecker
 }
 
-func New(generator *generator.Service, evaluator *evaluator.Service, review *review.Service, imageSvc *image.Service, kpSvc *knowledge.Service, store storage.QuestionStore) *Pipeline {
+func New(generator *generator.Service, evaluator *evaluator.Service, review *review.Service, kpSvc *knowledge.Service, store storage.QuestionStore) *Pipeline {
 	return &Pipeline{
 		generator: generator,
 		evaluator: evaluator,
 		review:    review,
-		imageSvc:  imageSvc,
 		kpSvc:     kpSvc,
 		store:     store,
 	}
@@ -40,10 +44,13 @@ func New(generator *generator.Service, evaluator *evaluator.Service, review *rev
 func (p *Pipeline) Doctor(ctx context.Context) error {
 	fmt.Println("framework: ok")
 	fmt.Println("language: go")
-	fmt.Println("llm: qwen openai-compatible text-only client")
-	fmt.Println("multimodal: interfaces reserved; current cli path is text-only")
+	fmt.Println("llm: qwen openai-compatible text-only client (cloud/local selected by deployment config)")
+	fmt.Println("question format: text-only A2 single-choice")
 	return nil
 }
+
+// SetDraftChecker 注入草稿自动检查器（serve 模式装配，见 cmd/aigo/main.go）。
+func (p *Pipeline) SetDraftChecker(c DraftChecker) { p.checker = c }
 
 // Generate 直接调用生成服务，供 API 使用。
 func (p *Pipeline) Generate(ctx context.Context, req domain.GenerationRequest) ([]domain.A2Question, error) {
@@ -62,6 +69,14 @@ func (p *Pipeline) Generate(ctx context.Context, req domain.GenerationRequest) (
 			return nil, err
 		}
 	}
+	// 草稿落库后自动提交 AI 质量检查（后台异步执行，不阻塞生成响应）
+	if p.checker != nil && len(questions) > 0 {
+		ids := make([]string, 0, len(questions))
+		for _, q := range questions {
+			ids = append(ids, q.ID)
+		}
+		p.checker.CheckAsync(ids...)
+	}
 	return questions, nil
 }
 
@@ -70,9 +85,11 @@ func (p *Pipeline) GenerateSample(ctx context.Context) error {
 		Subject:    "临床医学",
 		Difficulty: domain.DifficultyMedium,
 		KnowledgePoints: []domain.KnowledgePoint{{
-			ID:      "demo-kp-001",
-			Subject: "临床医学",
-			Topic:   "常见症状鉴别诊断",
+			ID:          "demo-kp-001",
+			Category:    "临床综合",
+			Subject:     "临床医学",
+			Topic:       "常见症状鉴别诊断",
+			OutlineCode: "demo-kp-001",
 		}},
 		Count: 1,
 	}
@@ -136,7 +153,8 @@ func (p *Pipeline) ImportXlsx(ctx context.Context, path string) error {
 	}
 	fmt.Printf("有效题目: %d 道\n", len(questions))
 
-	count, err := p.store.SaveQuestions(ctx, questions)
+	importCtx := storage.WithQuestionChange(ctx, storage.QuestionChange{Actor: "import", ChangeType: "excel_import", ChangeNote: "Excel批量导入题目"})
+	count, err := p.store.SaveQuestions(importCtx, questions)
 	if err != nil {
 		return fmt.Errorf("批量存储失败: %w", err)
 	}
@@ -323,12 +341,12 @@ func (p *Pipeline) PublishQuestion(ctx context.Context, questionID string) error
 
 // ImportKnowledgePoints 从 xlsx 导入知识点。
 func (p *Pipeline) ImportKnowledgePoints(ctx context.Context, path string) error {
-	count, err := p.kpSvc.ImportFromXlsx(ctx, path)
+	inserted, updated, duplicated, err := p.kpSvc.ImportFromXlsx(ctx, path)
 	if err != nil {
 		return err
 	}
 	total, _ := p.kpSvc.Count(ctx)
-	fmt.Printf("导入 %d 个知识点，当前总量 %d\n", count, total)
+	fmt.Printf("导入完成：新增 %d，更新 %d，跳过重复 %d；当前总量 %d\n", inserted, updated, duplicated, total)
 	return nil
 }
 
@@ -399,63 +417,6 @@ func (p *Pipeline) KnowledgePointStats(ctx context.Context) error {
 	return nil
 }
 
-// ===== 图片相关 =====
-
-// GenerateImagePrompt 为题目生成结构化生图提示词。
-func (p *Pipeline) GenerateImagePrompt(ctx context.Context, questionID string) error {
-	prompt, err := p.imageSvc.GeneratePrompt(ctx, questionID)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("已为题目 %s 生成生图提示词\n", questionID)
-	return printJSON(prompt)
-}
-
-// GenerateImages 为题目生成候选图。
-func (p *Pipeline) GenerateImages(ctx context.Context, questionID string, count int) error {
-	images, err := p.imageSvc.GenerateImages(ctx, questionID, count)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("已为题目 %s 生成 %d 张候选图\n", questionID, len(images))
-	return printJSON(images)
-}
-
-// ListImages 列出题目的候选图。
-func (p *Pipeline) ListImages(ctx context.Context, questionID string) error {
-	images, err := p.imageSvc.ListImages(ctx, questionID)
-	if err != nil {
-		return err
-	}
-	if len(images) == 0 {
-		fmt.Printf("题目 %s 暂无候选图\n", questionID)
-		return nil
-	}
-	fmt.Printf("题目 %s 共 %d 张候选图:\n", questionID, len(images))
-	for _, img := range images {
-		fmt.Printf("  %s | %s | 状态:%s | 路径:%s\n", img.ID, img.ModelName, img.Status, img.ImagePath)
-	}
-	return nil
-}
-
-// ReviewImage 审核图片。
-func (p *Pipeline) ReviewImage(ctx context.Context, imageID string, expertID string, action domain.ImageStatus, opinion string) error {
-	return p.imageSvc.ReviewImage(ctx, imageID, expertID, action, opinion)
-}
-
-// GetImagePrompt 获取题目的生图提示词。
-func (p *Pipeline) GetImagePrompt(ctx context.Context, questionID string) error {
-	prompt, err := p.imageSvc.GetPrompt(ctx, questionID)
-	if err != nil {
-		return err
-	}
-	if prompt == nil {
-		fmt.Printf("题目 %s 尚未生成提示词\n", questionID)
-		return nil
-	}
-	return printJSON(prompt)
-}
-
 // ===== 批量生成 =====
 
 // GenerateAll 遍历所有知识点，逐个调用千问生成题目。
@@ -498,6 +459,12 @@ func (p *Pipeline) GenerateAll(ctx context.Context, countPerPoint int) (int, err
 
 		// 保存到数据库
 		for _, q := range questions {
+			if err := q.Validate(); err != nil {
+				q.SourceRefs = append(q.SourceRefs, domain.SourceRef{
+					Title: "校验未通过",
+					Note:  err.Error(),
+				})
+			}
 			if err := p.store.SaveQuestion(ctx, q); err != nil {
 				fmt.Printf("  ⚠ 保存失败: %v\n", err)
 				continue

@@ -1,26 +1,38 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"aigo/internal/auth"
+	"aigo/internal/batch"
 	"aigo/internal/domain"
+	"aigo/internal/knowledge"
+	"aigo/internal/storage"
 )
 
-// handleBatchSubmit 提交批量任务到 DashScope 云端。
+// handleBatchCapabilities 返回脱敏后的批量执行器状态。
+func (s *Server) handleBatchCapabilities(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.batchSvc.Capabilities())
+}
+
+// handleBatchSubmit 向当前配置的批量执行器提交任务。
 // 请求：{"limit": 100, "skip_existing": true, "count": 1, "from_code": "", "to_code": "", "job_name": "任务名"}
 func (s *Server) handleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Limit        int    `json:"limit"`
-		SkipExisting bool   `json:"skip_existing"`
-		Count        int    `json:"count"`
-		FromCode     string `json:"from_code"`
-		ToCode       string `json:"to_code"`
-		OutlineCodes string `json:"outline_codes"` // 逗号分隔的知识点代码
-		JobName      string `json:"job_name"`      // 自定义任务名称
+		VersionID         string   `json:"version_id"`
+		KnowledgePointIDs []string `json:"knowledge_point_ids"`
+		Limit             int      `json:"limit"`
+		SkipExisting      bool     `json:"skip_existing"`
+		Count             int      `json:"count"`
+		FromCode          string   `json:"from_code"`
+		ToCode            string   `json:"to_code"`
+		OutlineCodes      string   `json:"outline_codes"` // 逗号分隔的知识点代码
+		JobName           string   `json:"job_name"`      // 自定义任务名称
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, 400, "请求格式错误: "+err.Error())
@@ -30,19 +42,57 @@ func (s *Server) handleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	if req.Count <= 0 {
 		req.Count = 1
 	}
+	if req.Count > 20 {
+		writeError(w, http.StatusBadRequest, "每个知识点最多生成 20 道题")
+		return
+	}
 
-	// 获取知识点
-	var points []domain.KnowledgePoint
-	if req.OutlineCodes != "" {
-		for _, code := range splitAndTrim(req.OutlineCodes) {
-			if p, err := s.kpSvc.GetByID(r.Context(), code); err == nil && p != nil {
+	capabilities := s.batchSvc.Capabilities()
+	if !capabilities.Available {
+		writeError(w, http.StatusServiceUnavailable, capabilities.Message)
+		return
+	}
+
+	// Pin this batch to one syllabus and fail on missing/deleted selections.
+	points := []domain.KnowledgePoint{}
+	if len(req.KnowledgePointIDs) > 0 || req.OutlineCodes != "" {
+		ids := req.KnowledgePointIDs
+		codes := false
+		if len(ids) == 0 {
+			ids = splitAndTrim(req.OutlineCodes)
+			codes = true
+		}
+		seen := map[string]bool{}
+		for _, value := range ids {
+			id, code := value, ""
+			if codes {
+				id = ""
+				code = value
+			}
+			p, err := s.kpSvc.ResolveForGeneration(r.Context(), req.VersionID, id, code)
+			if err != nil {
+				kpError(w, err)
+				return
+			}
+			req.VersionID = p.VersionID
+			if !seen[p.ID] {
+				seen[p.ID] = true
 				points = append(points, *p)
 			}
 		}
 	} else {
-		all, err := s.kpSvc.ListAll(r.Context())
+		v, err := s.kpSvc.ResolveVersion(r.Context(), req.VersionID)
 		if err != nil {
-			writeError(w, 500, err.Error())
+			kpError(w, err)
+			return
+		}
+		if v.Status != "published" {
+			writeError(w, 400, "请先启用大纲版本")
+			return
+		}
+		all, err := s.kpSvc.SearchFiltered(r.Context(), knowledge.KPSearchOptions{VersionID: v.ID})
+		if err != nil {
+			kpError(w, err)
 			return
 		}
 		points = all
@@ -50,16 +100,22 @@ func (s *Server) handleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// 跳过已有题目
 	if req.SkipExisting {
-		questions, _ := s.questionStore.ListQuestions(r.Context())
-		existing := make(map[string]bool)
-		for _, q := range questions {
-			if q.OutlineCode != "" {
-				existing[q.OutlineCode] = true
+		questions, err := s.questionStore.ListQuestions(r.Context())
+		if err != nil {
+			writeError(w, 500, "读取已有题目失败")
+			return
+		}
+		ownerID := auth.GetUserID(r.Context())
+		personalQuestions := make([]domain.A2Question, 0, len(questions))
+		for _, question := range questions {
+			if question.OwnerID == ownerID {
+				personalQuestions = append(personalQuestions, question)
 			}
 		}
+		existing := domain.ExistingKnowledgeKeys(personalQuestions)
 		var filtered []domain.KnowledgePoint
 		for _, p := range points {
-			if !existing[p.OutlineCode] {
+			if !existing[domain.KnowledgePointKey(p)] {
 				filtered = append(filtered, p)
 			}
 		}
@@ -100,14 +156,18 @@ func (s *Server) handleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	// 提交任务
 	jobID, count, err := s.batchSvc.GenerateAndSubmit(r.Context(), points, req.Count, jobName)
 	if err != nil {
-		writeError(w, 500, "提交失败: "+err.Error())
+		status := http.StatusInternalServerError
+		if errors.Is(err, batch.ErrUnavailable) {
+			status = http.StatusServiceUnavailable
+		}
+		writeError(w, status, "提交失败: "+err.Error())
 		return
 	}
 
 	writeJSON(w, 200, map[string]any{
 		"job_id":  jobID,
 		"count":   count,
-		"message": "任务已提交到 DashScope 云端，使用 batch-status 查询状态",
+		"message": capabilities.Message,
 	})
 }
 
@@ -121,7 +181,15 @@ func (s *Server) handleBatchStatus(w http.ResponseWriter, r *http.Request) {
 
 	job, err := s.batchSvc.GetJobStatus(r.Context(), jobID)
 	if err != nil {
-		writeError(w, 500, "查询失败: "+err.Error())
+		status := http.StatusInternalServerError
+		if errors.Is(err, batch.ErrUnavailable) {
+			status = http.StatusServiceUnavailable
+		}
+		writeError(w, status, "查询失败: "+err.Error())
+		return
+	}
+	if !s.canAccessBatchJob(r, job) {
+		writeError(w, http.StatusForbidden, "无权查看其他用户的批量任务")
 		return
 	}
 
@@ -145,6 +213,16 @@ func (s *Server) handleBatchList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "查询失败: "+err.Error())
 		return
 	}
+	if !s.hasPermission(r, domain.PermQuestionViewGlobal) {
+		viewerID := auth.GetUserID(r.Context())
+		filtered := jobs[:0]
+		for _, job := range jobs {
+			if job.OwnerID == viewerID {
+				filtered = append(filtered, job)
+			}
+		}
+		jobs = filtered
+	}
 
 	writeJSON(w, 200, map[string]any{
 		"jobs":  jobs,
@@ -159,42 +237,56 @@ func (s *Server) handleBatchDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "缺少 job_id")
 		return
 	}
+	job, statusErr := s.batchSvc.GetJobStatus(r.Context(), jobID)
+	if statusErr != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(statusErr, batch.ErrUnavailable) {
+			status = http.StatusServiceUnavailable
+		}
+		writeError(w, status, "查询批量任务失败: "+statusErr.Error())
+		return
+	}
+	if !s.canAccessBatchJob(r, job) {
+		writeError(w, http.StatusForbidden, "无权导入其他用户的批量任务")
+		return
+	}
 
-	// 查询任务状态
-	job, err := s.batchSvc.GetJobStatus(r.Context(), jobID)
+	// 执行器按统一 job ID 导入结果；具体 provider 文件 ID 留在适配器内部。
+	// 把当前用户塞入上下文，批量生成的题目 created_by 记为提交任务的管理员。
+	importCtx := storage.WithQuestionChange(r.Context(), storage.QuestionChange{
+		Actor:      auth.GetUsername(r.Context()),
+		OwnerID:    auth.GetUserID(r.Context()),
+		ChangeType: "batch_generate",
+	})
+	result, err := s.batchSvc.ImportResults(importCtx, jobID, nil)
 	if err != nil {
-		writeError(w, 500, "查询失败: "+err.Error())
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, batch.ErrUnavailable):
+			status = http.StatusServiceUnavailable
+		case errors.Is(err, batch.ErrNotReady):
+			status = http.StatusConflict
+		}
+		writeError(w, status, "导入失败: "+err.Error())
 		return
 	}
 
-	// DashScope 文档写的成功状态是 "completed"，但实际可能返回 "complete"
-	// 兼容处理两种写法
-	fmt.Printf("[batch-download] jobID=%s, status=%q\n", jobID, job.Status)
-	if job.Status != "completed" && job.Status != "complete" {
-		writeError(w, 400, "任务尚未完成，当前状态: "+job.Status)
-		return
-	}
-
-	if job.OutputFileID == "" {
-		writeError(w, 400, "任务没有输出文件")
-		return
-	}
-
-	// 获取知识点
-	allKPs, err := s.kpSvc.ListAll(r.Context())
-	if err != nil {
-		writeError(w, 500, err.Error())
-		return
-	}
-
-	// 下载并导入
-	result, err := s.batchSvc.DownloadAndImport(r.Context(), job.OutputFileID, allKPs)
-	if err != nil {
-		writeError(w, 500, "导入失败: "+err.Error())
-		return
+	// 导入的草稿自动提交 AI 质量检查（后台异步执行）
+	if s.aiCheckSvc != nil && len(result.QuestionIDs) > 0 {
+		s.aiCheckSvc.CheckAsync(result.QuestionIDs...)
 	}
 
 	writeJSON(w, 200, result)
+}
+
+func (s *Server) canAccessBatchJob(r *http.Request, job *batch.BatchJob) bool {
+	if job == nil {
+		return false
+	}
+	if s.hasPermission(r, domain.PermQuestionViewGlobal) {
+		return true
+	}
+	return job.OwnerID != "" && job.OwnerID == auth.GetUserID(r.Context())
 }
 
 // splitAndTrim 按逗号分割并去除空白。
