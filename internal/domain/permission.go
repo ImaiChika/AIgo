@@ -31,7 +31,7 @@ const (
 	PermFlowManage   = "flow:manage"      // 审核流程配置
 	PermExpertManage = "expert:manage"    // 专家库管理
 	PermAuditView    = "audit:view"       // 操作日志查看
-	PermBatchRun     = "batch:run"        // 批量推理
+	PermBatchRun     = "batch:run"        // 批量推理（独立于单题出题）
 	PermKnowledgeMng = "knowledge:manage" // 知识点导入/增删
 
 	// ===== 题库范围权限 =====
@@ -39,7 +39,7 @@ const (
 	PermQuestionCreate      = "question:create"       // 手工新建题目
 	PermQuestionEdit        = "question:edit"         // 编辑题目
 	PermQuestionDelete      = "question:delete"       // 删除题目（过程/淘汰题库）
-	PermQuestionGenerate    = "question:generate"     // AI 出题
+	PermQuestionGenerate    = "question:generate"     // 单题 AI 出题
 	PermQuestionDownload    = "question:download"     // 题库下载/导出（仅正式题库）
 	PermQuestionShare       = "question:share"        // 个人正式题目申请分享至全局题库
 	PermQuestionViewGlobal  = "question:view_global"  // 查看全局题库三层逻辑视图
@@ -73,7 +73,8 @@ func AllPermissions() []PermissionMeta {
 		{PermQuestionCreate, "新建题目", "题库", true},
 		{PermQuestionEdit, "编辑题目", "题库", true},
 		{PermQuestionDelete, "删除题目", "题库", true},
-		{PermQuestionGenerate, "试题生成", "题库", true},
+		{PermQuestionGenerate, "单题出题", "命题", true},
+		{PermBatchRun, "批量推理", "命题", false},
 		{PermQuestionDownload, "题库下载", "题库", true},
 		{PermQuestionShare, "申请分享至全局题库", "题库", false},
 		{PermQuestionViewGlobal, "查看全局题库", "题库", false},
@@ -92,7 +93,6 @@ func AllPermissions() []PermissionMeta {
 		{PermFlowManage, "审核流程", "系统", false},
 		{PermExpertManage, "专家库管理", "系统", false},
 		{PermAuditView, "操作日志", "系统", false},
-		{PermBatchRun, "批量生成", "系统", false},
 		{PermKnowledgeMng, "知识点管理", "系统", false},
 	}
 	return all

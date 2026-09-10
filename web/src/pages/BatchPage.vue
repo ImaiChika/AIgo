@@ -8,6 +8,7 @@ import QuestionDetailModal from "../components/QuestionDetailModal.vue";
 
 // AI 检查分段进度（导入成功后轮询，见 aiCheckProgress.js）
 const { progress: aiProgress, start: startAIProgress } = useAICheckProgress();
+const batchPermission = computed(() => hasPerm("batch:run"));
 
 const toast = ref("");
 const stats = ref({ question_count: 0, knowledge_count: 0, knowledge_categories: {} });
@@ -112,6 +113,10 @@ const submitting = ref(false); // 提交在途守卫，防重复创建批量任�
 
 async function submitBatch() {
   if (submitting.value) return;
+  if (!batchPermission.value) {
+    showToast("当前账号未分配批量推理权限，请联系超级管理员。");
+    return;
+  }
   if (!batchRuntime.value.available) {
     showToast("批量生成功能当前不可用，请联系系统管理员。");
     return;
@@ -192,6 +197,10 @@ function startPolling(jobId) {
 }
 onActivated(() => {
   pageActive = true;
+  if (!batchPermission.value) {
+    stopPolling();
+    return;
+  }
   if (currentJob.value && isRunning(currentJob.value.status)) startPolling(currentJob.value.job_id);
 });
 onDeactivated(() => { pageActive = false; stopPolling(); });
@@ -355,6 +364,7 @@ function selectJob(job) {
 }
 
 onMounted(() => {
+  if (!batchPermission.value) return;
   loadStats();
   loadBatchCapabilities();
   loadJobsFromDB();
@@ -362,7 +372,19 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="batch-layout">
+  <section v-if="!batchPermission" class="panel batch-permission-panel" role="alert">
+    <div class="section-heading">
+      <span class="dot red"></span>
+      <h2>暂无批量推理权限</h2>
+    </div>
+    <p>当前账号不能查看、提交或导入批量推理任务；已分配的单题出题权限不受影响。</p>
+    <p class="permission-help">如需开放批量推理，请联系超级管理员在「用户管理 → 分配权限」中单独勾选“批量推理”。</p>
+    <RouterLink class="ghost-button inline-link" :to="hasPerm('question:generate') ? '/generate' : '/knowledge'">
+      {{ hasPerm('question:generate') ? '返回单题出题' : '返回知识点' }}
+    </RouterLink>
+  </section>
+
+  <div v-else class="batch-layout">
     <!-- 统计信息 -->
     <section class="panel">
       <div class="section-heading">
@@ -609,6 +631,31 @@ onMounted(() => {
 .batch-layout {
   max-width: 800px;
   margin: 0 auto;
+}
+
+.batch-permission-panel {
+  max-width: 700px;
+  margin: 24px auto;
+  padding: 28px 30px;
+  border-color: #f1d4d8;
+  background: #fffafb;
+}
+
+.batch-permission-panel p {
+  margin: 8px 0;
+  color: #59677a;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.batch-permission-panel .permission-help {
+  color: #a23b4b;
+}
+
+.inline-link {
+  display: inline-flex;
+  margin-top: 12px;
+  text-decoration: none;
 }
 
 .config-form {

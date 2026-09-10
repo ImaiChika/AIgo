@@ -37,7 +37,7 @@ func TestConfiguredMigrationsAreOrderedAndChecksummed(t *testing.T) {
 
 func TestRecentMigrationsArePresent(t *testing.T) {
 	migrations := configuredMigrations(baselineSchemaSQL)
-	var snapshot, performance, search, removeImages, superAdmin, personalQuestions, batchOwnership, legacyGlobal migration
+	var snapshot, performance, search, removeImages, superAdmin, personalQuestions, batchOwnership, legacyGlobal, separatedPermissions migration
 	for _, candidate := range migrations {
 		switch candidate.Version {
 		case 12:
@@ -56,6 +56,8 @@ func TestRecentMigrationsArePresent(t *testing.T) {
 			batchOwnership = candidate
 		case 19:
 			legacyGlobal = candidate
+		case 22:
+			separatedPermissions = candidate
 		}
 	}
 	snapshotSQL := strings.Join(snapshot.Statements, "\n")
@@ -95,6 +97,12 @@ func TestRecentMigrationsArePresent(t *testing.T) {
 	legacyGlobalSQL := strings.Join(legacyGlobal.Statements, "\n")
 	if !strings.Contains(legacyGlobalSQL, "legacy-share-") || !strings.Contains(legacyGlobalSQL, "owner_id=''") || !strings.Contains(legacyGlobalSQL, "question_share_requests") {
 		t.Fatalf("migration 19 does not restore legacy global question tiers: %s", legacyGlobalSQL)
+	}
+	separatedPermissionsSQL := strings.Join(separatedPermissions.Statements, "\n")
+	for _, fragment := range []string{"batch:run", "is_builtin", "admin", "expert", "teacher"} {
+		if !strings.Contains(separatedPermissionsSQL, fragment) {
+			t.Fatalf("migration 22 does not separate default authoring permissions: missing %q", fragment)
+		}
 	}
 }
 

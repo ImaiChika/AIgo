@@ -111,7 +111,6 @@ func builtinRoles() []domain.Role {
 			Description: "可使用个人题库命题、处理退回修改，并审核分配给自己的任务",
 			IsBuiltin:   true,
 			Permissions: []string{
-				domain.PermBatchRun,
 				domain.PermQuestionView, domain.PermQuestionEdit,
 				domain.PermQuestionGenerate,
 				domain.PermQuestionShare,
@@ -123,7 +122,6 @@ func builtinRoles() []domain.Role {
 			Name:      "命题教师",
 			IsBuiltin: true,
 			Permissions: []string{
-				domain.PermBatchRun,
 				domain.PermQuestionView, domain.PermQuestionEdit,
 				domain.PermQuestionGenerate,
 				domain.PermQuestionShare,
@@ -143,12 +141,12 @@ func allPermissions() []string {
 	return result
 }
 
-// delegatedAdminPermissions 返回管理员默认权限：保留所有业务管理能力，
-// 唯一排除角色模板管理，避免管理员自行制造新的最高权限路径。
+// delegatedAdminPermissions 返回管理员默认权限：保留业务管理能力，
+// 排除角色模板管理和批量推理；批量推理由超级管理员按需单独授予。
 func delegatedAdminPermissions() []string {
-	result := make([]string, 0, len(domain.AllPermissions())-1)
+	result := make([]string, 0, len(domain.AllPermissions())-2)
 	for _, permission := range domain.AllPermissions() {
-		if permission.Code == domain.PermRoleManage {
+		if permission.Code == domain.PermRoleManage || permission.Code == domain.PermBatchRun {
 			continue
 		}
 		result = append(result, permission.Code)
@@ -204,8 +202,8 @@ func (s *Service) InitBuiltinRoles(ctx context.Context) error {
 					}
 				}
 			}
-			// 医学专家同时是个人题库用户和审核人：可命题、查看自己的三层题库、
-			// 处理待修改并分享正式题；不包含全局库、汇总统计或管理权限。
+			// 医学专家同时是个人题库用户和审核人：可单题命题、查看自己的三层题库、
+			// 处理待修改并分享正式题；不包含批量推理、全局库、汇总统计或管理权限。
 			if r.ID == domain.RoleExpert && !samePermissions(valid, r.Permissions) {
 				valid = append([]string(nil), r.Permissions...)
 				changed = true

@@ -19,8 +19,8 @@ export function roleName(role) {
 }
 
 const permissionNames = {
-  "question:generate": "试题生成",
-  "batch:run": "批量生成",
+  "question:generate": "单题出题",
+  "batch:run": "批量推理",
   "stats:view": "数据统计",
   "flow:manage": "审核流程",
   "review:view_results": "审核记录",

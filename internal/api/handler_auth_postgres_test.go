@@ -16,6 +16,7 @@ import (
 
 	"aigo/internal/audit"
 	"aigo/internal/auth"
+	"aigo/internal/batch"
 	"aigo/internal/domain"
 	"aigo/internal/storage/postgres"
 
@@ -147,6 +148,50 @@ func TestDelegatedAdminCannotManageRolesOrProtectedAccounts(t *testing.T) {
 	}
 	if response := serveAuthJSON(t, handler, http.MethodDelete, "/api/users/"+expert.ID, delegatedToken, "198.51.100.3", nil); response.Code != http.StatusOK {
 		t.Fatalf("delegated admin should delete ordinary users: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestSingleAndBatchGenerationPermissionsAreIndependent(t *testing.T) {
+	server, _, cleanup := authHandlerTestServer(t)
+	defer cleanup()
+	server.batchSvc = batch.NewUnavailableExecutor("disabled", "test batch executor")
+	handler := server.Handler()
+	superToken := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.30")
+
+	createdAdmin := serveAuthJSON(t, handler, http.MethodPost, "/api/users", superToken, "198.51.100.30", map[string]any{
+		"username": "separate-permission-admin", "password": "separate-admin-password", "display_name": "普通管理员", "role": domain.RoleAdmin,
+	})
+	if createdAdmin.Code != http.StatusCreated {
+		t.Fatalf("create delegated admin: status=%d body=%s", createdAdmin.Code, createdAdmin.Body.String())
+	}
+	delegatedAdminToken := loginForAuthTest(t, handler, "separate-permission-admin", "separate-admin-password", "198.51.100.31")
+	if response := serveAuthJSON(t, handler, http.MethodGet, "/api/batch/capabilities", delegatedAdminToken, "198.51.100.31", nil); response.Code != http.StatusForbidden {
+		t.Fatalf("delegated admin should not have default batch permission: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	createdExpert := serveAuthJSON(t, handler, http.MethodPost, "/api/users", superToken, "198.51.100.30", map[string]any{
+		"username": "separate-permission-expert", "password": "separate-expert-password", "display_name": "出题专家", "role": domain.RoleExpert,
+	})
+	if createdExpert.Code != http.StatusCreated {
+		t.Fatalf("create expert: status=%d body=%s", createdExpert.Code, createdExpert.Body.String())
+	}
+	var expert auth.User
+	if err := json.Unmarshal(createdExpert.Body.Bytes(), &expert); err != nil {
+		t.Fatal(err)
+	}
+	expertToken := loginForAuthTest(t, handler, expert.Username, "separate-expert-password", "198.51.100.32")
+	if response := serveAuthJSON(t, handler, http.MethodGet, "/api/batch/capabilities", expertToken, "198.51.100.32", nil); response.Code != http.StatusForbidden {
+		t.Fatalf("expert should not have default batch permission: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	updated := serveAuthJSON(t, handler, http.MethodPut, "/api/users/"+expert.ID, superToken, "198.51.100.30", map[string]any{
+		"display_name": expert.DisplayName, "role": domain.RoleExpert, "permissions": []string{domain.PermBatchRun}, "bank_ids": []string{}, "enabled": true,
+	})
+	if updated.Code != http.StatusOK {
+		t.Fatalf("grant direct batch permission: status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	if response := serveAuthJSON(t, handler, http.MethodGet, "/api/batch/capabilities", expertToken, "198.51.100.32", nil); response.Code != http.StatusOK {
+		t.Fatalf("explicit direct batch permission should take effect without relogin: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

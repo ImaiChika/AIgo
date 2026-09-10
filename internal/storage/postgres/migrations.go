@@ -19,7 +19,7 @@ var baselineSchemaSQL string
 
 const (
 	// LatestSchemaVersion 是当前程序能够使用的最新数据库版本。
-	LatestSchemaVersion int64 = 21
+	LatestSchemaVersion int64 = 22
 	// migrationLockKey 在同一 PostgreSQL 数据库内串行化所有 AIgo Schema 迁移。
 	migrationLockKey int64 = 0x4149474f5f4d4947 // "AIGO_MIG"
 )
@@ -282,6 +282,13 @@ func configuredMigrations(schemaSQL string) []migration {
 			`ALTER TABLE ai_provider_configs ADD COLUMN IF NOT EXISTS batch_api_key_ciphertext TEXT NOT NULL DEFAULT ''`,
 			`ALTER TABLE ai_provider_configs ADD COLUMN IF NOT EXISTS batch_base_url TEXT NOT NULL DEFAULT ''`,
 			`ALTER TABLE ai_provider_configs ADD COLUMN IF NOT EXISTS batch_model TEXT NOT NULL DEFAULT ''`,
+		}},
+		{Version: 22, Name: "separate_question_and_batch_permissions", Statements: []string{
+			// 试题生成与批量推理是两个独立权限。清理旧版本内置角色中
+			// 曾默认继承的批量权限；用户后续明确配置的直接权限不受影响。
+			`UPDATE roles
+			 SET permissions = array_remove(permissions, 'batch:run')
+			 WHERE is_builtin = TRUE AND id IN ('admin', 'expert', 'teacher')`,
 		}},
 	}
 }

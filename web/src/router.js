@@ -2,7 +2,7 @@ import { createRouter, createWebHistory } from "vue-router";
 import { isLoggedIn, hasPerm } from "./auth.js";
 import LoginPage from "./pages/LoginPage.vue";
 import GenerationWorkspace from "./pages/GenerationWorkspace.vue";
-import { permissionAllowed } from "./navigation.js";
+import { generationRouteRedirect, permissionAllowed } from "./navigation.js";
 import GeneratePage from "./pages/GeneratePage.vue";
 import KnowledgePage from "./pages/KnowledgePage.vue";
 import ReviewPage from "./pages/ReviewPage.vue";
@@ -53,11 +53,16 @@ const router = createRouter({
 router.beforeEach((to, from, next) => {
   if (!to.meta.public && !isLoggedIn.value) {
     next("/login");
-  } else if (to.name === "generation-single" && !hasPerm("question:generate") && hasPerm("batch:run")) {
-    next("/generate/batch");
-  } else if (!permissionAllowed(to.meta.perm, hasPerm)) {
-    next("/knowledge"); // 无权限重定向到所有登录用户都可访问的知识点页
   } else {
+    const generationRedirect = generationRouteRedirect(to.name, hasPerm);
+    if (generationRedirect) {
+      next(generationRedirect);
+      return;
+    }
+    if (!permissionAllowed(to.meta.perm, hasPerm)) {
+      next("/knowledge"); // 无权限重定向到所有登录用户都可访问的知识点页
+      return;
+    }
     next();
   }
 });

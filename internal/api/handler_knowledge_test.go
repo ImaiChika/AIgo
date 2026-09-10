@@ -103,12 +103,15 @@ func TestExpertCanReadKnowledgeButCannotSeeReviewResultsOrStats(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, permission := range []string{
-		domain.PermBatchRun, domain.PermQuestionView, domain.PermQuestionEdit,
+		domain.PermQuestionView, domain.PermQuestionEdit,
 		domain.PermQuestionGenerate, domain.PermQuestionShare, domain.PermReviewDo,
 	} {
 		if !slices.Contains(profile.Permissions, permission) {
 			t.Fatalf("expert missing personal workspace permission %s: %v", permission, profile.Permissions)
 		}
+	}
+	if slices.Contains(profile.Permissions, domain.PermBatchRun) {
+		t.Fatalf("expert 默认不应拥有批量推理权限: %v", profile.Permissions)
 	}
 	if response := serveAuthJSON(t, handler, http.MethodGet, "/api/review/results", expert, "198.51.100.21", nil); response.Code != http.StatusForbidden {
 		t.Fatalf("expert should not access review results: status=%d body=%s", response.Code, response.Body.String())

@@ -2,12 +2,15 @@
 import { ref, computed, onMounted, watch } from "vue";
 import { api } from "../api.js";
 import { hasPerm } from "../auth.js";
+import { useRoute, useRouter } from "vue-router";
 import { useAICheckProgress } from "../aiCheckProgress.js";
 import KnowledgePointPicker from "../components/KnowledgePointPicker.vue";
 import AICheckScoreButton from "../components/AICheckScoreButton.vue";
 
 // AI 检查分段进度（生成成功后轮询，见 aiCheckProgress.js）
 const { progress: aiProgress, start: startAIProgress } = useAICheckProgress();
+const route = useRoute();
+const router = useRouter();
 
 // 知识点选择（单选，使用完善的知识点选择器：精确+模糊搜索）
 const selectedKPs = ref([]); // 单选模式下始终 0/1 个
@@ -21,6 +24,7 @@ const selectedBank = ref("");
 
 // 状态
 const toast = ref("");
+const accessNotice = ref("");
 const loading = ref(false);
 const progressMsg = ref("");
 const startTime = ref(0);
@@ -97,6 +101,16 @@ function showToast(message) {
   window.clearTimeout(showToast.timer);
   toast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
 }
+
+function consumeAccessNotice() {
+  if (route.query.notice !== "batch-permission") return;
+  accessNotice.value = "当前账号未分配批量推理权限；如需使用批量推理，请联系超级管理员在「用户管理」中单独勾选该权限。";
+  const query = { ...route.query };
+  delete query.notice;
+  router.replace({ path: route.path, query });
+}
+
+watch(() => route.query.notice, consumeAccessNotice, { immediate: true });
 
 async function loadStats() {
   if (!hasPerm("stats:view")) return;
@@ -187,6 +201,10 @@ onMounted(() => {
 </script>
 
 <template>
+  <div v-if="accessNotice" class="permission-notice" role="status">
+    <span>{{ accessNotice }}</span>
+    <button type="button" aria-label="关闭提示" @click="accessNotice = ''">×</button>
+  </div>
   <div class="main-grid">
     <div class="editor-column">
       <!-- 多题切换（数字直达 + 左右切换；被淘汰的题自动移出） -->
@@ -395,6 +413,32 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.permission-notice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 14px;
+  padding: 11px 14px;
+  border: 1px solid #f1d4d8;
+  border-left: 3px solid #c54858;
+  border-radius: 7px;
+  background: #fff8f9;
+  color: #8a3b47;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.permission-notice button {
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: #a23b4b;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
 /* 知识点选择器 */
 .kp-selector {
   margin-bottom: 16px;

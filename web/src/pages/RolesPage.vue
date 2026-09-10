@@ -148,6 +148,7 @@ onMounted(loadAll);
 
         <div class="perm-picker">
           <h3>角色权限</h3>
+          <p class="perm-picker-hint">“单题出题”和“批量推理”是独立权限；批量推理默认仅超级管理员角色拥有，其他角色按需配置。</p>
           <div v-for="g in permGroups" :key="g.group" class="perm-group">
             <div class="perm-group-title">{{ g.group }}权限</div>
             <div class="perm-checks">
@@ -236,6 +237,13 @@ onMounted(loadAll);
   font-size: 14px;
   color: #172033;
   margin: 0 0 12px;
+}
+
+.perm-picker-hint {
+  margin: -4px 0 14px;
+  color: #6e7b8f;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .perm-group {

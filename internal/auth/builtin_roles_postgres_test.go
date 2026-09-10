@@ -13,7 +13,7 @@ import (
 // InitBuiltinRoles 对已存在角色的自愈行为：
 //   - super_admin 始终恢复完整权限；
 //   - admin 自动补齐业务权限并移除角色模板管理权限；
-//   - 医学专家恢复个人命题/题库/退修能力，但不获得汇总统计或管理权限；
+//   - 医学专家恢复个人命题/题库/退修能力，但不获得批量推理、汇总统计或管理权限；
 //   - 其他内置角色保留管理员的有效自定义修改。
 func TestInitBuiltinRolesHealsAdminRole(t *testing.T) {
 	service, cleanup := loginLimitTestService(t)
@@ -37,7 +37,7 @@ func TestInitBuiltinRolesHealsAdminRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, permission := range []string{
-		domain.PermBatchRun, domain.PermQuestionView, domain.PermQuestionEdit,
+		domain.PermQuestionView, domain.PermQuestionEdit,
 		domain.PermQuestionGenerate, domain.PermQuestionShare, domain.PermReviewDo,
 	} {
 		if !slices.Contains(expert.Permissions, permission) {
@@ -70,16 +70,19 @@ func TestInitBuiltinRolesHealsAdminRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(expertAfter.Permissions) != 6 {
-		t.Fatalf("expert 角色应固定为 6 个个人工作/审核权限: %v", expertAfter.Permissions)
+	if len(expertAfter.Permissions) != 5 {
+		t.Fatalf("expert 角色应固定为 5 个个人工作/审核权限: %v", expertAfter.Permissions)
 	}
 	for _, permission := range []string{
-		domain.PermBatchRun, domain.PermQuestionView, domain.PermQuestionEdit,
+		domain.PermQuestionView, domain.PermQuestionEdit,
 		domain.PermQuestionGenerate, domain.PermQuestionShare, domain.PermReviewDo,
 	} {
 		if !slices.Contains(expertAfter.Permissions, permission) {
 			t.Fatalf("expert 角色自愈后缺少个人工作权限 %s: %v", permission, expertAfter.Permissions)
 		}
+	}
+	if slices.Contains(expertAfter.Permissions, domain.PermBatchRun) {
+		t.Fatalf("expert 角色默认不应包含批量推理权限: %v", expertAfter.Permissions)
 	}
 	for _, forbidden := range []string{domain.PermStatsView, domain.PermKnowledgeMng, domain.PermQuestionViewGlobal, domain.PermReviewResults} {
 		if slices.Contains(expertAfter.Permissions, forbidden) {
@@ -120,6 +123,7 @@ func TestSuperAdminBootstrapAndDelegatedAdminBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	if slices.Contains(adminRole.Permissions, domain.PermRoleManage) ||
+		slices.Contains(adminRole.Permissions, domain.PermBatchRun) ||
 		!slices.Contains(adminRole.Permissions, domain.PermUserManage) ||
 		!slices.Contains(adminRole.Permissions, domain.PermReviewFinal) {
 		t.Fatalf("delegated admin role has incorrect permissions: %v", adminRole.Permissions)
@@ -158,5 +162,35 @@ func TestSuperAdminBootstrapAndDelegatedAdminBoundaries(t *testing.T) {
 	}
 	if _, err := service.DeleteUserAs(ctx, delegated.ID, created.ID); err != nil {
 		t.Fatalf("delegated admin should be able to delete ordinary users: %v", err)
+	}
+}
+
+func TestBuiltinAuthoringPermissionsAreSeparated(t *testing.T) {
+	service, cleanup := loginLimitTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	if err := service.InitBuiltinRoles(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, roleID := range []string{domain.RoleAdmin, domain.RoleExpert, domain.RoleTeacher} {
+		role, err := service.GetRole(ctx, roleID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(role.Permissions, domain.PermBatchRun) {
+			t.Fatalf("内置角色 %s 默认不应拥有批量推理权限: %v", roleID, role.Permissions)
+		}
+		if !slices.Contains(role.Permissions, domain.PermQuestionGenerate) {
+			t.Fatalf("内置角色 %s 应保留单题出题权限: %v", roleID, role.Permissions)
+		}
+	}
+
+	super, err := service.GetRole(ctx, domain.RoleSuperAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(super.Permissions, domain.PermQuestionGenerate) || !slices.Contains(super.Permissions, domain.PermBatchRun) {
+		t.Fatalf("超级管理员应同时拥有单题和批量权限: %v", super.Permissions)
 	}
 }

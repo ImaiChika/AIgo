@@ -5,6 +5,25 @@ export function permissionAllowed(permission, hasPermission) {
   return (Array.isArray(permission) ? permission : [permission]).some(hasPermission);
 }
 
+// 命题工作区的两个子页面分别受各自权限保护：
+// - 只有单题权限：进入单题页；误打开批量地址时回到单题页并提示原因。
+// - 只有批量权限：保留命题工作区入口，直接进入批量页。
+// - 两者都没有：回到登录后所有用户可访问的知识点页。
+export function generationRouteRedirect(routeName, hasPermission) {
+  const canGenerate = hasPermission("question:generate");
+  const canBatch = hasPermission("batch:run");
+  if (routeName === "generation-single") {
+    if (canGenerate) return null;
+    return canBatch ? "/generate/batch" : "/knowledge";
+  }
+  if (routeName === "generation-batch" && !canBatch) {
+    return canGenerate
+      ? { path: "/generate", query: { notice: "batch-permission" } }
+      : "/knowledge";
+  }
+  return null;
+}
+
 export const navigationGroups = [
   { id: "data", label: "基础数据", icon: "M3 4h6l2 2h10v14H3Z M3 10h18", items: [
     { id: "knowledge", label: "知识点", path: "/knowledge" },

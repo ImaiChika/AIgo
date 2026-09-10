@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { navigationGroups, visibleNavigation, navigationItemActive, permissionAllowed } from "./navigation.js";
+import { navigationGroups, visibleNavigation, navigationItemActive, permissionAllowed, generationRouteRedirect } from "./navigation.js";
 
 const all = () => true;
 const permissions = (...values) => value => values.includes(value);
@@ -28,7 +28,7 @@ test("permission filtering removes inaccessible children and empty categories", 
 
 test("medical experts keep personal authoring and bank pages without management summaries", () => {
   const expert = visibleNavigation(permissions(
-    "batch:run", "question:view", "question:edit", "question:generate", "question:share", "review:do",
+    "question:view", "question:edit", "question:generate", "question:share", "review:do",
   ));
   const ids = expert.flatMap(group => group.items.map(item => item.id));
   for (const expected of ["knowledge", "generate", "my-revisions", "share-requests", "review", "bank"]) {
@@ -37,6 +37,23 @@ test("medical experts keep personal authoring and bank pages without management 
   for (const forbidden of ["review-results", "stats", "banks", "users", "roles", "audit"]) {
     assert.equal(ids.includes(forbidden), false, `expert should not see ${forbidden}`);
   }
+});
+
+test("single and batch permissions have explicit navigation behavior", () => {
+  const singleOnly = permissions("question:generate");
+  assert.deepEqual(generationRouteRedirect("generation-single", singleOnly), null);
+  assert.deepEqual(generationRouteRedirect("generation-batch", singleOnly), {
+    path: "/generate", query: { notice: "batch-permission" },
+  });
+  assert.equal(visibleNavigation(singleOnly).find(g => g.id === "authoring").items[0].path, "/generate");
+
+  const batchOnly = permissions("batch:run");
+  assert.equal(generationRouteRedirect("generation-single", batchOnly), "/generate/batch");
+  assert.equal(generationRouteRedirect("generation-batch", batchOnly), null);
+  assert.equal(visibleNavigation(batchOnly).find(g => g.id === "authoring").items[0].path, "/generate/batch");
+
+  const neither = permissions();
+  assert.equal(generationRouteRedirect("generation-batch", neither), "/knowledge");
 });
 
 test("batch-only accounts retain a valid generation destination without gaining single generation permission", () => {
