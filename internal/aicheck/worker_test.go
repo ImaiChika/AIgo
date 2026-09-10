@@ -46,6 +46,23 @@ func (c *failingCheckClient) Complete(_ context.Context, _ []llm.Message, _ llm.
 	return string(raw), nil
 }
 
+// metadataOnlyCheckClient 模拟旧检查模型把认知层次标签误判为硬错误。
+type metadataOnlyCheckClient struct{}
+
+func (c *metadataOnlyCheckClient) Complete(_ context.Context, _ []llm.Message, _ llm.GenerateOptions) (string, error) {
+	raw, _ := json.Marshal(map[string]any{
+		"verdict": "reject",
+		"scores":  map[string]int{"scientific": 95, "logic": 92, "a2_fit": 94, "answer": 96},
+		"issues": []any{map[string]any{
+			"field":    "cognitive_level",
+			"severity": "error",
+			"message":  "认知层次“简单应用”应改为“应用”",
+		}},
+		"suggestion": "应修正出题提示词",
+	})
+	return string(raw), nil
+}
+
 // errorClient 模拟 LLM 调用失败（网络/超时/网关错误），用于重试与耗尽测试。
 type errorClient struct{}
 
@@ -317,6 +334,35 @@ func TestCheckQuestionKeepsAIReviewedOnFailure(t *testing.T) {
 	}
 	if r, _ := results.GetLatestByQuestionID(ctx, "q-keep"); r == nil {
 		t.Fatal("重新检查结果应已保存")
+	}
+}
+
+func TestCheckQuestionDoesNotDiscardForMetadataOnlyIssue(t *testing.T) {
+	svc, store, results, _ := newTestService(&metadataOnlyCheckClient{})
+
+	ctx := context.Background()
+	if err := store.SaveQuestion(ctx, testDraft("q-metadata-only", 1)); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.CheckQuestion(ctx, "q-metadata-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Verdict != "pass" {
+		t.Fatalf("只有元数据问题时应通过 AI 检查，实际 %s", result.Verdict)
+	}
+	if len(result.Issues) != 1 || result.Issues[0].Severity != "info" {
+		t.Fatalf("元数据问题应降为 info，实际 %+v", result.Issues)
+	}
+	stored, _ := store.GetQuestion(ctx, "q-metadata-only")
+	if stored == nil || stored.Status != domain.StatusAIReviewed {
+		t.Fatalf("元数据问题不应淘汰题目，实际 %+v", stored)
+	}
+	if discards, err := results.ListDiscardResultsByQuestionIDs(ctx, []string{"q-metadata-only"}); err != nil {
+		t.Fatal(err)
+	} else if len(discards) != 0 {
+		t.Fatalf("元数据问题不应生成淘汰记录，实际 %+v", discards)
 	}
 }
 

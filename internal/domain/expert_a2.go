@@ -11,7 +11,9 @@ var a2StemStartPattern = regexp.MustCompile(`^(男|女)，\s*\d+\s*(岁|个月|�
 var a2DifficultyPattern = regexp.MustCompile(`^(0\.\d{2}|1\.00)$`)
 
 var allowedA2CognitiveLevels = map[string]struct{}{
-	"记忆": {}, "理解": {}, "简单应用": {}, "综合应用": {},
+	"记忆": {}, "理解": {}, "应用": {}, "综合应用": {},
+	// “简单应用”是历史数据中的旧标签，新生成题会在 NormalizeGeneratedA2 中归一为“应用”。
+	"简单应用": {},
 }
 
 var allowedA2ExamPoints = map[string]struct{}{
@@ -47,15 +49,22 @@ func (q *A2Question) NormalizeGeneratedA2() {
 	}
 	q.Explanation = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(q.Explanation), "说明："))
 	q.CognitiveLevel = strings.TrimSpace(q.CognitiveLevel)
+	if q.CognitiveLevel == "简单应用" {
+		q.CognitiveLevel = "应用"
+	}
 	q.ExamPoints = normalizeA2ExamPoints(q.ExamPoints)
 }
 
-// ValidateGeneratedA2 校验 AI 新生成题是否符合专家 A2 规范。
-// Validate 继续兼容历史四选项题；新生成与批量生成使用本方法。
-func (q *A2Question) ValidateGeneratedA2() error {
+// ValidateA2ContentForReview 校验题目核心内容与 A2 格式。
+//
+// 难度、认知层次、考核要点、大纲代码、专业和系统属于命题元数据，
+// 不在本方法中校验。元数据有误时应反馈给出题提示词或人工审核，
+// 不能因此否决医学内容正确且格式可用的题目。
+func (q *A2Question) ValidateA2ContentForReview() error {
 	if err := q.Validate(); err != nil {
 		return err
 	}
+	// 新生成与批量生成使用五选项 A2 格式；历史四选项题仍由 ValidateForReview 兼容。
 	if len(q.Options) != 5 {
 		return invalidQuestionError("AI生成的A2题必须有A-E五个选项")
 	}
@@ -104,6 +113,16 @@ func (q *A2Question) ValidateGeneratedA2() error {
 			}
 		}
 	}
+	return nil
+}
+
+// ValidateGeneratedA2 校验 AI 新生成题是否符合专家 A2 规范。
+// 生成协议仍要求元数据完整且来自受控值；AI 质量检查和审核门禁不使用这些
+// 元数据作为内容淘汰条件，详见 ValidateA2ContentForReview。
+func (q *A2Question) ValidateGeneratedA2() error {
+	if err := q.ValidateA2ContentForReview(); err != nil {
+		return err
+	}
 	if !a2DifficultyPattern.MatchString(string(q.Difficulty)) {
 		return invalidQuestionError("预估难度必须是0.00到1.00之间的两位小数")
 	}
@@ -139,7 +158,8 @@ func (q *A2Question) ValidateGeneratedA2() error {
 	return nil
 }
 
-// ValidateForReview 对带专家元数据的新格式题使用严格规则；
+// ValidateForReview 对带专家元数据的新格式题校验核心内容和 A2 格式；
+// 命题元数据仅作提示词/人工审核反馈，不作为提交审核的硬门槛。
 // 对尚未迁移元数据的历史题继续使用兼容校验，避免破坏既有题库流程。
 func (q *A2Question) ValidateForReview() error {
 	if err := q.Validate(); err != nil {
@@ -152,7 +172,7 @@ func (q *A2Question) ValidateForReview() error {
 		strings.TrimSpace(q.System) == "" {
 		return nil
 	}
-	return q.ValidateGeneratedA2()
+	return q.ValidateA2ContentForReview()
 }
 
 func normalizeA2ExamPoints(value string) string {

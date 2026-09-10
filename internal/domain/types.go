@@ -40,7 +40,7 @@ type A2Question struct {
 	SourceRefs      []SourceRef      `json:"source_refs"`      // 解析来源引用（可选）
 	KnowledgePoints []KnowledgePoint `json:"knowledge_points"` // 关联的知识点
 	Difficulty      Difficulty       `json:"difficulty"`       // 难度等级（0-1，如"0.65"）
-	CognitiveLevel  string           `json:"cognitive_level"`  // 认知层次：记忆/理解/简单应用/综合应用
+	CognitiveLevel  string           `json:"cognitive_level"`  // 认知层次：记忆/理解/应用/综合应用（历史数据兼容“简单应用”）
 	ExamPoints      string           `json:"exam_points"`      // 考核要点，如"诊断与鉴别诊断，临床表现"
 	OutlineCode     string           `json:"outline_code"`     // 大纲代码（标到最后一级）
 	Profession      string           `json:"profession"`       // 专业，如"消化"、"生理，消化"

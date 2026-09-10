@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS questions (
     knowledge_points JSONB DEFAULT '[]',
     media_refs JSONB DEFAULT '[]',
     difficulty TEXT NOT NULL DEFAULT 'medium',
-    cognitive_level TEXT NOT NULL DEFAULT '',   -- 认知层次：记忆/理解/简单应用/综合应用
+    cognitive_level TEXT NOT NULL DEFAULT '',   -- 认知层次：记忆/理解/应用/综合应用（历史数据兼容“简单应用”）
     exam_points TEXT NOT NULL DEFAULT '',        -- 考核要点
     outline_code TEXT NOT NULL DEFAULT '',       -- 大纲代码
     profession TEXT NOT NULL DEFAULT '',         -- 专业

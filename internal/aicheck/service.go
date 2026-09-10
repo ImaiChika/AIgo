@@ -74,6 +74,9 @@ func (s *Service) CheckQuestion(ctx context.Context, questionID string) (*domain
 	if err != nil {
 		return nil, fmt.Errorf("解析检查结果失败: %w", err)
 	}
+	// 元数据只用于反馈出题提示词，不是 AI 质量门禁。即使模型误把元数据
+	// 标成 warning/error，也不能因此淘汰核心内容和格式均可用的题目。
+	normalizeNonBlockingMetadataIssues(result)
 	// 记录检查时的题目版本号，用于判断结果是否过期
 	result.QuestionVersion = q.Version
 	if strictErr != nil {
@@ -213,12 +216,13 @@ func getCheckSystemPrompt() string {
 4. **逻辑性**：题干信息是否完整、是否有逻辑漏洞、选项是否互斥
 5. **A2 格式**：是否为A-E严格五选一；题干是否以性别、年龄开头；是否删除“主诉：/现病史：/提问：”等引导词；最后提问是否不用“哪个/什么”和问号
 6. **说明格式**：是否先写“正确答案为X”，给出诊断或结论及依据，逐项分析四个干扰项，并以“故选X”收尾
-7. **元数据**：难度是否为0.05倍数；认知层次是否合法；考核要点是否仅来自受控词表且不填写具体疾病名
+7. **元数据仅作提示**：可以指出难度、认知层次、考核要点、大纲代码、专业或系统等元数据与出题要求不一致，但这些字段不是本次 AI 质量门禁，不能据此判为不通过，也不能触发题目淘汰。
 
 判定注意事项：
 - 解析是可选字段；没有解析不得仅因此判为不通过。有解析时再检查其准确性和专家格式。
 - “110/70mmHg”与“110/70 mmHg”等常见数值单位写法均可接受，不得仅因是否留空格判为warning或error。
 - 不影响医学正确性、答案唯一性或可用性的轻微排版建议只能标为info；info不影响pass。
+- 难度、认知层次、考核要点等元数据问题只能标为info，并在suggestion中提示“应修正出题提示词”；即使模型认为元数据不规范，也不得单独触发issues_found或reject，必须保持基于核心内容与格式得出的verdict。
 - 若存在另一个同样合理的选项，应按答案不唯一处理，至少判为issues_found；不要只验证给定答案本身是否成立。
 
 请严格按 JSON 格式返回检查结果，不要输出其他内容。`
@@ -243,24 +247,26 @@ func buildCheckPrompt(q *domain.A2Question) string {
 		b.WriteString(fmt.Sprintf("【解析】\n%s\n\n", q.Explanation))
 	}
 
+	b.WriteString("【参考元数据（只用于出题提示词反馈，不参与本次质检判定）】\n")
 	if q.Difficulty != "" {
-		b.WriteString(fmt.Sprintf("【难度】\n%s\n\n", q.Difficulty))
+		b.WriteString(fmt.Sprintf("难度：%s\n", q.Difficulty))
 	}
 	if q.CognitiveLevel != "" {
-		b.WriteString(fmt.Sprintf("【认知层次】\n%s\n\n", q.CognitiveLevel))
+		b.WriteString(fmt.Sprintf("认知层次：%s\n", q.CognitiveLevel))
 	}
 	if q.ExamPoints != "" {
-		b.WriteString(fmt.Sprintf("【考核要点】\n%s\n\n", q.ExamPoints))
+		b.WriteString(fmt.Sprintf("考核要点：%s\n", q.ExamPoints))
 	}
 	if q.OutlineCode != "" {
-		b.WriteString(fmt.Sprintf("【大纲代码】\n%s\n\n", q.OutlineCode))
+		b.WriteString(fmt.Sprintf("大纲代码：%s\n", q.OutlineCode))
 	}
 	if q.Profession != "" {
-		b.WriteString(fmt.Sprintf("【专业】\n%s\n\n", q.Profession))
+		b.WriteString(fmt.Sprintf("专业：%s\n", q.Profession))
 	}
 	if q.System != "" {
-		b.WriteString(fmt.Sprintf("【系统】\n%s\n\n", q.System))
+		b.WriteString(fmt.Sprintf("系统：%s\n", q.System))
 	}
+	b.WriteString("\n")
 
 	b.WriteString(`【输出格式】
 返回一个 JSON 对象，包含以下字段：
@@ -274,7 +280,7 @@ func buildCheckPrompt(q *domain.A2Question) string {
   },
   "issues": [
     {
-      "field": "问题字段（stem/options/answer/explanation）",
+      "field": "问题字段（stem/options/answer/explanation 或 difficulty/cognitive_level/exam_points/metadata）",
       "severity": "error 或 warning 或 info",
       "message": "问题描述"
     }
@@ -283,17 +289,62 @@ func buildCheckPrompt(q *domain.A2Question) string {
 }
 
 评分标准：
-- 90-100：优秀，无明显问题
+- 四个分数只评价医学内容、答案解析一致性、选项逻辑和 A2 格式，不评价元数据标签。
+- 90-100：优秀，无明显核心问题
 - 70-89：良好，有小问题但不影响使用
-- 60-69：及格，有需要修改的问题
-- 60 以下：不合格，需要重写
+- 60-69：及格，有需要修改的核心问题
+- 60 以下：核心内容不合格，需要重写
 
 verdict 判定规则：
-- pass：所有维度 >= 70 且无 error 级别问题
-- issues_found：有 warning 级别问题或部分维度 60-69
-- reject：有 error 级别问题或任一维度 < 60`)
+- pass：所有核心维度 >= 70 且无核心 error/warning；只有 info 或元数据问题仍必须 pass
+- issues_found：有核心 warning 或部分核心维度 60-69
+- reject：有核心 error 或任一核心维度 < 60；元数据问题不得单独触发 reject`)
 
 	return b.String()
+}
+
+// normalizeNonBlockingMetadataIssues 将元数据问题降为信息反馈，并在没有
+// 核心内容/格式问题时把误判的非 pass 结论恢复为 pass。
+//
+// 这层保护用于兼容旧检查模型：即使模型仍把“简单应用”等标签当成 error，
+// 也不能让一条医学内容正确的草稿因元数据小问题被自动删除。
+func normalizeNonBlockingMetadataIssues(result *domain.AIReviewResult) {
+	if result == nil {
+		return
+	}
+	hasMetadataIssue := false
+	hasBlockingIssue := false
+	for i := range result.Issues {
+		issue := &result.Issues[i]
+		if isMetadataIssue(*issue) {
+			hasMetadataIssue = true
+			issue.Severity = "info"
+			continue
+		}
+		if issue.Severity == "error" || issue.Severity == "warning" {
+			hasBlockingIssue = true
+		}
+	}
+	if hasMetadataIssue && !hasBlockingIssue {
+		result.Verdict = "pass"
+	}
+}
+
+func isMetadataIssue(issue domain.ReviewIssue) bool {
+	field := strings.ToLower(strings.TrimSpace(issue.Field))
+	switch field {
+	case "difficulty", "cognitive_level", "cognitive", "exam_points", "outline_code", "profession", "system", "metadata":
+		return true
+	case "难度", "认知层次", "考核要点", "大纲代码", "专业", "系统", "元数据":
+		return true
+	}
+	message := strings.TrimSpace(issue.Message)
+	for _, keyword := range []string{"元数据", "认知层次", "考核要点", "难度系数", "大纲代码"} {
+		if strings.Contains(message, keyword) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkResponse LLM 返回的检查结果结构。

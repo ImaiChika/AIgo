@@ -64,6 +64,8 @@ func TestSystemPromptContainsExpertA2Rules(t *testing.T) {
 		"故选 X",
 		"具体处置措施",
 		"exam_points 不得填写具体疾病名称",
+		"cognitive_level 只能是“记忆、理解、应用、综合应用”之一",
+		"不要输出历史旧标签“简单应用”",
 		"合格示例（仅学习格式与说明写法",
 		"严格限制饮食并增加运动",
 		"十二指肠溃疡并出血",
@@ -135,7 +137,7 @@ func TestGenerateWithMock(t *testing.T) {
 		{"系统", q.System, "消化"},
 		{"答案", q.Answer, "A"},
 		{"难度", string(q.Difficulty), "0.65"},
-		{"认知层次", q.CognitiveLevel, "简单应用"},
+		{"认知层次", q.CognitiveLevel, "应用"},
 		{"考核要点", q.ExamPoints, "诊断与鉴别诊断，临床表现"},
 	}
 
