@@ -13,7 +13,7 @@ import (
 // InitBuiltinRoles 对已存在角色的自愈行为：
 //   - super_admin 始终恢复完整权限；
 //   - admin 自动补齐业务权限并移除角色模板管理权限；
-//   - 医学专家恢复个人命题/题库/退修能力，但不获得批量推理、汇总统计或管理权限；
+//   - 医学专家恢复个人命题/题库/退修能力，但不默认获得批量推理、汇总统计或管理权限；
 //   - 其他内置角色保留管理员的有效自定义修改。
 func TestInitBuiltinRolesHealsAdminRole(t *testing.T) {
 	service, cleanup := loginLimitTestService(t)
@@ -192,5 +192,24 @@ func TestBuiltinAuthoringPermissionsAreSeparated(t *testing.T) {
 	}
 	if !slices.Contains(super.Permissions, domain.PermQuestionGenerate) || !slices.Contains(super.Permissions, domain.PermBatchRun) {
 		t.Fatalf("超级管理员应同时拥有单题和批量权限: %v", super.Permissions)
+	}
+
+	expert, err := service.GetRole(ctx, domain.RoleExpert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expert.Permissions = append(expert.Permissions, domain.PermBatchRun)
+	if err := service.SaveRole(ctx, *expert); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.InitBuiltinRoles(ctx); err != nil {
+		t.Fatal(err)
+	}
+	expertAfter, err := service.GetRole(ctx, domain.RoleExpert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(expertAfter.Permissions, domain.PermBatchRun) {
+		t.Fatalf("专家角色被明确授予批量权限后，启动自愈不应清除: %v", expertAfter.Permissions)
 	}
 }

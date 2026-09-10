@@ -203,10 +203,24 @@ func (s *Service) InitBuiltinRoles(ctx context.Context) error {
 				}
 			}
 			// 医学专家同时是个人题库用户和审核人：可单题命题、查看自己的三层题库、
-			// 处理待修改并分享正式题；不包含批量推理、全局库、汇总统计或管理权限。
-			if r.ID == domain.RoleExpert && !samePermissions(valid, r.Permissions) {
-				valid = append([]string(nil), r.Permissions...)
-				changed = true
+			// 处理待修改并分享正式题；不包含全局库、汇总统计或管理权限。
+			// 批量推理是可按需授予的例外：迁移会先清理旧默认值，之后超级管理员
+			// 若明确在角色模板中勾选，启动自愈必须保留这项调整。
+			if r.ID == domain.RoleExpert {
+				keepBatch := containsPermission(valid, domain.PermBatchRun)
+				sanitized := make([]string, 0, len(r.Permissions)+1)
+				for _, permission := range r.Permissions {
+					if containsPermission(valid, permission) {
+						sanitized = append(sanitized, permission)
+					}
+				}
+				if keepBatch {
+					sanitized = append(sanitized, domain.PermBatchRun)
+				}
+				if !samePermissions(valid, sanitized) {
+					valid = sanitized
+					changed = true
+				}
 			}
 			// 命题教师需要能把本人已通过审核的正式题目提交分享申请；
 			// 仅补齐这一新增能力，不覆盖管理员对教师其他权限的调整。
