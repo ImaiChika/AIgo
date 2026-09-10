@@ -83,8 +83,12 @@ func (s *Server) handleSubmitReview(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "提交审核失败: "+err.Error())
 			return
 		}
-		if errors.Is(err, domain.ErrQuestionVersionConflict) {
+		if errors.Is(err, domain.ErrQuestionVersionConflict) || errors.Is(err, domain.ErrReviewNotSubmittable) {
 			writeError(w, http.StatusConflict, "提交审核失败: "+err.Error())
+			return
+		}
+		if errors.Is(err, domain.ErrReviewBadRequest) {
+			writeError(w, http.StatusBadRequest, "提交审核失败: "+err.Error())
 			return
 		}
 		writeError(w, 500, "提交审核失败: "+err.Error())

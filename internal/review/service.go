@@ -348,11 +348,11 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 	if !allowedStatuses[q.Status] {
 		switch {
 		case s.RequireAICheck && (q.Status == domain.StatusAIDraft || q.Status == domain.StatusAutoChecked):
-			return nil, fmt.Errorf("题目 %s 尚未通过 AI 质量检查（当前状态 %s），请等待自动检查完成后再提交审核", questionID, q.Status)
+			return nil, fmt.Errorf("%w: 题目 %s 尚未通过 AI 质量检查（当前状态 %s），请等待自动检查完成后再提交审核", domain.ErrReviewNotSubmittable, questionID, q.Status)
 		case q.Status == domain.StatusRejected:
-			return nil, fmt.Errorf("题目 %s 已被驳回（终态锁定），不允许修改或重新提交审核", questionID)
+			return nil, fmt.Errorf("%w: 题目 %s 已被驳回（终态锁定），不允许修改或重新提交审核", domain.ErrReviewNotSubmittable, questionID)
 		default:
-			return nil, fmt.Errorf("题目 %s 当前状态为 %s，不允许提交审核", questionID, q.Status)
+			return nil, fmt.Errorf("%w: 题目 %s 当前状态为 %s，不允许提交审核", domain.ErrReviewNotSubmittable, questionID, q.Status)
 		}
 	}
 
@@ -420,7 +420,7 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 		if (q.Status == domain.StatusAIDraft || q.Status == domain.StatusAIReviewed) && isTerminalTask {
 			// 继续向下创建新任务
 		} else {
-			return nil, fmt.Errorf("题目 %s 已提交审核（任务状态：%s），无需重复提交", questionID, existing.Status)
+			return nil, fmt.Errorf("%w: 题目 %s 已提交审核（任务状态：%s），无需重复提交", domain.ErrReviewNotSubmittable, questionID, existing.Status)
 		}
 	}
 
@@ -495,20 +495,20 @@ func resolveSubmissionBank(q *domain.A2Question, flow *domain.ReviewFlowConfig, 
 		bankID = q.BankIDs[0]
 	}
 	if bankID == "" {
-		return "", fmt.Errorf("题目必须先归入一个分类子题库；通用流程送审时也必须明确选择本次提交题库")
+		return "", fmt.Errorf("%w: 题目必须先归入一个分类子题库；通用流程送审时也必须明确选择本次提交题库", domain.ErrReviewBadRequest)
 	}
 	if flow != nil && flow.BankID != "" && flow.BankID != bankID {
-		return "", fmt.Errorf("审核流程 %s 绑定的是题库 %s，不能按题库 %s 提交", flow.ID, flow.BankID, bankID)
+		return "", fmt.Errorf("%w: 审核流程 %s 绑定的是题库 %s，不能按题库 %s 提交", domain.ErrReviewBadRequest, flow.ID, flow.BankID, bankID)
 	}
 	if q == nil {
-		return "", fmt.Errorf("题目不存在")
+		return "", fmt.Errorf("%w: 题目不存在", domain.ErrReviewBadRequest)
 	}
 	for _, candidate := range q.BankIDs {
 		if candidate == bankID {
 			return bankID, nil
 		}
 	}
-	return "", fmt.Errorf("题目 %s 不属于本次提交题库 %s", q.ID, bankID)
+	return "", fmt.Errorf("%w: 题目 %s 不属于本次提交题库 %s", domain.ErrReviewBadRequest, q.ID, bankID)
 }
 
 func bankNameOrAll(bankID string) string {

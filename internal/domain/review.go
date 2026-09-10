@@ -1,9 +1,18 @@
 package domain
 
 import (
+	"errors"
 	"strings"
 	"time"
 )
+
+// ErrReviewNotSubmittable 题目当前状态不允许送审（未通过 AI 检查、终态锁定、已在审核中等）。
+// 属于客户端可纠正的状态冲突，API 层应映射为 409 而不是 500。
+var ErrReviewNotSubmittable = errors.New("题目当前状态不允许提交审核")
+
+// ErrReviewBadRequest 送审请求本身不合法（缺少分类子题库、流程与题库不匹配、题目不属于所选题库等）。
+// API 层应映射为 400。
+var ErrReviewBadRequest = errors.New("送审请求不合法")
 
 // QuestionStatus 题目生命周期状态。
 type QuestionStatus string
