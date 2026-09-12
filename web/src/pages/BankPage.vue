@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted, computed, watch, nextTick } from "vue";
 import { api } from "../api.js";
 import { hasPerm } from "../auth.js";
 import AICheckScoreButton from "../components/AICheckScoreButton.vue";
@@ -89,10 +89,74 @@ const professions = ref([]); // 专业列表
 const banks = ref([]); // 题库列表
 const selectedQuestion = ref(null);
 const shareStatuses = ref({});
+// 审核意见（按题目加载）：出题人可在详情里看到本人题目的轮次评语与驳回/决断理由；
+// 进行中的任务由服务端按隔离规则裁剪，已结束任务（已通过/已驳回）保留完整评语。
+const reviewInfo = ref(null); // { task, records }
+const reviewInfoLoading = ref(false);
 let questionSearchTicket = 0;
 
 // 强制通过：跳过 AI 检查门禁，草稿直接置为已检查（后端写审计留痕）
 const mutating = ref(false); // 强制通过/撤回/删除在途守卫，防重复事务
+const canBatchShare = computed(() => !isGlobalScope.value && activeTier.value === 'formal' && hasPerm('question:share'));
+const shareDialog = ref(null);
+const shareDialogElement = ref(null);
+watch(shareDialog, async value => {
+  if (value) { await nextTick(); shareDialogElement.value?.showModal(); }
+});
+const shareNotice = ref('');
+const preparingShare = ref(false);
+const appliedShareFilters = ref({ q: '', bank_id: '', profession: '' });
+const shareableSelected = computed(() => [...selectedIds.value].filter(id => !shareStatus(id)));
+
+async function prepareBulkShare(mode) {
+  if (!canBatchShare.value || mutating.value || preparingShare.value || loading.value) return;
+  preparingShare.value = true;
+  shareNotice.value = '';
+  const filters = { ...appliedShareFilters.value };
+  const ticket = questionSearchTicket;
+  try {
+    let ids;
+    if (mode === 'selected') {
+      ids = [...shareableSelected.value];
+    } else {
+      const data = await api.previewQuestionShares(filters);
+      if (ticket !== questionSearchTicket || !canBatchShare.value) return;
+      if (data.total > data.limit) {
+        shareNotice.value = `当前有 ${data.total} 道可分享题目。每批最多 ${data.limit} 道，请缩小专业、分类或关键词范围，或勾选后提交。`;
+        return;
+      }
+      ids = data.question_ids || [];
+    }
+    if (!ids.length) { shareNotice.value = '当前范围没有可提交的题目，已申请过的题目会自动跳过。'; return; }
+    if (ids.length > 500) { shareNotice.value = '每批最多提交 500 道，请减少勾选数量。'; return; }
+    shareDialog.value = {
+      ids,
+      scope: mode === 'selected' ? '已勾选的个人正式题目' : [
+        filters.bank_id ? `分类：${banks.value.find(b => b.id === filters.bank_id)?.name || filters.bank_id}` : '全部分类',
+        filters.profession ? `专业：${filters.profession}` : '全部专业',
+        filters.q ? `关键词：${filters.q}` : '',
+      ].filter(Boolean).join(' · '),
+    };
+  } catch (e) { shareNotice.value = '准备分享失败：' + e.message; }
+  finally { preparingShare.value = false; }
+}
+
+async function submitBulkShare() {
+  if (!shareDialog.value || mutating.value) return;
+  mutating.value = true;
+  const ids = [...shareDialog.value.ids];
+  try {
+    const data = await api.createQuestionShares(ids);
+    for (const id of data.question_ids || []) shareStatuses.value[id] = 'pending';
+    shareNotice.value = `已提交 ${data.submitted} 道，等待管理员审批。` +
+      (data.skipped ? `另有 ${data.skipped} 道已申请或状态已变化，本次已跳过。` : '');
+    ids.forEach(id => selectedIds.value.delete(id));
+    selectAll.value = false;
+    shareDialog.value = null;
+    await loadShareRequests();
+  } catch (e) { shareNotice.value = '提交失败：' + e.message; }
+  finally { mutating.value = false; }
+}
 
 async function forcePassSelected() {
   const q = selectedQuestion.value;
@@ -138,6 +202,7 @@ async function loadShareRequests() {
   }
   try {
     const data = await api.listQuestionShares("mine");
+    if (isGlobalScope.value) return;
     const next = {};
     for (const item of data.items || []) next[item.request.question_id] = item.request.status;
     shareStatuses.value = next;
@@ -155,7 +220,7 @@ function shareStatusText(status) {
 }
 
 async function requestShare(q) {
-  if (!q || q.status !== "published" || shareStatus(q.id)) return;
+  if (mutating.value || !q || q.status !== "published" || shareStatus(q.id)) return;
   if (!confirm("确认申请将这道个人正式题目分享至全局题库？每道题只能申请一次，审批后不能重复申请。")) return;
   mutating.value = true;
   try {
@@ -186,11 +251,12 @@ function toggleSelect(id) {
   } else {
     selectedIds.value.add(id);
   }
+  selectAll.value = questions.value.length > 0 && questions.value.every(q => selectedIds.value.has(q.id));
 }
 
 function toggleSelectAll() {
   if (selectAll.value) {
-    selectedIds.value.clear();
+    questions.value.forEach(q => selectedIds.value.delete(q.id));
     selectAll.value = false;
   } else {
     questions.value.forEach(q => selectedIds.value.add(q.id));
@@ -267,6 +333,9 @@ function showToast(msg) {
 
 async function loadQuestions(resetPage = true) {
   const ticket = ++questionSearchTicket;
+  shareNotice.value = '';
+  if (!mutating.value) shareDialog.value = null;
+  const requestedShareFilters = { q: searchQuery.value, bank_id: filterBank.value, profession: filterProfession.value };
   loading.value = true;
   if (resetPage) page.value = 1;
   try {
@@ -278,7 +347,9 @@ async function loadQuestions(resetPage = true) {
     }
     if (ticket !== questionSearchTicket) return;
     questions.value = data.questions || [];
+    selectAll.value = questions.value.length > 0 && questions.value.every(q => selectedIds.value.has(q.id));
     totalCount.value = data.total || 0;
+    appliedShareFilters.value = requestedShareFilters;
   } catch (e) {
     showToast("加载失败: " + e.message);
   } finally {
@@ -300,6 +371,42 @@ function goPage(p) {
 function selectQuestion(q) {
   selectedQuestion.value = q;
 }
+
+const REVIEW_CONCLUSION_TEXT = {
+  approved: "通过",
+  rejected: "驳回",
+  revision_required: "需修改",
+  published: "通过（已入库）",
+};
+
+function reviewConclusionText(status) {
+  return REVIEW_CONCLUSION_TEXT[status] || status;
+}
+
+async function loadReviewInfo(q) {
+  reviewInfo.value = null;
+  if (!q) return;
+  reviewInfoLoading.value = true;
+  try {
+    const task = await api.getTaskByQuestion(q.id);
+    if (!task || selectedQuestion.value?.id !== q.id) {
+      reviewInfo.value = null;
+      return;
+    }
+    const data = await api.reviewRecords(task.id);
+    reviewInfo.value = { task, records: data.records || [] };
+  } catch (e) {
+    // 审核意见加载失败不打断详情查看；AI 检查评分按钮仍可用
+    console.error("加载审核意见失败:", e);
+    reviewInfo.value = null;
+  } finally {
+    reviewInfoLoading.value = false;
+  }
+}
+
+watch(selectedQuestion, (q) => {
+  loadReviewInfo(q);
+});
 
 async function deleteQuestion(q) {
   if (mutating.value) return;
@@ -482,9 +589,13 @@ onMounted(async () => {
       <div class="batch-bar">
         <label class="select-all">
           <input type="checkbox" :checked="selectAll" @change="toggleSelectAll" />
-          <span>全选</span>
+          <span>本页全选</span>
         </label>
         <span class="selected-count" v-if="selectedIds.size > 0">已选 {{ selectedIds.size }} 道</span>
+        <div v-if="canBatchShare" class="bulk-share-actions">
+          <button class="ghost-button share-btn" type="button" :disabled="mutating || preparingShare || loading || !shareableSelected.length" @click="prepareBulkShare('selected')">提交所选至全局库</button>
+          <button class="text-button" type="button" :disabled="mutating || preparingShare || loading" @click="prepareBulkShare('filtered')">{{ preparingShare ? '查询中…' : '提交筛选结果' }}</button>
+        </div>
         <!-- 导出仅包含已入库（正式题库）题目，由后端强制；仅正式题库页提供 -->
         <div class="export-btns" v-if="canDownload && activeTier === 'formal'">
           <button class="ghost-button" type="button" @click="exportXlsx" :disabled="exporting || selectedIds.size === 0">
@@ -499,6 +610,7 @@ onMounted(async () => {
         </div>
       </div>
 
+      <p v-if="shareNotice" class="bulk-share-notice" role="status">{{ shareNotice }}</p>
       <div v-if="loading" class="loading">加载中...</div>
       <div v-else class="question-scroll">
         <div class="question-list">
@@ -654,6 +766,20 @@ onMounted(async () => {
           </div>
         </div>
 
+        <!-- 审核意见：已结束任务展示完整轮次评语与决断（驳回理由在这里） -->
+        <div v-if="reviewInfo" class="detail-field review-info-field">
+          <label>审核意见（第 {{ reviewInfo.task.attempt || 1 }} 次送审 · {{ reviewConclusionText(reviewInfo.task.status) }}）</label>
+          <div v-for="rec in reviewInfo.records" :key="rec.id" class="review-record" :class="{ 'review-final': (rec.id || '').startsWith('rec-final-') }">
+            <div class="review-record-head">
+              <span class="review-round">{{ (rec.id || '').startsWith('rec-final-') ? '最终决断' : `第 ${rec.round_number} 轮` }}</span>
+              <span class="review-reviewer">{{ rec.expert_name || rec.expert_id }}</span>
+              <span class="review-conclusion" :class="`review-conclusion-${rec.review_status}`">{{ reviewConclusionText(rec.review_status) }}</span>
+            </div>
+            <p v-if="rec.opinion" class="review-opinion">{{ rec.opinion }}</p>
+          </div>
+          <p v-if="!reviewInfo.records.length" class="review-empty">暂无审核记录</p>
+        </div>
+
         <div class="detail-field">
           <label>元信息</label>
           <p class="meta-text">ID: {{ selectedQuestion.id }}</p>
@@ -669,9 +795,31 @@ onMounted(async () => {
 
   <div class="toast" :class="{ show: toast }" role="status" aria-live="polite">{{ toast }}</div>
 
+  <dialog v-if="shareDialog" ref="shareDialogElement" class="bulk-share-dialog" aria-labelledby="bulk-share-title" @cancel.prevent="!mutating && (shareDialog = null)">
+    <h3 id="bulk-share-title">提交至全局题库</h3>
+    <p class="share-scope-summary">{{ shareDialog.scope }}</p>
+    <p>本次提交 <strong>{{ shareDialog.ids.length }}</strong> 道个人正式题目，审批通过后进入全局正式题库。</p>
+    <p class="share-scope-summary">已申请过的题目自动跳过；个人题库中的原题保留。</p>
+    <p v-if="shareNotice" role="status">{{ shareNotice }}</p>
+    <div class="bulk-share-dialog-actions">
+      <button class="ghost-button" type="button" :disabled="mutating" @click="shareDialog = null">取消</button>
+      <button class="primary-button" type="button" :disabled="mutating" @click="submitBulkShare">{{ mutating ? '提交中…' : '确认提交' }}</button>
+    </div>
+  </dialog>
+
 </template>
 
 <style scoped>
+.bulk-share-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.bulk-share-actions button { font-size: 12px; }
+.bulk-share-actions button:disabled { opacity: .5; cursor: not-allowed; }
+.bulk-share-notice { flex: none; margin: 0 0 12px; padding: 10px; background: #f3f7fc; color: #435269; font-size: 12px; line-height: 1.6; }
+.bulk-share-dialog { width: min(480px, calc(100vw - 32px)); padding: 24px; border: 1px solid #e5ebf3; border-radius: 10px; color: #172033; }
+.bulk-share-dialog::backdrop { background: rgb(23 32 51 / 35%); }
+.bulk-share-dialog h3 { margin: 0 0 16px; }
+.bulk-share-dialog p { line-height: 1.7; font-size: 14px; }
+.share-scope-summary { color: #6e7b8f; overflow-wrap: anywhere; }
+.bulk-share-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .ai-force-btn {
   color: #c07b22;
   border-color: #f3d9b0;
@@ -1205,6 +1353,59 @@ onMounted(async () => {
   font-family: monospace;
 }
 
+.review-info-field .review-record {
+  border: 1px solid #e5ebf3;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: #fbfdff;
+}
+
+.review-info-field .review-record.review-final {
+  border-color: #f3c8cd;
+  background: #fffafa;
+}
+
+.review-record-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.review-round {
+  color: #6e7b8f;
+  font-weight: 600;
+}
+
+.review-reviewer {
+  color: #172033;
+  font-weight: 600;
+}
+
+.review-conclusion {
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.review-conclusion-approved, .review-conclusion-published { background: #e9f8ef; color: #199e63; }
+.review-conclusion-rejected { background: #fff0f0; color: #c54858; }
+.review-conclusion-revision_required { background: #fff3e2; color: #dd8a00; }
+
+.review-opinion {
+  margin: 6px 0 0 !important;
+  font-size: 13px !important;
+  color: #435269 !important;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.review-empty {
+  color: #6e7b8f;
+  font-size: 13px;
+}
+
 .empty-panel { display: grid; place-items: center; color: #6e7b8f; }
 .empty, .loading { text-align: center; color: #6e7b8f; padding: 30px; }
 .edit-actions { margin-left: auto; }
@@ -1273,5 +1474,12 @@ onMounted(async () => {
 
 .remove-btn:hover:not(:disabled) { background: #fff0f0; }
 .remove-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+@media (max-width: 900px) {
+  .bank-layout { grid-template-columns: minmax(0, 1fr); }
+  .bank-list-panel { min-width: 0; }
+  .export-btns { flex-wrap: wrap; margin-left: 0; }
+  .list-footer { flex-wrap: wrap; gap: 8px; }
+}
 
 </style>

@@ -256,6 +256,7 @@ func run(ctx context.Context, args []string) error {
 		fmt.Println("  GET    /health/ready                数据库与关键Schema就绪检查")
 		fmt.Println("  GET    /api/stats                    统计信息")
 		fmt.Println("  POST   /api/questions/generate        生成题目")
+		fmt.Println("  GET    /api/generation-runs/{id}       查询命题运行状态")
 		fmt.Println("  GET    /api/questions                  列出题目")
 		fmt.Println("  GET    /api/questions/{id}             题目详情")
 		fmt.Println("  GET    /api/knowledge-points           列出知识点")

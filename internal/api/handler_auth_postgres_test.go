@@ -18,6 +18,7 @@ import (
 	"aigo/internal/auth"
 	"aigo/internal/batch"
 	"aigo/internal/domain"
+	"aigo/internal/review"
 	"aigo/internal/storage/postgres"
 
 	"github.com/lib/pq"
@@ -237,6 +238,7 @@ func authHandlerTestServer(t *testing.T) (*Server, *postgres.Store, func()) {
 	}
 	server := &Server{
 		authSvc: authService, auditSvc: audit.NewService(store), questionStore: store, shareStore: store,
+		reviewSvc: review.NewService(store, store, store, authService),
 		registerEnabled: true, trustProxyHeaders: true, readinessTimeout: 2 * time.Second,
 	}
 	cleanup := func() {

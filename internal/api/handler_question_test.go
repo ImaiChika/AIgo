@@ -2,29 +2,36 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http/httptest"
 	"testing"
 
+	"aigo/internal/auth"
 	"aigo/internal/domain"
 	"aigo/internal/review"
 	"aigo/internal/storage/testutil"
 )
 
 // ensureQuestionEditable 的编辑窗口规则：
-// 仅"专家审核退回修改（需修改）"的题目（ai_reviewed + 任务 revision_required）可以编辑。
+// 仅"专家审核退回修改（需修改）"的题目（ai_reviewed + 任务 revision_required）可以编辑，
+// 且仅限出题人本人（历史题无生成者快照时回退到个人题库归属）。
 func TestEnsureQuestionEditable(t *testing.T) {
 	questionStore := testutil.NewMemoryStore()
 	reviewStore := testutil.NewMemoryReviewStore()
 	svc := review.NewService(testutil.NewMemoryExpertStore(), reviewStore, questionStore, nil)
 	server := &Server{reviewSvc: svc, questionStore: questionStore}
 	ctx := context.Background()
-	request := httptest.NewRequest("PUT", "/api/questions/q1", nil)
+	creatorCtx := context.WithValue(context.Background(), auth.UsernameKey, "expert")
+	request := httptest.NewRequest("PUT", "/api/questions/q1", nil).WithContext(creatorCtx)
+	otherRequest := httptest.NewRequest("PUT", "/api/questions/q1", nil).
+		WithContext(context.WithValue(context.Background(), auth.UsernameKey, "someone-else"))
 
 	mkQuestion := func(id string, status domain.QuestionStatus) *domain.A2Question {
 		return &domain.A2Question{
 			ID: id, ClinicalStem: "测试题干", Answer: "A",
 			Options: []domain.Option{{Label: "A", Text: "选项"}, {Label: "B", Text: "选项"}},
 			Status:  status, Version: 1,
+			CreatedBy: "expert",
 		}
 	}
 
@@ -34,14 +41,35 @@ func TestEnsureQuestionEditable(t *testing.T) {
 		}
 	}
 
-	// 退回修改中的题（任务 revision_required）→ 可编辑
+	// 退回修改中的题（任务 revision_required）→ 出题人本人可编辑
 	revision := mkQuestion("q-revision", domain.StatusAIReviewed)
 	save(revision)
 	if err := reviewStore.SaveTask(ctx, domain.ReviewTask{ID: "t-revision", QuestionID: revision.ID, Status: domain.StatusRevisionRequired, QuestionVersion: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := server.ensureQuestionEditable(request, revision); err != nil {
-		t.Fatalf("退回修改中的题目应可编辑: %v", err)
+		t.Fatalf("出题人本人应可编辑退回修改中的题目: %v", err)
+	}
+	// 非出题人不可编辑
+	if err := server.ensureQuestionEditable(otherRequest, revision); !errors.Is(err, ErrNotQuestionCreator) {
+		t.Fatalf("非出题人不应可编辑退回题目: %v", err)
+	}
+
+	// 历史题无生成者快照：回退到个人题库归属
+	legacy := mkQuestion("q-legacy", domain.StatusAIReviewed)
+	legacy.CreatedBy = ""
+	legacy.OwnerID = "user-expert"
+	save(legacy)
+	if err := reviewStore.SaveTask(ctx, domain.ReviewTask{ID: "t-legacy", QuestionID: legacy.ID, Status: domain.StatusRevisionRequired, QuestionVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	ownerRequest := httptest.NewRequest("PUT", "/api/questions/q-legacy", nil).
+		WithContext(context.WithValue(context.Background(), auth.UsernameKey, "user-expert"))
+	if err := server.ensureQuestionEditable(ownerRequest, legacy); err != nil {
+		t.Fatalf("无生成者快照时应回退到个人题库归属: %v", err)
+	}
+	if err := server.ensureQuestionEditable(otherRequest, legacy); !errors.Is(err, ErrNotQuestionCreator) {
+		t.Fatalf("非归属人不应可编辑无快照题目: %v", err)
 	}
 
 	// 普通已检查（无任务）→ 不可编辑

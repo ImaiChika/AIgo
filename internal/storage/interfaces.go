@@ -190,6 +190,15 @@ type QuestionStore interface {
 	ListProfessions(ctx context.Context) ([]string, error)
 }
 
+// GenerationRunStore 持久化单题命题运行记录，供刷新恢复、阶段计时和请求幂等使用。
+// 运行记录只保存执行状态和题目 ID，不替代题目及 AI 检查任务表。
+type GenerationRunStore interface {
+	CreateGenerationRun(ctx context.Context, run domain.GenerationRun) (bool, error)
+	GetGenerationRun(ctx context.Context, id string) (*domain.GenerationRun, error)
+	CompleteGenerationRun(ctx context.Context, id string, questionIDs []string) error
+	FailGenerationRun(ctx context.Context, id, message string) error
+}
+
 // QuestionShareItem 是分享申请及其题目内容。题目中的 CreatedBy/OwnerID
 // 在 JSON 序列化时隐藏，OwnerName 仅供管理员审批页展示申请人，不进入题目对象。
 type QuestionShareItem struct {
@@ -206,6 +215,15 @@ type QuestionShareStore interface {
 	ListQuestionShares(ctx context.Context, status, ownerID string) ([]QuestionShareItem, error)
 	ReviewQuestionShare(ctx context.Context, id, reviewerID string, status domain.QuestionShareStatus, note string) (*domain.QuestionShareRequest, error)
 }
+
+// BulkQuestionShareStore previews a bounded snapshot, then submits those exact IDs.
+// Existing applications are skipped; the database rechecks ownership and publication.
+type BulkQuestionShareStore interface {
+	PreviewQuestionShares(ctx context.Context, filter QuestionFilter, limit int) ([]string, int, error)
+	CreateQuestionShares(ctx context.Context, ownerID string, questionIDs []string) ([]string, error)
+}
+
+var ErrQuestionShareNotOwner = errors.New("只能分享本人题库中的题目")
 
 var (
 	ErrQuestionShareNotFound        = errors.New("分享申请不存在")

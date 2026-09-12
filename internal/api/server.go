@@ -23,22 +23,23 @@ import (
 
 // Server HTTP API 服务，持有所有业务服务的引用，负责路由注册和依赖管理。
 type Server struct {
-	pipe              *pipeline.Pipeline            // 流程编排（出题、评估、存储）
-	kpSvc             *knowledge.Service            // 知识点服务
-	reviewSvc         *review.Service               // 审核服务
-	auditSvc          *audit.Service                // 审计日志服务
-	questionStore     storage.QuestionStore         // 题目存储
-	shareStore        storage.QuestionShareStore    // 个人题目分享申请存储
-	authSvc           *auth.Service                 // 认证服务
-	batchSvc          batch.Executor                // 可替换的批量推理执行器
-	aiCheckSvc        *aicheck.Service              // AI 检查服务
-	bankSvc           *bank.Service                 // 题库服务
-	aiProviderStore   storage.AIProviderConfigStore // 系统级 AI 服务配置
-	corsOrigins       []string                      // 允许的跨域来源白名单（空=禁止跨域）
-	registerEnabled   bool                          // 是否开放用户自助注册
-	trustProxyHeaders bool                          // 是否信任反向代理写入的客户端 IP 头
-	readinessChecker  storage.ReadinessChecker
-	readinessTimeout  time.Duration
+	pipe               *pipeline.Pipeline            // 流程编排（出题、评估、存储）
+	kpSvc              *knowledge.Service            // 知识点服务
+	reviewSvc          *review.Service               // 审核服务
+	auditSvc           *audit.Service                // 审计日志服务
+	questionStore      storage.QuestionStore         // 题目存储
+	generationRunStore storage.GenerationRunStore    // 单题命题运行记录（刷新恢复与幂等）
+	shareStore         storage.QuestionShareStore    // 个人题目分享申请存储
+	authSvc            *auth.Service                 // 认证服务
+	batchSvc           batch.Executor                // 可替换的批量推理执行器
+	aiCheckSvc         *aicheck.Service              // AI 检查服务
+	bankSvc            *bank.Service                 // 题库服务
+	aiProviderStore    storage.AIProviderConfigStore // 系统级 AI 服务配置
+	corsOrigins        []string                      // 允许的跨域来源白名单（空=禁止跨域）
+	registerEnabled    bool                          // 是否开放用户自助注册
+	trustProxyHeaders  bool                          // 是否信任反向代理写入的客户端 IP 头
+	readinessChecker   storage.ReadinessChecker
+	readinessTimeout   time.Duration
 }
 
 // NewServer 创建 API 服务实例，注入所有依赖。
@@ -58,24 +59,26 @@ func NewServer(
 ) *Server {
 	readinessChecker, _ := questionStore.(storage.ReadinessChecker)
 	shareStore, _ := questionStore.(storage.QuestionShareStore)
+	generationRunStore, _ := questionStore.(storage.GenerationRunStore)
 	aiProviderStore, _ := questionStore.(storage.AIProviderConfigStore)
 	return &Server{
-		pipe:              pipe,
-		kpSvc:             kpSvc,
-		reviewSvc:         reviewSvc,
-		auditSvc:          auditSvc,
-		questionStore:     questionStore,
-		shareStore:        shareStore,
-		authSvc:           authSvc,
-		batchSvc:          batchSvc,
-		aiCheckSvc:        aiCheckSvc,
-		bankSvc:           bankSvc,
-		aiProviderStore:   aiProviderStore,
-		corsOrigins:       corsOrigins,
-		registerEnabled:   registerEnabled,
-		trustProxyHeaders: trustProxyHeaders,
-		readinessChecker:  readinessChecker,
-		readinessTimeout:  2 * time.Second,
+		pipe:               pipe,
+		kpSvc:              kpSvc,
+		reviewSvc:          reviewSvc,
+		auditSvc:           auditSvc,
+		questionStore:      questionStore,
+		generationRunStore: generationRunStore,
+		shareStore:         shareStore,
+		authSvc:            authSvc,
+		batchSvc:           batchSvc,
+		aiCheckSvc:         aiCheckSvc,
+		bankSvc:            bankSvc,
+		aiProviderStore:    aiProviderStore,
+		corsOrigins:        corsOrigins,
+		registerEnabled:    registerEnabled,
+		trustProxyHeaders:  trustProxyHeaders,
+		readinessChecker:   readinessChecker,
+		readinessTimeout:   2 * time.Second,
 	}
 }
 
@@ -139,6 +142,7 @@ func (s *Server) Handler() http.Handler {
 
 	// === 题目 CRUD（题目唯一来源是 AI 生成；无手动新建） ===
 	mux.HandleFunc("POST /api/questions/generate", s.requireAuth(domain.PermQuestionGenerate, s.handleGenerate))
+	mux.HandleFunc("GET /api/generation-runs/{id}", s.requireAuth(domain.PermQuestionGenerate, s.handleGetGenerationRun))
 	mux.HandleFunc("GET /api/questions", s.requireAuth("", s.handleListQuestions))
 	mux.HandleFunc("GET /api/questions/search", s.requireAuth("", s.handleSearchQuestions))
 	mux.HandleFunc("GET /api/questions/{id}/versions", s.requireAuth("", s.handleListQuestionVersions))
@@ -155,6 +159,8 @@ func (s *Server) Handler() http.Handler {
 
 	// 个人题目分享至全局题库：申请人只能看自己的申请，管理员可看待审批队列并一次性审批。
 	mux.HandleFunc("GET /api/question-shares", s.requireAuthAny([]string{domain.PermQuestionShare, domain.PermQuestionShareReview}, s.handleListQuestionShares))
+	mux.HandleFunc("POST /api/question-shares/preview", s.requireAuth(domain.PermQuestionShare, s.handlePreviewQuestionShares))
+	mux.HandleFunc("POST /api/question-shares/batch", s.requireAuth(domain.PermQuestionShare, s.handleCreateQuestionShares))
 	mux.HandleFunc("POST /api/question-shares/{id}/review", s.requireAuth(domain.PermQuestionShareReview, s.handleReviewQuestionShare))
 
 	// === 元数据（登录即可） ===

@@ -4,21 +4,24 @@ package aicheck
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"aigo/internal/domain"
 )
 
 // CheckProgress 单题的检查进度快照。
 type CheckProgress struct {
-	QuestionID     string `json:"question_id"`
-	QuestionStatus string `json:"question_status"`
-	QuestionVer    int    `json:"question_version"`
-	TaskStatus     string `json:"task_status"` // "" = 从未入队
-	Attempts       int    `json:"attempts"`
-	MaxAttempts    int    `json:"max_attempts"`
-	LastError      string `json:"last_error,omitempty"`
-	Verdict        string `json:"verdict,omitempty"` // 最新检查结论 pass / issues_found / reject
-	ResultStale    bool   `json:"result_stale"`      // 题目版本新于检查结果版本
+	QuestionID       string     `json:"question_id"`
+	QuestionStatus   string     `json:"question_status"`
+	QuestionVer      int        `json:"question_version"`
+	TaskStatus       string     `json:"task_status"` // "" = 从未入队
+	Attempts         int        `json:"attempts"`
+	MaxAttempts      int        `json:"max_attempts"`
+	LastError        string     `json:"last_error,omitempty"`
+	Verdict          string     `json:"verdict,omitempty"` // 最新检查结论 pass / issues_found / reject
+	ResultStale      bool       `json:"result_stale"`      // 题目版本新于检查结果版本
+	CheckStartedAt   *time.Time `json:"check_started_at,omitempty"`
+	CheckCompletedAt *time.Time `json:"check_completed_at,omitempty"`
 	// Discarded=true 表示题目首次检查未通过、已自动淘汰删除；原因见 Verdict/Issues/Suggestion/StemSummary
 	Discarded   bool                 `json:"discarded,omitempty"`
 	StemSummary string               `json:"stem_summary,omitempty"`
@@ -76,6 +79,12 @@ func (s *Service) ProgressByQuestionIDs(ctx context.Context, questionIDs []strin
 			item.Attempts = task.Attempts
 			item.MaxAttempts = task.MaxAttempts
 			item.LastError = task.LastError
+			startedAt := task.CreatedAt
+			item.CheckStartedAt = &startedAt
+			if task.Status == domain.AICheckTaskSucceeded || task.Status == domain.AICheckTaskExhausted {
+				completedAt := task.UpdatedAt
+				item.CheckCompletedAt = &completedAt
+			}
 		}
 		if r, ok := results[id]; ok {
 			item.Verdict = r.Verdict
@@ -87,6 +96,8 @@ func (s *Service) ProgressByQuestionIDs(ctx context.Context, questionIDs []strin
 			item.StemSummary = discard.StemSummary
 			item.Issues = discard.Issues
 			item.Suggestion = discard.Suggestion
+			completedAt := discard.CreatedAt
+			item.CheckCompletedAt = &completedAt
 		}
 		items = append(items, item)
 

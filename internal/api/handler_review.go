@@ -375,6 +375,15 @@ func (s *Server) handleReviewResults(w http.ResponseWriter, r *http.Request) {
 		filter.IncludeLegacyOwner = requestedScope == ""
 	}
 	visible := s.visibleTiers(r)
+	// 显式个人范围与个人题库页面保持一致：question:view 可读本人三层题库。
+	// 旧客户端不传 scope 时仍保留原有分层与历史题权限边界。
+	if requestedScope == "personal" {
+		if !s.hasPermission(r, domain.PermQuestionView) {
+			writeError(w, http.StatusForbidden, "无权查看个人题库审核记录")
+			return
+		}
+		visible = []domain.QuestionTier{domain.TierFormal, domain.TierWorking, domain.TierEliminated}
+	}
 	if len(visible) == 0 {
 		writeJSON(w, 200, map[string]any{
 			"items": []review.ReviewResultItem{}, "total": 0, "page": 1, "page_size": 50,
@@ -388,6 +397,9 @@ func (s *Server) handleReviewResults(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	filter.BankScope, filter.ScopeRestricted = s.questionBankScope(r, domain.TierViewPerm(visible[0]))
+	if requestedScope == "personal" {
+		filter.BankScope, filter.ScopeRestricted = nil, false
+	}
 	statsFilter := storage.QuestionFilter{
 		Tiers: append([]string(nil), filter.Tiers...), GlobalStatuses: append([]string(nil), filter.GlobalStatuses...),
 		IncludeLegacyGlobal: filter.IncludeLegacyGlobal, BankScope: append([]string(nil), filter.BankScope...),

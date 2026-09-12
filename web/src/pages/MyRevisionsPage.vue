@@ -10,6 +10,8 @@ const selected = ref(null); // 当前编辑的条目
 const editForm = ref({ clinical_stem: "", options: [], answer: "", explanation: "", change_reason: "" });
 const saving = ref(false);
 const statusFilter = ref(""); // ""=全部 / pending=待修改 / done=已提交修改
+// 保存被送审格式校验拒绝时的明确弹窗：内容较长，不能用 3 秒 toast 一闪而过
+const errorDialog = ref("");
 
 function showToast(msg) {
   toast.value = msg;
@@ -82,7 +84,8 @@ async function submitRevision() {
       selected.value = found;
     }
   } catch (e) {
-    showToast("提交修改失败: " + e.message);
+    // 校验失败信息需要出题人仔细对照修改，弹窗展示而不是自动消失的 toast
+    errorDialog.value = e.message || "提交修改失败，请稍后重试";
   } finally {
     saving.value = false;
   }
@@ -195,10 +198,70 @@ onMounted(load);
     </section>
   </div>
 
+  <!-- 送审格式校验失败弹窗：逐条对照修改后才能提交 -->
+  <div v-if="errorDialog" class="error-overlay" role="alertdialog" aria-modal="true" aria-labelledby="revision-error-title">
+    <div class="error-modal">
+      <h3 id="revision-error-title">保存失败，未通过送审格式校验</h3>
+      <p class="error-message">{{ errorDialog }}</p>
+      <p class="error-hint">请按上方意见和该提示修改题目内容后重新提交；修改完成前管理员无法重新送审。</p>
+      <div class="error-actions">
+        <button class="primary-button" type="button" @click="errorDialog = ''">知道了，去修改</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" :class="{ show: toast }" role="status" aria-live="polite">{{ toast }}</div>
 </template>
 
 <style scoped>
+.error-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.error-modal {
+  background: #fff;
+  border-radius: 12px;
+  padding: 22px 24px;
+  width: min(520px, calc(100vw - 48px));
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.25);
+}
+
+.error-modal h3 {
+  margin: 0 0 10px;
+  font-size: 16px;
+  color: #c54858;
+}
+
+.error-message {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  background: #fff5f5;
+  border: 1px solid #f3c8cd;
+  border-radius: 8px;
+  color: #9b2c3c;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.error-hint {
+  margin: 0 0 14px;
+  color: #6e7b8f;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.error-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .revisions-layout {
   display: grid;
   grid-template-columns: 360px minmax(0, 1fr);

@@ -57,7 +57,8 @@ func TestBuildPrompt(t *testing.T) {
 func TestSystemPromptContainsExpertA2Rules(t *testing.T) {
 	prompt := getSystemPrompt(false)
 	for _, want := range []string{
-		"正文禁止出现任何“字段名加冒号”的分段标签",
+		"可以保留“查体：”“专科情况：”“辅助检查：”“实验室检查：”",
+		"禁止出现“一般情况：”“主诉：”“现病史：”",
 		"不使用“哪个”“什么”",
 		"句末不得使用“？”或“?”",
 		"逐项解释其余四个干扰项",

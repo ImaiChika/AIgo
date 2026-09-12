@@ -162,6 +162,7 @@ func (s *Store) CheckReadiness(ctx context.Context) error {
 			CROSS JOIN ai_check_tasks act
 			CROSS JOIN question_share_requests qsr
 			CROSS JOIN auth_login_limits allm
+			CROSS JOIN generation_runs gr
 		LIMIT 0
 	`)
 	if err != nil {
@@ -249,6 +250,71 @@ func (s *Store) ListProfessions(ctx context.Context) ([]string, error) {
 		result = append(result, p)
 	}
 	return result, rows.Err()
+}
+
+// ===== 单题命题运行记录 =====
+
+const generationRunColumns = `id, owner_id, status, requested_count, question_ids, error, started_at, completed_at, updated_at`
+
+func scanGenerationRun(scanner interface{ Scan(dest ...any) error }) (*domain.GenerationRun, error) {
+	var run domain.GenerationRun
+	var questionIDs []string
+	var completedAt sql.NullTime
+	if err := scanner.Scan(&run.ID, &run.OwnerID, &run.Status, &run.RequestedCount,
+		pq.Array(&questionIDs), &run.Error, &run.StartedAt, &completedAt, &run.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	run.QuestionIDs = questionIDs
+	if completedAt.Valid {
+		run.CompletedAt = &completedAt.Time
+	}
+	return &run, nil
+}
+
+func (s *Store) CreateGenerationRun(ctx context.Context, run domain.GenerationRun) (bool, error) {
+	if run.StartedAt.IsZero() {
+		run.StartedAt = time.Now()
+	}
+	// question_ids 是 NOT NULL 列：nil 切片会被 pq 编码为 NULL 并触发约束错误，统一写入空数组。
+	questionIDs := run.QuestionIDs
+	if questionIDs == nil {
+		questionIDs = []string{}
+	}
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO generation_runs (id, owner_id, status, requested_count, question_ids, error, started_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,'',$6,$6)
+		ON CONFLICT (id) DO NOTHING
+	`, run.ID, run.OwnerID, run.Status, run.RequestedCount, pq.Array(questionIDs), run.StartedAt)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	return affected > 0, err
+}
+
+func (s *Store) GetGenerationRun(ctx context.Context, id string) (*domain.GenerationRun, error) {
+	return scanGenerationRun(s.db.QueryRowContext(ctx, `SELECT `+generationRunColumns+` FROM generation_runs WHERE id=$1`, id))
+}
+
+func (s *Store) CompleteGenerationRun(ctx context.Context, id string, questionIDs []string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE generation_runs
+		SET status='succeeded', question_ids=$2, error='', completed_at=NOW(), updated_at=NOW()
+		WHERE id=$1 AND status='running'
+	`, id, pq.Array(questionIDs))
+	return err
+}
+
+func (s *Store) FailGenerationRun(ctx context.Context, id, message string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE generation_runs
+		SET status='failed', error=$2, completed_at=NOW(), updated_at=NOW()
+		WHERE id=$1 AND status='running'
+	`, id, message)
+	return err
 }
 
 // ===== 题目 =====

@@ -22,11 +22,16 @@ type MemoryStore struct {
 	questions            []domain.A2Question
 	index                map[string]int
 	versions             map[string][]domain.QuestionVersion
+	generationRuns       map[string]domain.GenerationRun
 	failNextSaveQuestion error
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{index: make(map[string]int), versions: make(map[string][]domain.QuestionVersion)}
+	return &MemoryStore{
+		index:          make(map[string]int),
+		versions:       make(map[string][]domain.QuestionVersion),
+		generationRuns: make(map[string]domain.GenerationRun),
+	}
 }
 
 func (s *MemoryStore) SaveQuestion(ctx context.Context, q domain.A2Question) error {
@@ -393,6 +398,65 @@ func (s *MemoryStore) ListProfessions(_ context.Context) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func (s *MemoryStore) CreateGenerationRun(_ context.Context, run domain.GenerationRun) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.generationRuns[run.ID]; exists {
+		return false, nil
+	}
+	if run.StartedAt.IsZero() {
+		run.StartedAt = time.Now()
+	}
+	run.UpdatedAt = run.StartedAt
+	run.QuestionIDs = append([]string(nil), run.QuestionIDs...)
+	s.generationRuns[run.ID] = run
+	return true, nil
+}
+
+func (s *MemoryStore) GetGenerationRun(_ context.Context, id string) (*domain.GenerationRun, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, exists := s.generationRuns[id]
+	if !exists {
+		return nil, nil
+	}
+	run.QuestionIDs = append([]string(nil), run.QuestionIDs...)
+	return &run, nil
+}
+
+func (s *MemoryStore) CompleteGenerationRun(_ context.Context, id string, questionIDs []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, exists := s.generationRuns[id]
+	if !exists || run.Status != domain.GenerationRunRunning {
+		return nil
+	}
+	now := time.Now()
+	run.Status = domain.GenerationRunSucceeded
+	run.QuestionIDs = append([]string(nil), questionIDs...)
+	run.Error = ""
+	run.CompletedAt = &now
+	run.UpdatedAt = now
+	s.generationRuns[id] = run
+	return nil
+}
+
+func (s *MemoryStore) FailGenerationRun(_ context.Context, id, message string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, exists := s.generationRuns[id]
+	if !exists || run.Status != domain.GenerationRunRunning {
+		return nil
+	}
+	now := time.Now()
+	run.Status = domain.GenerationRunFailed
+	run.Error = message
+	run.CompletedAt = &now
+	run.UpdatedAt = now
+	s.generationRuns[id] = run
+	return nil
 }
 
 func (s *MemoryStore) GetQuestion(_ context.Context, id string) (*domain.A2Question, error) {

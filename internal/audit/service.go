@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"aigo/internal/domain"
@@ -52,7 +53,12 @@ func (s *Service) LogReview(ctx context.Context, questionID, actor, action, opin
 	if opinion != "" {
 		detail += fmt.Sprintf(", 意见: %s", opinion)
 	}
-	return s.Log(ctx, questionID, "review", actor, detail)
+	// 最终把关决断使用独立的 final_* 动作留痕，与轮内普通审核投票可按动作区分。
+	auditAction := "review"
+	if strings.HasPrefix(action, "final_") {
+		auditAction = action
+	}
+	return s.Log(ctx, questionID, auditAction, actor, detail)
 }
 
 // LogPublish 记录题目发布。

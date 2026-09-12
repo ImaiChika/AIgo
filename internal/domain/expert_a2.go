@@ -30,6 +30,10 @@ var allowedA2ExamPoints = map[string]struct{}{
 	"医学人文":      {},
 }
 
+// forbiddenStemMarkers 是需要从题干中清除的病史与提问引导词。
+// “查体：/专科情况：/辅助检查：/实验室检查：”等体格与检查标签允许保留。
+var forbiddenStemMarkers = []string{"一般情况：", "主诉：", "现病史：", "既往史：", "个人史：", "家族史：", "生命征：", "生命体征：", "提问："}
+
 // NormalizeGeneratedA2 修正不会改变医学语义的格式问题。
 // 该方法仅用于 AI 新生成题，不改变历史题兼容校验。
 func (q *A2Question) NormalizeGeneratedA2() {
@@ -37,7 +41,7 @@ func (q *A2Question) NormalizeGeneratedA2() {
 		return
 	}
 	stem := strings.TrimSpace(q.ClinicalStem)
-	for _, marker := range []string{"一般情况：", "主诉：", "现病史：", "既往史：", "查体：", "辅助检查：", "实验室检查：", "专科情况：", "提问："} {
+	for _, marker := range forbiddenStemMarkers {
 		stem = strings.ReplaceAll(stem, marker, "")
 	}
 	stem = strings.TrimRight(stem, "？? \t\r\n")
@@ -80,7 +84,7 @@ func (q *A2Question) ValidateA2ContentForReview() error {
 	if !a2StemStartPattern.MatchString(q.ClinicalStem) {
 		return invalidQuestionError("题干必须以“男/女，年龄”开头")
 	}
-	for _, marker := range []string{"一般情况：", "主诉：", "现病史：", "既往史：", "查体：", "辅助检查：", "实验室检查：", "专科情况：", "提问："} {
+	for _, marker := range forbiddenStemMarkers {
 		if strings.Contains(q.ClinicalStem, marker) {
 			return invalidQuestionError("题干不得出现格式引导词“" + marker + "”")
 		}

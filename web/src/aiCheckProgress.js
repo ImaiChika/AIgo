@@ -53,23 +53,25 @@ export function useAICheckProgress({ intervalMs = 5000, timeoutMs = 10 * 60 * 10
     }
   }
 
-  function start(ids, onFinished) {
+  function start(ids, onFinished, { preserve = false } = {}) {
     stop();
     questionIds = (ids || []).filter(Boolean);
     finishedCallback = onFinished || null;
     if (!questionIds.length) return;
     startedAt = Date.now();
-    progress.value = {
-      total: questionIds.length,
-      pending: questionIds.length,
-      running: 0,
-      passed: 0,
-      issues: 0,
-      exhausted: 0,
-      noTask: 0,
-      checking: questionIds.length,
-      stalled: false,
-    };
+    if (!preserve || !progress.value) {
+      progress.value = {
+        total: questionIds.length,
+        pending: questionIds.length,
+        running: 0,
+        passed: 0,
+        issues: 0,
+        exhausted: 0,
+        noTask: 0,
+        checking: questionIds.length,
+        stalled: false,
+      };
+    }
     tick();
     timer = setInterval(tick, intervalMs);
   }

@@ -1,10 +1,14 @@
 package generator
 
 import (
+	"regexp"
 	"strings"
 
 	"aigo/internal/domain"
 )
+
+// clinicalSystemPrefix 匹配大纲系统名前的序号，如“三、”“十一、”。
+var clinicalSystemPrefix = regexp.MustCompile(`^[一二三四五六七八九十]+[、.．]\s*`)
 
 var clinicalProfessionBySystem = map[string]string{
 	"一、呼吸系统":          "呼吸",
@@ -32,7 +36,8 @@ func QuestionMetadataForKnowledgePoint(kp domain.KnowledgePoint, requestedSubjec
 	if category == "基础医学" {
 		return subject, category
 	}
-	system = subject
+	// 临床题系统按考试大纲名称填写，去掉“一、二、…”序号前缀。
+	system = clinicalSystemPrefix.ReplaceAllString(subject, "")
 	profession = clinicalProfessionBySystem[subject]
 	if profession == "" {
 		profession = subject

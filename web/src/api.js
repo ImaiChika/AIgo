@@ -169,10 +169,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify(params),
     }),
+  getGenerationRun: (id) => request(`/generation-runs/${encodeURIComponent(id)}`),
 
   // 个人题目分享至全局题库（每题只能申请一次）
   createQuestionShare: (questionId) =>
     request(`/questions/${questionId}/share`, { method: "POST" }),
+  previewQuestionShares: (filters) => request('/question-shares/preview', { method: 'POST', body: JSON.stringify(filters) }),
+  createQuestionShares: (questionIds) => request('/question-shares/batch', { method: 'POST', body: JSON.stringify({ question_ids: questionIds }) }),
   listQuestionShares: (scope = "mine") => request(`/question-shares?scope=${encodeURIComponent(scope)}`),
   reviewQuestionShare: (id, status, note = "") =>
     request(`/question-shares/${id}/review`, {

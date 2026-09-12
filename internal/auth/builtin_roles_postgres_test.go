@@ -13,7 +13,7 @@ import (
 // InitBuiltinRoles 对已存在角色的自愈行为：
 //   - super_admin 始终恢复完整权限；
 //   - admin 自动补齐业务权限并移除角色模板管理权限；
-//   - 医学专家恢复个人命题/题库/退修能力，但不默认获得批量推理、汇总统计或管理权限；
+//   - 医学专家恢复个人命题/题库/退修/审核记录能力，但不默认获得批量推理、汇总统计或管理权限；
 //   - 其他内置角色保留管理员的有效自定义修改。
 func TestInitBuiltinRolesHealsAdminRole(t *testing.T) {
 	service, cleanup := loginLimitTestService(t)
@@ -70,12 +70,13 @@ func TestInitBuiltinRolesHealsAdminRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(expertAfter.Permissions) != 5 {
-		t.Fatalf("expert 角色应固定为 5 个个人工作/审核权限: %v", expertAfter.Permissions)
+	if len(expertAfter.Permissions) != 6 {
+		t.Fatalf("expert 角色应固定为 6 个个人工作/审核权限: %v", expertAfter.Permissions)
 	}
 	for _, permission := range []string{
 		domain.PermQuestionView, domain.PermQuestionEdit,
 		domain.PermQuestionGenerate, domain.PermQuestionShare, domain.PermReviewDo,
+		domain.PermReviewResults,
 	} {
 		if !slices.Contains(expertAfter.Permissions, permission) {
 			t.Fatalf("expert 角色自愈后缺少个人工作权限 %s: %v", permission, expertAfter.Permissions)
@@ -84,7 +85,7 @@ func TestInitBuiltinRolesHealsAdminRole(t *testing.T) {
 	if slices.Contains(expertAfter.Permissions, domain.PermBatchRun) {
 		t.Fatalf("expert 角色默认不应包含批量推理权限: %v", expertAfter.Permissions)
 	}
-	for _, forbidden := range []string{domain.PermStatsView, domain.PermKnowledgeMng, domain.PermQuestionViewGlobal, domain.PermReviewResults} {
+	for _, forbidden := range []string{domain.PermStatsView, domain.PermKnowledgeMng, domain.PermQuestionViewGlobal} {
 		if slices.Contains(expertAfter.Permissions, forbidden) {
 			t.Fatalf("expert 角色自愈后仍含越界权限 %s: %v", forbidden, expertAfter.Permissions)
 		}

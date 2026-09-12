@@ -12,6 +12,7 @@ const total = ref(0);
 const hasMore = ref(false);
 let resultSearchTicket = 0;
 const loading = ref(false);
+const reviewScope = ref(hasPerm("question:view") ? "personal" : "global");
 
 const filterStatus = ref("");
 const filterBank = ref("");
@@ -58,7 +59,7 @@ async function loadResults(resetPage = true) {
       q: searchQuery.value,
       page: page.value,
       page_size: pageSize,
-      scope: hasPerm("question:view_global") ? "global" : "personal",
+      scope: reviewScope.value,
     });
     if (ticket !== resultSearchTicket) return;
     items.value = page.value === 1 ? (data.items || []) : items.value.concat(data.items || []);
@@ -66,6 +67,7 @@ async function loadResults(resetPage = true) {
     hasMore.value = !!data.has_more;
     stats.value = data.stats || null;
   } catch (e) {
+    if (ticket !== resultSearchTicket) return;
     showToast("加载失败: " + e.message);
   } finally {
     if (ticket === resultSearchTicket) loading.value = false;
@@ -80,6 +82,15 @@ function loadMore() {
 function doSearch() {
   expandedId.value = "";
   loadResults();
+}
+
+function switchScope(scope) {
+  if (scope === reviewScope.value) return;
+  reviewScope.value = scope;
+  items.value = [];
+  stats.value = null;
+  total.value = 0;
+  clearFilters();
 }
 
 function clearFilters() {
@@ -171,11 +182,15 @@ onMounted(() => {
 
 <template>
   <div class="results-layout">
+    <div v-if="hasPerm('question:view_global')" class="review-scope" aria-label="审核记录范围">
+      <button type="button" :class="{ active: reviewScope === 'personal' }" @click="switchScope('personal')">我的题库</button>
+      <button type="button" :class="{ active: reviewScope === 'global' }" @click="switchScope('global')">全局题库</button>
+    </div>
     <!-- 统计卡片 -->
     <section class="panel" v-if="stats">
       <div class="section-heading">
         <span class="dot blue"></span>
-        <h2>审核结果统计</h2>
+        <h2>{{ reviewScope === 'personal' ? '我的题库' : '全局题库' }} · 审核结果统计</h2>
         <small>共 {{ stats.total }} 道题</small>
       </div>
       <div class="stats-grid">
@@ -314,7 +329,7 @@ onMounted(() => {
           </div>
         </div>
 
-        <div v-if="!items.length && !loading" class="empty">暂无匹配的题目</div>
+        <div v-if="!items.length && !loading" class="empty">{{ reviewScope === 'global' ? '全局题库暂无匹配记录；本人生成的题目请切换至「我的题库」查看。' : '我的题库暂无匹配的题目' }}</div>
         <button v-else-if="hasMore" class="load-more-btn" type="button" @click="loadMore">
           加载更多（已显示 {{ items.length }} / {{ total }}）
         </button>
@@ -326,6 +341,9 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.review-scope { display: flex; gap: 4px; }
+.review-scope button { padding: 8px 16px; border: 1px solid #dde6ef; border-radius: 6px; color: #607086; background: #fff; }
+.review-scope button.active { color: #0571dc; background: #edf6ff; border-color: #97cdfd; }
 .results-layout {
   display: grid;
   gap: 16px;

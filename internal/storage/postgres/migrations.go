@@ -19,7 +19,7 @@ var baselineSchemaSQL string
 
 const (
 	// LatestSchemaVersion 是当前程序能够使用的最新数据库版本。
-	LatestSchemaVersion int64 = 22
+	LatestSchemaVersion int64 = 23
 	// migrationLockKey 在同一 PostgreSQL 数据库内串行化所有 AIgo Schema 迁移。
 	migrationLockKey int64 = 0x4149474f5f4d4947 // "AIGO_MIG"
 )
@@ -289,6 +289,20 @@ func configuredMigrations(schemaSQL string) []migration {
 			`UPDATE roles
 			 SET permissions = array_remove(permissions, 'batch:run')
 			 WHERE is_builtin = TRUE AND id IN ('admin', 'expert', 'teacher')`,
+		}},
+		{Version: 23, Name: "generation_run_recovery", Statements: []string{
+			`CREATE TABLE IF NOT EXISTS generation_runs (
+				id TEXT PRIMARY KEY,
+				owner_id TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','succeeded','failed')),
+				requested_count INT NOT NULL DEFAULT 1,
+				question_ids TEXT[] NOT NULL DEFAULT '{}',
+				error TEXT NOT NULL DEFAULT '',
+				started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				completed_at TIMESTAMPTZ,
+				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_generation_runs_owner_started ON generation_runs(owner_id, started_at DESC)`,
 		}},
 	}
 }

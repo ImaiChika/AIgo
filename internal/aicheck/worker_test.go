@@ -157,6 +157,9 @@ func TestCheckAsyncAdvancesDraftStatus(t *testing.T) {
 	if items[0].TaskStatus != domain.AICheckTaskSucceeded || items[0].Verdict != "pass" {
 		t.Fatalf("进度快照不正确: %+v", items[0])
 	}
+	if items[0].CheckStartedAt == nil || items[0].CheckCompletedAt == nil || items[0].CheckCompletedAt.Before(*items[0].CheckStartedAt) {
+		t.Fatalf("进度快照应包含可恢复的检查计时: %+v", items[0])
+	}
 	if progressCounts["passed"] != 1 {
 		t.Fatalf("进度计数应包含 1 个通过，实际 %v", progressCounts)
 	}

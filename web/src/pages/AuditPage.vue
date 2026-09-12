@@ -67,14 +67,22 @@ function actionText(action) {
     update: "修改",
     delete: "删除",
     review: "审核",
+    final_approved: "决断通过",
+    final_rejected: "决断驳回",
+    final_revision_required: "决断退改",
     publish: "发布",
     import: "导入",
     export: "导出",
     submit: "提交审核",
     resubmit: "重新提交",
+    submit_bank: "题库批量送审",
+    question_share_request: "申请分享",
+    question_share_approve: "分享通过",
+    question_share_reject: "分享驳回",
     flow_create: "建流程",
     flow_update: "改流程",
     flow_delete: "删流程",
+    flow_revoke: "撤销送审",
     expert_create: "建专家",
     expert_update: "改专家",
     expert_delete: "删专家",
@@ -87,12 +95,13 @@ function actionText(action) {
 }
 
 function actionClass(action) {
-  if (action === "create" || action === "import" || action === "export" || action === "expert_create" || action === "user_create") return "action-create";
+  if (action === "create" || action === "import" || action === "export" || action === "expert_create" || action === "user_create" || action === "user_register") return "action-create";
   if (action === "update" || action === "flow_update" || action === "expert_update") return "action-update";
-  if (action === "delete" || action === "flow_delete" || action === "expert_delete" || action === "auth_login_failed" || action === "auth_rate_limited") return "action-delete";
-  if (action === "review" || action === "submit" || action === "resubmit") return "action-review";
-  if (action === "publish") return "action-publish";
-  if (action === "flow_create") return "action-flow";
+  if (action === "delete" || action === "flow_delete" || action === "expert_delete" || action === "auth_login_failed" || action === "auth_rate_limited" || action === "final_rejected" || action === "question_share_reject") return "action-delete";
+  if (action === "review" || action === "submit" || action === "resubmit" || action === "submit_bank" || action === "question_share_request") return "action-review";
+  if (action === "publish" || action === "final_approved" || action === "question_share_approve") return "action-publish";
+  if (action === "flow_create" || action === "flow_revoke") return "action-flow";
+  if (action === "final_revision_required") return "action-review";
   return "";
 }
 

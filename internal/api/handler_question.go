@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +22,7 @@ import (
 // 生成的题目自动保存到数据库，状态为 ai_draft 草稿。
 func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		RunID            string `json:"run_id"` // 客户端生成的幂等运行 ID，用于刷新恢复
 		KnowledgePointID string `json:"knowledge_point_id"`
 		VersionID        string `json:"version_id"`
 		Subject          string `json:"subject"`      // 专业科目
@@ -46,6 +49,13 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Topic == "" {
 		req.Topic = "常见症状鉴别诊断"
+	}
+	if req.RunID == "" {
+		req.RunID = fmt.Sprintf("gen-%d", time.Now().UnixNano())
+	}
+	if !validGenerationRunID(req.RunID) {
+		writeError(w, 400, "命题运行 ID 格式错误")
+		return
 	}
 	userID := auth.GetUserID(r.Context())
 	if req.BankID == "" {
@@ -102,15 +112,47 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		Count:           req.Count,
 	}
 
+	startedAt := time.Now()
+	if s.generationRunStore != nil {
+		created, err := s.generationRunStore.CreateGenerationRun(r.Context(), domain.GenerationRun{
+			ID: req.RunID, OwnerID: userID, Status: domain.GenerationRunRunning,
+			RequestedCount: req.Count, StartedAt: startedAt,
+		})
+		if err != nil {
+			writeError(w, 500, "创建命题运行记录失败")
+			return
+		}
+		if !created {
+			existing, err := s.generationRunStore.GetGenerationRun(r.Context(), req.RunID)
+			if err != nil {
+				writeError(w, 500, "读取命题运行记录失败")
+				return
+			}
+			if existing == nil || existing.OwnerID != userID {
+				writeError(w, 404, "命题运行记录不存在")
+				return
+			}
+			s.respondGenerationRun(w, r.Context(), existing)
+			return
+		}
+	}
+
 	actor := auth.GetUsername(r.Context())
 	if actor == "" {
 		actor = "ai"
 	}
-	generationCtx := storage.WithQuestionChange(r.Context(), storage.QuestionChange{Actor: actor, OwnerID: userID, ChangeType: "ai_generate", ChangeNote: "AI生成题目草稿"})
+	// 浏览器刷新会取消原始 HTTP 请求，但已提交的命题任务应继续完成并可按 run_id 恢复。
+	workCtx, cancelWork := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Minute)
+	defer cancelWork()
+	generationCtx := storage.WithQuestionChange(workCtx, storage.QuestionChange{Actor: actor, OwnerID: userID, ChangeType: "ai_generate", ChangeNote: "AI生成题目草稿"})
 	// 调用 pipeline 生成题目（内部会调千问API + 解析JSON + 存入数据库，状态为 ai_draft 草稿）
 	questions, err := s.pipe.Generate(generationCtx, genReq)
 	if err != nil {
-		writeError(w, 500, "生成失败: "+err.Error())
+		message := "生成失败: " + err.Error()
+		if s.generationRunStore != nil {
+			_ = s.generationRunStore.FailGenerationRun(workCtx, req.RunID, message)
+		}
+		writeError(w, 500, message)
 		return
 	}
 
@@ -120,19 +162,93 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 			q.BankIDs = []string{req.BankID}
 		} else {
 			// 未指定题库：按题目专业自动归入匹配的题库（专业范围自动归纳）
-			if err := s.bankSvc.AssignBank(r.Context(), &q); err != nil {
+			if err := s.bankSvc.AssignBank(workCtx, &q); err != nil {
 				fmt.Printf("⚠ 自动归纳题库失败: %v\n", err)
 			}
 		}
 		if err := s.questionStore.SaveQuestion(generationCtx, q); err != nil {
 			fmt.Printf("⚠ 更新题目题库归属失败: %v\n", err)
 		}
-		s.auditSvc.LogCreate(r.Context(), q.ID, actor)
+		s.auditSvc.LogCreate(workCtx, q.ID, actor)
+	}
+	questionIDs := make([]string, 0, len(questions))
+	for _, q := range questions {
+		questionIDs = append(questionIDs, q.ID)
+	}
+	if s.generationRunStore != nil {
+		if err := s.generationRunStore.CompleteGenerationRun(workCtx, req.RunID, questionIDs); err != nil {
+			writeError(w, 500, "更新命题运行记录失败")
+			return
+		}
+		if run, err := s.generationRunStore.GetGenerationRun(workCtx, req.RunID); err == nil && run != nil {
+			s.respondGenerationRun(w, workCtx, run)
+			return
+		}
 	}
 
 	writeJSON(w, 200, map[string]any{
 		"questions": questions,
 		"count":     len(questions),
+		"run": domain.GenerationRun{
+			ID: req.RunID, Status: domain.GenerationRunSucceeded, RequestedCount: req.Count,
+			QuestionIDs: questionIDs, StartedAt: startedAt,
+		},
+	})
+}
+
+var generationRunIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
+
+func validGenerationRunID(id string) bool { return generationRunIDPattern.MatchString(id) }
+
+// handleGetGenerationRun 返回当前用户的一次命题执行状态及仍存活的题目。
+// 检查淘汰的题目已物理删除，其 ID 仍保留在 run.question_ids，并由检查进度接口返回淘汰原因。
+func (s *Server) handleGetGenerationRun(w http.ResponseWriter, r *http.Request) {
+	if s.generationRunStore == nil {
+		writeError(w, 503, "命题运行记录服务不可用")
+		return
+	}
+	id := r.PathValue("id")
+	if !validGenerationRunID(id) {
+		writeError(w, 400, "命题运行 ID 格式错误")
+		return
+	}
+	run, err := s.generationRunStore.GetGenerationRun(r.Context(), id)
+	if err != nil {
+		writeError(w, 500, "读取命题运行记录失败")
+		return
+	}
+	if run == nil || run.OwnerID != auth.GetUserID(r.Context()) {
+		writeError(w, 404, "命题运行记录不存在")
+		return
+	}
+	// 服务进程若在生成期间异常退出，不让工作台永久停留在“执行中”。
+	if run.Status == domain.GenerationRunRunning && time.Since(run.StartedAt) > 12*time.Minute {
+		_ = s.generationRunStore.FailGenerationRun(r.Context(), run.ID, "命题执行超时，请重新提交")
+		run, err = s.generationRunStore.GetGenerationRun(r.Context(), id)
+		if err != nil || run == nil {
+			writeError(w, 500, "更新命题运行状态失败")
+			return
+		}
+	}
+	s.respondGenerationRun(w, r.Context(), run)
+}
+
+func (s *Server) respondGenerationRun(w http.ResponseWriter, ctx context.Context, run *domain.GenerationRun) {
+	questions := make([]domain.A2Question, 0, len(run.QuestionIDs))
+	for _, id := range run.QuestionIDs {
+		question, err := s.questionStore.GetQuestion(ctx, id)
+		if err != nil {
+			writeError(w, 500, "读取命题结果失败")
+			return
+		}
+		if question != nil {
+			questions = append(questions, *question)
+		}
+	}
+	writeJSON(w, 200, map[string]any{
+		"run":       run,
+		"questions": questions,
+		"count":     len(run.QuestionIDs),
 	})
 }
 
@@ -180,6 +296,10 @@ func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if blockErr := s.ensureQuestionEditable(r, existing); blockErr != nil {
+		if errors.Is(blockErr, ErrNotQuestionCreator) {
+			writeError(w, http.StatusForbidden, blockErr.Error())
+			return
+		}
 		writeError(w, http.StatusConflict, blockErr.Error())
 		return
 	}
@@ -225,6 +345,13 @@ func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 保存即按送审格式校验：退回修改后的题目必须能直接重新送审，
+	// 避免出题人保存了不合格内容后，重提时才暴露"格式不合格"并把流程卡死。
+	if err := existing.ValidateForReview(); err != nil {
+		writeError(w, 400, "保存失败，题目未通过送审格式校验："+err.Error())
+		return
+	}
+
 	existing.Version++              // 版本号递增
 	existing.UpdatedAt = time.Now() // 更新时间
 
@@ -251,8 +378,13 @@ func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, existing)
 }
 
+// ErrNotQuestionCreator 退回修改窗口的编辑人不是题目出题人本人。
+// 属于权限类拒绝，API 层应映射为 403。
+var ErrNotQuestionCreator = errors.New("仅出题人本人可以修改退回的题目")
+
 // ensureQuestionEditable 校验题目是否处于可编辑窗口：
-// 仅限专家审核退回修改（需修改）的题目——题目 ai_reviewed 且审核任务标记为 revision_required。
+// 仅限专家审核退回修改（需修改）的题目——题目 ai_reviewed 且审核任务标记为 revision_required；
+// 且只允许出题人本人编辑（与「待我修改」页的数据范围一致，防止他人代改出题人责任内容）。
 func (s *Server) ensureQuestionEditable(r *http.Request, q *domain.A2Question) error {
 	if q.Status != domain.StatusAIReviewed {
 		switch q.Status {
@@ -272,6 +404,18 @@ func (s *Server) ensureQuestionEditable(r *http.Request, q *domain.A2Question) e
 	}
 	if task == nil || task.Status != domain.StatusRevisionRequired {
 		return errors.New("仅专家审核退回修改（需修改）的题目可以编辑")
+	}
+	// 出题人校验：优先比对生成时的用户名快照，历史题无快照时回退到个人题库归属。
+	caller := auth.GetUsername(r.Context())
+	if caller == "" {
+		caller = auth.GetUserID(r.Context())
+	}
+	isCreator := q.CreatedBy != "" && caller == q.CreatedBy
+	if !isCreator && q.CreatedBy == "" && q.OwnerID != "" {
+		isCreator = caller == q.OwnerID
+	}
+	if !isCreator {
+		return fmt.Errorf("%w（当前题目由 %s 生成，可在其「待我修改」页操作；管理员可用流程「撤销提交」退回该题）", ErrNotQuestionCreator, q.CreatedBy)
 	}
 	return nil
 }
@@ -298,6 +442,10 @@ func (s *Server) handleRestoreQuestionVersion(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if blockErr := s.ensureQuestionEditable(r, current); blockErr != nil {
+		if errors.Is(blockErr, ErrNotQuestionCreator) {
+			writeError(w, http.StatusForbidden, blockErr.Error())
+			return
+		}
 		writeError(w, http.StatusConflict, blockErr.Error())
 		return
 	}
@@ -333,6 +481,11 @@ func (s *Server) handleRestoreQuestionVersion(w http.ResponseWriter, r *http.Req
 	restored.UpdatedAt = time.Now()
 	if err := restored.Validate(); err != nil {
 		writeError(w, 400, "历史版本内容无法恢复: "+err.Error())
+		return
+	}
+	// 恢复历史版本同样必须通过送审格式校验，保证重提不被格式问题卡死。
+	if err := restored.ValidateForReview(); err != nil {
+		writeError(w, 400, "历史版本未通过送审格式校验，无法恢复: "+err.Error())
 		return
 	}
 	actor := auth.GetUsername(r.Context())

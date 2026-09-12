@@ -1,4 +1,5 @@
 import { ref, computed } from "vue";
+import { clearGenerationWorkspace } from "./generationWorkspaceState.js";
 
 const token = ref(localStorage.getItem("aigo_token") || "");
 const user = ref(JSON.parse(localStorage.getItem("aigo_user") || "null"));
@@ -40,6 +41,11 @@ export function hasPerm(p) {
 }
 
 export function setAuth(tokenStr, userObj) {
+  // 切换账号时清除前一账号的命题工作台；修改昵称沿用同一 token，不触发清理。
+  if (token.value && token.value !== tokenStr) {
+    clearGenerationWorkspace(user.value?.id);
+    clearGenerationWorkspace(userObj?.id);
+  }
   token.value = tokenStr;
   user.value = userObj;
   localStorage.setItem("aigo_token", tokenStr);
@@ -47,6 +53,7 @@ export function setAuth(tokenStr, userObj) {
 }
 
 export function clearAuth() {
+  clearGenerationWorkspace(user.value?.id);
   token.value = "";
   user.value = null;
   localStorage.removeItem("aigo_token");

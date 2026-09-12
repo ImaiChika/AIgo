@@ -98,6 +98,27 @@ type GenerationRequest struct {
 	Count           int              `json:"count"`            // 生成数量
 }
 
+// 单题命题运行状态。运行记录用于刷新恢复与幂等重试，不改变题目生命周期。
+const (
+	GenerationRunRunning   = "running"
+	GenerationRunSucceeded = "succeeded"
+	GenerationRunFailed    = "failed"
+)
+
+// GenerationRun 是一次单题命题请求的持久化执行记录。
+// 题目与 AI 检查仍分别落在 questions / ai_check_tasks；此处只保存执行指针和时间。
+type GenerationRun struct {
+	ID             string     `json:"id"`
+	OwnerID        string     `json:"-"`
+	Status         string     `json:"status"`
+	RequestedCount int        `json:"requested_count"`
+	QuestionIDs    []string   `json:"question_ids"`
+	Error          string     `json:"error,omitempty"`
+	StartedAt      time.Time  `json:"started_at"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
 // EvaluationReport 题目质量评估报告。
 type EvaluationReport struct {
 	QuestionID      string    `json:"question_id"`      // 被评估的题目 ID

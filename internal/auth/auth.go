@@ -115,6 +115,8 @@ func builtinRoles() []domain.Role {
 				domain.PermQuestionGenerate,
 				domain.PermQuestionShare,
 				domain.PermReviewDo,
+				// 出题人需要跟踪本人题目的审核结论与评语（个人范围审核记录页）。
+				domain.PermReviewResults,
 			},
 		},
 		{
@@ -203,22 +205,17 @@ func (s *Service) InitBuiltinRoles(ctx context.Context) error {
 				}
 			}
 			// 医学专家同时是个人题库用户和审核人：可单题命题、查看自己的三层题库、
-			// 处理待修改并分享正式题；不包含全局库、汇总统计或管理权限。
-			// 批量推理是可按需授予的例外：迁移会先清理旧默认值，之后超级管理员
-			// 若明确在角色模板中勾选，启动自愈必须保留这项调整。
+			// 处理待修改、分享正式题并查看本人审核记录；不包含全局库、汇总统计或管理权限。
+			// 专家是岗位型内置角色：启动自愈把权限恢复为模板集，防止旧库残留缺漏；
+			// 批量推理是可按需授予的例外：超级管理员若明确勾选，自愈必须保留这项调整。
 			if r.ID == domain.RoleExpert {
 				keepBatch := containsPermission(valid, domain.PermBatchRun)
-				sanitized := make([]string, 0, len(r.Permissions)+1)
-				for _, permission := range r.Permissions {
-					if containsPermission(valid, permission) {
-						sanitized = append(sanitized, permission)
-					}
-				}
+				restored := append([]string(nil), r.Permissions...)
 				if keepBatch {
-					sanitized = append(sanitized, domain.PermBatchRun)
+					restored = append(restored, domain.PermBatchRun)
 				}
-				if !samePermissions(valid, sanitized) {
-					valid = sanitized
+				if !samePermissions(valid, restored) {
+					valid = restored
 					changed = true
 				}
 			}

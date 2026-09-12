@@ -35,6 +35,7 @@ func TestValidateGeneratedA2(t *testing.T) {
 		{name: "valid", valid: true},
 		{name: "four options remain legacy compatible but fail generated rule", mutate: func(q *A2Question) { q.Options = q.Options[:4] }},
 		{name: "forbidden heading", mutate: func(q *A2Question) { q.ClinicalStem = "男，45岁。主诉：腹痛1天。最可能的诊断是" }},
+		{name: "exam heading allowed", mutate: func(q *A2Question) { q.ClinicalStem = "男，45岁。查体：腹软。辅助检查：血常规正常。该患者最可能的诊断是" }, valid: true},
 		{name: "question mark", mutate: func(q *A2Question) { q.ClinicalStem += "？" }},
 		{name: "interrogative word", mutate: func(q *A2Question) { q.ClinicalStem = "男，45岁。腹痛1天。最适宜的检查是什么" }},
 		{name: "forbidden option", mutate: func(q *A2Question) { q.Options[4].Text = "以上都是" }},
@@ -70,7 +71,7 @@ func TestNormalizeGeneratedA2(t *testing.T) {
 	q.Explanation = "说明：" + q.Explanation
 
 	q.NormalizeGeneratedA2()
-	if q.ClinicalStem != "男，45岁。腹软。最可能的诊断是" {
+	if q.ClinicalStem != "男，45岁。查体：腹软。最可能的诊断是" {
 		t.Errorf("题干归一化错误: %q", q.ClinicalStem)
 	}
 	if q.Options[0].Label != "A" || q.Answer != "A" {
