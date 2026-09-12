@@ -62,35 +62,14 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := auth.GetUserID(r.Context())
-	if req.BankID == "" {
-		_, fullScope, _, err := s.authSvc.GetBankScope(r.Context(), userID, domain.PermQuestionGenerate)
-		if err != nil {
-			writeError(w, 500, "查询出题范围失败")
-			return
-		}
-		if !fullScope {
-			writeError(w, 403, "受限账号生成题目时必须选择已分配的分类子题库")
-			return
-		}
-	} else {
-		allowed, err := s.authSvc.HasPermissionInBank(r.Context(), userID, domain.PermQuestionGenerate, req.BankID)
-		if err != nil {
-			writeError(w, 500, "查询出题范围失败")
-			return
-		}
-		if !allowed {
-			writeError(w, 403, "无权向该分类子题库生成题目")
-			return
-		}
-		bank, err := s.bankSvc.GetBank(r.Context(), req.BankID)
-		if err != nil {
-			writeError(w, 500, "查询分类子题库失败")
-			return
-		}
-		if bank == nil {
-			writeError(w, 400, "分类子题库不存在或已删除")
-			return
-		}
+	// 目标题库不再由出题人选择：题目始终归属生成者个人题库（owner_id），
+	// 分类子题库归属由系统自动处理——范围受限账号归入其可见题库（保证受限
+	// 管理员可见），其余按专业自动归纳；管理员可在送审时明确分类子题库。
+	// 请求中的 bank_id 字段仅为兼容旧客户端保留，服务端忽略。
+	scope, fullScope, _, err := s.authSvc.GetBankScope(r.Context(), userID, domain.PermQuestionGenerate)
+	if err != nil {
+		writeError(w, 500, "查询出题范围失败")
+		return
 	}
 
 	// 从数据库获取完整知识点信息（包含 Category、Unit、SubItem 等）
@@ -125,10 +104,15 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	if actor == "" {
 		actor = "ai"
 	}
-	// 请求快照随运行落库：worker 依据快照执行，进程重启后仍可接管未完成运行
-	specJSON, err := json.Marshal(pipeline.GenerationSpec{
-		Request: genReq, BankID: req.BankID, Actor: actor, OwnerID: userID,
-	})
+	// 请求快照随运行落库：worker 依据快照执行，进程重启后仍可接管未完成运行。
+	// ScopedBankIDs：范围受限账号的可见题库集合（空=全范围，按专业自动归纳）。
+	spec := pipeline.GenerationSpec{
+		Request: genReq, Actor: actor, OwnerID: userID,
+	}
+	if !fullScope {
+		spec.ScopedBankIDs = append([]string(nil), scope...)
+	}
+	specJSON, err := json.Marshal(spec)
 	if err != nil {
 		writeError(w, 500, "序列化命题请求失败")
 		return

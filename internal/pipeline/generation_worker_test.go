@@ -181,3 +181,48 @@ func TestGenerationWorkerExhaustsRetries(t *testing.T) {
 		t.Fatalf("失败运行不应落题，实际 %d 道", len(ids))
 	}
 }
+
+// 范围受限账号：题目自动归入其可见题库集合（无需出题人选择目标题库）。
+func TestGenerationWorkerAssignsScopedBanks(t *testing.T) {
+	banks := &recordingBanks{}
+	audit := &recordingAudit{}
+	p := newWorkerPipeline(&fakeLLM{}, banks, audit)
+	spec, err := json.Marshal(GenerationSpec{
+		Request: domain.GenerationRequest{
+			Subject:         "消化",
+			KnowledgePoints: []domain.KnowledgePoint{{ID: "110.4.3.1.1", Subject: "消化", Topic: "消化性溃疡", OutlineCode: "110.4.3.1.1"}},
+			Count:           1,
+		},
+		Actor: "tester", OwnerID: "owner-1", ScopedBankIDs: []string{"bank-neike", "bank-xiaohua"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created, err := p.runs.CreateGenerationRun(context.Background(), domain.GenerationRun{
+		ID: "gen-scoped-banks", OwnerID: "owner-1", Status: domain.GenerationRunPending,
+		RequestedCount: 1, MaxAttempts: 3, RequestJSON: spec,
+	}); err != nil || !created {
+		t.Fatalf("提交运行失败: created=%v err=%v", created, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.StartGenerationWorkers(ctx, 1)
+
+	run := waitForRun(t, p, "gen-scoped-banks", func(r *domain.GenerationRun) bool {
+		return r.Status == domain.GenerationRunSucceeded || r.Status == domain.GenerationRunFailed
+	})
+	if run.Status != domain.GenerationRunSucceeded {
+		t.Fatalf("运行应成功，实际 %s（%s）", run.Status, run.Error)
+	}
+	q, err := p.store.GetQuestion(context.Background(), run.QuestionIDs[0])
+	if err != nil || q == nil {
+		t.Fatal(err)
+	}
+	if len(q.BankIDs) != 2 || q.BankIDs[0] != "bank-neike" || q.BankIDs[1] != "bank-xiaohua" {
+		t.Fatalf("题目应归入受限账号的可见题库，实际 %v", q.BankIDs)
+	}
+	if len(banks.assigned) != 0 {
+		t.Fatalf("受限路径不应再走专业自动归纳，实际 %v", banks.assigned)
+	}
+}

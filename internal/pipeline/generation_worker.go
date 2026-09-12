@@ -18,9 +18,13 @@ import (
 // 不依赖发起时的 HTTP 请求；知识点内容即提交时解析结果（天然快照）。
 type GenerationSpec struct {
 	Request domain.GenerationRequest `json:"request"`
-	BankID  string                   `json:"bank_id,omitempty"`
-	Actor   string                   `json:"actor,omitempty"`
-	OwnerID string                   `json:"owner_id,omitempty"`
+	// BankID 兼容保留的显式目标题库（当前提交方不再设置，恒为空）。
+	BankID string `json:"bank_id,omitempty"`
+	// ScopedBankIDs 范围受限出题账号的可见题库集合：非空时题目归入这些题库，
+	// 保证受限范围的管理员能看到并送审；为空表示全范围账号，按专业自动归纳。
+	ScopedBankIDs []string `json:"scoped_bank_ids,omitempty"`
+	Actor         string   `json:"actor,omitempty"`
+	OwnerID       string   `json:"owner_id,omitempty"`
 }
 
 // BankAssigner 题库自动归纳能力（由 bank.Service 实现）。
@@ -167,9 +171,15 @@ func (p *Pipeline) executeGenerationRun(ctx context.Context, run *domain.Generat
 	questionIDs := make([]string, 0, len(drafts))
 	for i := range drafts {
 		q := drafts[i]
-		if spec.BankID != "" {
+		switch {
+		case spec.BankID != "":
+			// 兼容保留：显式指定目标题库（当前提交方不再使用）
 			q.BankIDs = []string{spec.BankID}
-		} else if p.bankAssigner != nil {
+		case len(spec.ScopedBankIDs) > 0:
+			// 范围受限账号：归入其可见题库，保证受限范围的管理员可见、可送审
+			q.BankIDs = append([]string(nil), spec.ScopedBankIDs...)
+		case p.bankAssigner != nil:
+			// 全范围账号：按题目专业自动归纳进匹配的分类子题库
 			if err := p.bankAssigner.AssignBank(genCtx, &q); err != nil {
 				slog.Warn("自动归纳题库失败", "run_id", run.ID, "question_id", q.ID, "error", err)
 			}

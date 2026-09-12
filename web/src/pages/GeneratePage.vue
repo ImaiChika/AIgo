@@ -20,8 +20,6 @@ const selectedKP = computed(() => (selectedKPs.value.length ? selectedKPs.value[
 // 出题配置
 const selectedCount = ref(1);
 const selectedDifficulty = ref("0.65");
-const banks = ref([]);
-const selectedBank = ref("");
 
 // 状态
 const toast = ref("");
@@ -167,7 +165,6 @@ function persistWorkspace() {
     selectedKPs: selectedKPs.value,
     selectedCount: selectedCount.value,
     selectedDifficulty: selectedDifficulty.value,
-    selectedBank: selectedBank.value,
     generatedQuestions: generatedQuestions.value,
     currentIndex: currentIndex.value,
     progressMsg: progressMsg.value,
@@ -180,7 +177,7 @@ function persistWorkspace() {
 }
 
 watch([
-  selectedKPs, selectedCount, selectedDifficulty, selectedBank,
+  selectedKPs, selectedCount, selectedDifficulty,
   generatedQuestions, currentIndex, progressMsg, aiProgress,
   generationRunId, generationQuestionIds, workspaceStatus,
   generationStartedAt, generationCompletedAt, checkStartedAt, checkCompletedAt,
@@ -313,7 +310,6 @@ function restoreWorkspace() {
     selectedKPs.value = Array.isArray(snapshot.selectedKPs) ? snapshot.selectedKPs : [];
     selectedCount.value = snapshot.selectedCount || 1;
     selectedDifficulty.value = snapshot.selectedDifficulty || "0.65";
-    selectedBank.value = snapshot.selectedBank || "";
     generationRunId.value = snapshot.runId || "";
     generationQuestionIds.value = snapshot.questionIds || [];
     workspaceStatus.value = snapshot.workspaceStatus || "idle";
@@ -408,7 +404,6 @@ async function generateQuestion() {
       knowledge_point_id: selectedKP.value.id,
       version_id: selectedKP.value.version_id,
       count: selectedCount.value,
-      bank_id: selectedBank.value,
     };
     console.log("生成参数:", genParams, "选中知识点:", JSON.stringify(selectedKP.value));
     const data = await api.generate(genParams);
@@ -454,19 +449,9 @@ function optionLabel(index) {
   return String.fromCharCode(65 + index);
 }
 
-async function loadBanks() {
-  try {
-    const data = await api.listBanks(false);
-    banks.value = data.banks || [];
-  } catch (e) {
-    console.error(e);
-  }
-}
-
 onMounted(() => {
   clockTimer = window.setInterval(() => { clock.value = Date.now(); }, 1000);
   loadStats();
-  loadBanks();
   restoreWorkspace();
 });
 
@@ -616,14 +601,6 @@ onBeforeUnmount(() => {
             <option value="0.65">中等 (0.65)</option>
             <option value="0.75">偏难 (0.75)</option>
             <option value="0.85">困难 (0.85)</option>
-          </select>
-        </label>
-
-        <label class="field" v-if="banks.length">
-          <span>目标题库</span>
-          <select v-model="selectedBank">
-            <option value="">未分类</option>
-            <option v-for="b in banks" :key="b.id" :value="b.id">{{ b.name }}</option>
           </select>
         </label>
 
