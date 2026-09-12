@@ -392,6 +392,26 @@ type AIReviewStore interface {
 	CountDiscardResults(ctx context.Context) (int, error)
 }
 
+// AICheckOutcome 汇总一次 AI 检查结论需要落库的全部写入。
+// 事务语义：Result 必须保存；随后按结论处理题目——通过时用 Question（含推进后的
+// 状态）保存，不通过且题目仍是草稿时写 Discard 淘汰档案并删除题目；
+// CompleteTaskID 非空时同事务把检查任务标记为成功。任一步失败整体回滚。
+type AICheckOutcome struct {
+	Result           domain.AIReviewResult
+	Question         *domain.A2Question     // 非 nil：保存题目（状态推进，内容不变）
+	Discard          *domain.AICheckDiscard // 非 nil：保存淘汰档案
+	DeleteQuestionID string                 // 非 ""：删除题目（首检不通过的草稿）
+	CompleteTaskID   string                 // 非 ""：同事务完成任务
+}
+
+// AICheckOutcomeStore 是生产存储可选实现的事务化检查落库能力：
+// 把“检查结果、题目状态/淘汰档案、题目删除、任务完成”收敛为一个数据库事务，
+// 消除“结果已保存但题目状态未更新”或“淘汰档案已写但题目仍可见”的中间态。
+// 未实现该接口的存储（如测试内存实现）由 aicheck 服务回退为分步写入。
+type AICheckOutcomeStore interface {
+	ApplyAICheckOutcome(ctx context.Context, outcome AICheckOutcome) error
+}
+
 // AICheckTaskStore AI 检查任务持久化队列存储接口。
 // 语义对应 PostgreSQL 行级抢占（FOR UPDATE SKIP LOCKED），内存实现保持一致。
 type AICheckTaskStore interface {

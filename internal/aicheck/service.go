@@ -46,7 +46,14 @@ func NewService(client llm.Client, qs storage.QuestionStore, rs storage.AIReview
 }
 
 // CheckQuestion 检查单道题目，返回检查结果并持久化。
+// 供手动检查与批量检查使用：只落库检查结论与题目状态，不涉及检查任务。
 func (s *Service) CheckQuestion(ctx context.Context, questionID string) (*domain.AIReviewResult, error) {
+	return s.checkQuestion(ctx, questionID, "")
+}
+
+// checkQuestion 执行检查并落库。taskID 非空时（后台 worker 路径）把检查任务
+// 的完成标记与检查结论放进同一事务，确保任务状态与题目状态始终一致。
+func (s *Service) checkQuestion(ctx context.Context, questionID, taskID string) (*domain.AIReviewResult, error) {
 	// 1. 获取题目
 	q, err := s.questionStore.GetQuestion(ctx, questionID)
 	if err != nil {
@@ -92,34 +99,41 @@ func (s *Service) CheckQuestion(ctx context.Context, questionID string) (*domain
 		result.Suggestion = "请先修正专家A2规范问题：" + strictErr.Error() + "。" + result.Suggestion
 	}
 
-	// 4. 持久化结果
-	if err := s.aiReviewStore.SaveReviewResult(ctx, *result); err != nil {
-		return nil, fmt.Errorf("保存检查结果失败: %w", err)
-	}
-
-	// 5. 根据检查结果更新题目状态
+	// 4. 落库：检查结果、题目状态推进或淘汰删除、任务完成要么全部提交、要么全部回滚。
 	// AI 检查仅在题目首次创建时执行一次：通过则把草稿态推进为 ai_reviewed；
 	// 不通过时题目自动淘汰删除（不入题库），淘汰原因留档供生成页展示。
 	// 已通过检查（ai_reviewed）或进入人工流程的题目，即使之后被重新检查，
 	// 状态也不由 AI 检查改动——人工修改后的把关责任在专家审核环节。
+	if err := s.applyCheckOutcome(ctx, result, q, taskID); err != nil {
+		return nil, err
+	}
+	if result.Verdict != "pass" && q.Status == domain.StatusAIDraft {
+		fmt.Printf("AI 检查淘汰题目 %s（%s）：已留档并删除\n", questionID, result.Verdict)
+	}
+
+	return result, nil
+}
+
+// applyCheckOutcome 按检查结论构造落库动作并持久化。
+// 生产 PostgreSQL 实现了 storage.AICheckOutcomeStore，所有写入收敛为单个事务；
+// 其他存储（测试内存实现）回退为分步写入，保持原有语义。
+func (s *Service) applyCheckOutcome(ctx context.Context, result *domain.AIReviewResult, q *domain.A2Question, taskID string) error {
+	outcome := storage.AICheckOutcome{Result: *result}
 	if result.Verdict == "pass" {
 		switch q.Status {
 		case domain.StatusAIDraft, domain.StatusAutoChecked, domain.StatusAIReviewed:
-			q.Status = domain.StatusAIReviewed
-			q.UpdatedAt = time.Now()
-			if err := s.questionStore.SaveQuestion(ctx, *q); err != nil {
-				fmt.Printf("⚠ 更新题目状态失败: %v\n", err)
-			}
+			updated := *q
+			updated.Status = domain.StatusAIReviewed
+			updated.UpdatedAt = time.Now()
+			outcome.Question = &updated
 		default:
 			// 已进入人工审核或更后状态，不修改题目状态，只保存检查结果
 		}
-		return result, nil
-	}
-	if q.Status == domain.StatusAIDraft {
+	} else if q.Status == domain.StatusAIDraft {
 		// 首次检查不通过 → 淘汰：留档原因后删除题目（题库只保留检查通过的题）
-		discard := domain.AICheckDiscard{
-			ID:          fmt.Sprintf("aicd-%s-%d", questionID, time.Now().UnixNano()),
-			QuestionID:  questionID,
+		outcome.Discard = &domain.AICheckDiscard{
+			ID:          fmt.Sprintf("aicd-%s-%d", q.ID, time.Now().UnixNano()),
+			QuestionID:  q.ID,
 			Verdict:     result.Verdict,
 			Scores:      result.Scores,
 			Issues:      result.Issues,
@@ -128,16 +142,37 @@ func (s *Service) CheckQuestion(ctx context.Context, questionID string) (*domain
 			StemSummary: stemSummary(q.ClinicalStem, 60),
 			CreatedAt:   time.Now(),
 		}
-		if err := s.aiReviewStore.SaveDiscardResult(ctx, discard); err != nil {
-			return nil, fmt.Errorf("保存淘汰记录失败: %w", err)
-		}
-		if err := s.questionStore.DeleteQuestion(ctx, questionID); err != nil {
-			return nil, fmt.Errorf("删除未通过检查的题目失败: %w", err)
-		}
-		fmt.Printf("AI 检查淘汰题目 %s（%s）：已留档并删除\n", questionID, result.Verdict)
+		outcome.DeleteQuestionID = q.ID
 	}
 
-	return result, nil
+	if outcomeStore, ok := s.questionStore.(storage.AICheckOutcomeStore); ok {
+		outcome.CompleteTaskID = taskID
+		return outcomeStore.ApplyAICheckOutcome(ctx, outcome)
+	}
+
+	// 回退：分步写入（仅测试内存存储）
+	if err := s.aiReviewStore.SaveReviewResult(ctx, outcome.Result); err != nil {
+		return fmt.Errorf("保存检查结果失败: %w", err)
+	}
+	if outcome.Question != nil {
+		if err := s.questionStore.SaveQuestion(ctx, *outcome.Question); err != nil {
+			return fmt.Errorf("更新题目状态失败: %w", err)
+		}
+	}
+	if outcome.Discard != nil {
+		if err := s.aiReviewStore.SaveDiscardResult(ctx, *outcome.Discard); err != nil {
+			return fmt.Errorf("保存淘汰记录失败: %w", err)
+		}
+		if err := s.questionStore.DeleteQuestion(ctx, outcome.DeleteQuestionID); err != nil {
+			return fmt.Errorf("删除未通过检查的题目失败: %w", err)
+		}
+	}
+	if taskID != "" && s.taskStore != nil {
+		if err := s.taskStore.CompleteCheckTask(ctx, taskID); err != nil {
+			return fmt.Errorf("标记检查任务完成失败: %w", err)
+		}
+	}
+	return nil
 }
 
 // currentModelName 支持动态 AI 检查配置。旧的固定客户端或测试 mock 没有

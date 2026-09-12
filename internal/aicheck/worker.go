@@ -139,12 +139,13 @@ func (s *Service) runWorker(ctx context.Context) {
 }
 
 // executeTask 执行单个检查任务，带超时控制与失败重试记录。
+// 成功路径中，任务完成标记与检查结论在同一事务落库（见 service.checkQuestion），
+// 不会出现“题目已通过/已删除但任务仍挂着”的中间态。
 func (s *Service) executeTask(ctx context.Context, task *domain.AICheckTask) {
 	execCtx, cancel := context.WithTimeout(ctx, s.checkTimeoutOrDefault())
 	defer cancel()
 
-	_, err := s.CheckQuestion(execCtx, task.QuestionID)
-	if err != nil {
+	if _, err := s.checkQuestion(execCtx, task.QuestionID, task.ID); err != nil {
 		if execCtx.Err() != nil {
 			err = fmt.Errorf("检查超时（单次上限 %s）", s.checkTimeoutOrDefault())
 		}
@@ -152,10 +153,6 @@ func (s *Service) executeTask(ctx context.Context, task *domain.AICheckTask) {
 			fmt.Printf("⚠ 记录 AI 检查失败状态出错: %s: %v\n", task.ID, ferr)
 		}
 		fmt.Printf("⚠ AI 检查失败（第 %d/%d 次）: %s: %v\n", task.Attempts, task.MaxAttempts, task.QuestionID, err)
-		return
-	}
-	if err := s.taskStore.CompleteCheckTask(ctx, task.ID); err != nil {
-		fmt.Printf("⚠ 标记 AI 检查任务完成出错: %s: %v\n", task.ID, err)
 	}
 }
 

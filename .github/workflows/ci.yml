@@ -1,0 +1,83 @@
+# 持续集成：Go 全量测试 + 真实 PostgreSQL 集成测试 + 依赖漏洞扫描 + 前端构建与状态测试。
+# 集成测试默认跳过（无 AIGO_TEST_POSTGRES_DSN 时），此处在 service 容器中真正执行。
+name: ci
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Go 测试与漏洞扫描
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: aigo_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AIGO_TEST_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/aigo_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test（全量，含 PostgreSQL 集成测试）
+        run: go test ./...
+
+      - name: go test -race（存储层竞态）
+        run: go test -race ./internal/storage/... ./internal/aicheck/ ./internal/review/
+
+      - name: govulncheck（可达漏洞必须为 0）
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  frontend:
+    name: 前端构建与状态测试
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: npm ci（含漏洞告警检查）
+        run: npm ci --no-audit --no-fund
+
+      - name: npm audit high（高危漏洞告警即失败）
+        run: npm audit --audit-level=high
+
+      - name: node --test（状态与导航测试）
+        run: node --test src/*.test.js
+
+      - name: npm run build
+        run: npm run build

@@ -554,7 +554,13 @@ func (s *Store) GetQuestionVersion(ctx context.Context, questionID string, versi
 }
 
 func (s *Store) DeleteQuestion(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM questions WHERE id=$1`, id)
+	return s.deleteQuestion(ctx, id)
+}
+
+// deleteQuestion 删除题目，关联的版本/审核任务/记录/AI 结果随外键级联清理。
+// 通过 s.execContext 执行：处于事务上下文时并入调用方事务。
+func (s *Store) deleteQuestion(ctx context.Context, id string) error {
+	_, err := s.execContext(ctx, `DELETE FROM questions WHERE id=$1`, id)
 	return err
 }
 
@@ -1761,9 +1767,14 @@ func (s *Store) ReleaseBatchJobImport(ctx context.Context, id string) error {
 // ===== AI 检查结果 =====
 
 func (s *Store) SaveReviewResult(ctx context.Context, result domain.AIReviewResult) error {
+	return s.saveReviewResult(ctx, result)
+}
+
+// saveReviewResult 保存一条 AI 检查结果；事务上下文中并入调用方事务。
+func (s *Store) saveReviewResult(ctx context.Context, result domain.AIReviewResult) error {
 	scoresJSON, _ := json.Marshal(result.Scores)
 	issuesJSON, _ := json.Marshal(result.Issues)
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execContext(ctx, `
 		INSERT INTO ai_review_results (id, question_id, question_version, verdict, scores, issues, suggestion, model, raw_response, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
 	`, result.ID, result.QuestionID, result.QuestionVersion, result.Verdict, string(scoresJSON), string(issuesJSON),
@@ -1902,7 +1913,12 @@ func (s *Store) ClaimNextCheckTask(ctx context.Context, lease time.Duration) (*d
 }
 
 func (s *Store) CompleteCheckTask(ctx context.Context, taskID string) error {
-	_, err := s.db.ExecContext(ctx, `
+	return s.completeCheckTask(ctx, taskID)
+}
+
+// completeCheckTask 标记任务成功；事务上下文中并入调用方事务。
+func (s *Store) completeCheckTask(ctx context.Context, taskID string) error {
+	_, err := s.execContext(ctx, `
 		UPDATE ai_check_tasks SET status='succeeded', leased_until=NULL, last_error='', updated_at=NOW()
 		WHERE id=$1
 	`, taskID)
@@ -1967,14 +1983,77 @@ func (s *Store) CountCheckTasksByStatus(ctx context.Context) (map[string]int, er
 // ===== AI 检查淘汰记录 =====
 
 func (s *Store) SaveDiscardResult(ctx context.Context, discard domain.AICheckDiscard) error {
+	return s.saveDiscardResult(ctx, discard)
+}
+
+// saveDiscardResult 保存一条淘汰档案；事务上下文中并入调用方事务。
+// 淘汰档案无外键约束，题目删除后仍保留供生成页展示。
+func (s *Store) saveDiscardResult(ctx context.Context, discard domain.AICheckDiscard) error {
 	scoresJSON, _ := json.Marshal(discard.Scores)
 	issuesJSON, _ := json.Marshal(discard.Issues)
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execContext(ctx, `
 		INSERT INTO ai_check_discards (id, question_id, verdict, scores, issues, suggestion, model, stem_summary, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
 	`, discard.ID, discard.QuestionID, discard.Verdict, string(scoresJSON), string(issuesJSON),
 		discard.Suggestion, discard.Model, discard.StemSummary)
 	return err
+}
+
+// ApplyAICheckOutcome 在单个 PostgreSQL 事务中落库一次 AI 检查结论：
+// 检查结果、题目状态推进或淘汰删除、检查任务完成要么全部提交、要么全部回滚。
+// 任何一步失败都返回错误，调用方（aicheck 服务）据此重试，不会留下半成品状态。
+func (s *Store) ApplyAICheckOutcome(ctx context.Context, outcome storage.AICheckOutcome) error {
+	if tx := reviewTransactionFromContext(ctx); tx != nil {
+		return s.applyAICheckOutcome(ctx, tx, outcome)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("开始 AI 检查事务失败: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	txCtx := context.WithValue(ctx, reviewTransactionContextKey{}, tx)
+	if err := s.applyAICheckOutcome(txCtx, tx, outcome); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交 AI 检查事务失败: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func (s *Store) applyAICheckOutcome(ctx context.Context, executor sqlQueryExecer, outcome storage.AICheckOutcome) error {
+	if err := s.saveReviewResult(ctx, outcome.Result); err != nil {
+		return fmt.Errorf("保存检查结果失败: %w", err)
+	}
+	if outcome.Question != nil {
+		// 检查通过推进状态：内容不变、版本号不变，仅状态与更新时间变化
+		if err := s.saveQuestion(ctx, executor, *outcome.Question); err != nil {
+			return fmt.Errorf("更新题目状态失败: %w", err)
+		}
+	}
+	if outcome.Discard != nil {
+		if err := s.saveDiscardResult(ctx, *outcome.Discard); err != nil {
+			return fmt.Errorf("保存淘汰档案失败: %w", err)
+		}
+	}
+	if outcome.DeleteQuestionID != "" {
+		// 级联清理版本/审核数据；刚写入的检查结果随外键级联删除，仅淘汰档案留档
+		if err := s.deleteQuestion(ctx, outcome.DeleteQuestionID); err != nil {
+			return fmt.Errorf("删除未通过检查的题目失败: %w", err)
+		}
+	}
+	if outcome.CompleteTaskID != "" {
+		if err := s.completeCheckTask(ctx, outcome.CompleteTaskID); err != nil {
+			return fmt.Errorf("标记检查任务完成失败: %w", err)
+		}
+	}
+	return nil
 }
 
 // CountReviewResultsByVerdict 按 verdict 统计 AI 检查结果数量（存储端聚合）。
