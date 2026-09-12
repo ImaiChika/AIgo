@@ -70,7 +70,6 @@ function switchScope(scope) {
   questionScope.value = scope;
   activeTier.value = visibleTiers.value[0]?.key || "";
   filterStatus.value = "";
-  filterBank.value = "";
   selectedIds.value.clear();
   selectAll.value = false;
   selectedQuestion.value = null;
@@ -83,7 +82,6 @@ const questions = ref([]);
 const loading = ref(false);
 const filterStatus = ref("");
 const searchQuery = ref("");
-const filterBank = ref(""); // 题库筛选
 const filterProfession = ref(""); // 专业筛选
 const professions = ref([]); // 专业列表
 const banks = ref([]); // 题库列表
@@ -335,15 +333,15 @@ async function loadQuestions(resetPage = true) {
   const ticket = ++questionSearchTicket;
   shareNotice.value = '';
   if (!mutating.value) shareDialog.value = null;
-  const requestedShareFilters = { q: searchQuery.value, bank_id: filterBank.value, profession: filterProfession.value };
+  const requestedShareFilters = { q: searchQuery.value, profession: filterProfession.value };
   loading.value = true;
   if (resetPage) page.value = 1;
   try {
     let data;
     if (searchQuery.value || filterStatus.value || filterProfession.value) {
-      data = await api.searchQuestions(searchQuery.value, filterStatus.value, page.value, pageSize, filterBank.value, filterProfession.value ? [filterProfession.value] : [], "", "", activeTier.value, false, questionScope.value);
+      data = await api.searchQuestions(searchQuery.value, filterStatus.value, page.value, pageSize, "", filterProfession.value ? [filterProfession.value] : [], "", "", activeTier.value, false, questionScope.value);
     } else {
-      data = await api.listQuestions(page.value, pageSize, filterBank.value, activeTier.value, questionScope.value);
+      data = await api.listQuestions(page.value, pageSize, "", activeTier.value, questionScope.value);
     }
     if (ticket !== questionSearchTicket) return;
     questions.value = data.questions || [];
@@ -562,27 +560,6 @@ onMounted(async () => {
           <button class="ghost-button" type="button" @click="clearSearch">重置</button>
         </div>
 
-        <!-- 题库筛选 -->
-        <div class="bank-filter-row">
-          <button
-            type="button"
-            class="bank-filter-chip"
-            :class="{ active: filterBank === '' }"
-            @click="filterBank = ''; doSearch()"
-          >
-            全部题库
-          </button>
-          <button
-            v-for="b in banks"
-            :key="b.id"
-            type="button"
-            class="bank-filter-chip"
-            :class="{ active: filterBank === b.id }"
-            @click="filterBank = b.id; doSearch()"
-          >
-            {{ b.name }}
-          </button>
-        </div>
       </div>
 
       <!-- 批量操作栏 -->
@@ -996,35 +973,6 @@ onMounted(async () => {
   border-bottom: 1px solid #e5ebf3;
   margin-bottom: 8px;
   flex-wrap: wrap;
-}
-
-.bank-filter-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-
-.bank-filter-chip {
-  padding: 4px 12px;
-  border: 1px solid #e5ebf3;
-  border-radius: 14px;
-  background: #fff;
-  font-size: 12px;
-  cursor: pointer;
-  color: #6e7b8f;
-}
-
-.bank-filter-chip:hover {
-  border-color: #1385f8;
-  color: #1385f8;
-}
-
-.bank-filter-chip.active {
-  background: #1385f8;
-  border-color: #1385f8;
-  color: #fff;
-  font-weight: 600;
 }
 
 /* 管理员提交审核 */
