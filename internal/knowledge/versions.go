@@ -6,6 +6,7 @@ import (
 	"aigo/internal/storage"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -54,10 +55,15 @@ func (s *Service) CreateVersion(ctx context.Context, name string, year int, desc
 	if err := s.store.CreateKnowledgeVersion(ctx, v); err != nil {
 		return nil, err
 	}
+	s.invalidate()
 	return &v, nil
 }
 func (s *Service) PublishVersion(ctx context.Context, id string) error {
-	return s.store.PublishKnowledgeVersion(ctx, id)
+	if err := s.store.PublishKnowledgeVersion(ctx, id); err != nil {
+		return err
+	}
+	s.invalidate()
+	return nil
 }
 func normalizePoint(p *domain.KnowledgePoint) error {
 	p.Topic = strings.TrimSpace(p.Topic)
@@ -110,6 +116,7 @@ func (s *Service) CreatePoint(ctx context.Context, p domain.KnowledgePoint) (*do
 	if err := s.store.UpdatePoint(ctx, p); err != nil {
 		return nil, err
 	}
+	s.invalidate()
 	return s.store.GetPoint(ctx, p.ID)
 }
 func (s *Service) UpdatePoint(ctx context.Context, id string, p domain.KnowledgePoint) (*domain.KnowledgePoint, error) {
@@ -133,6 +140,7 @@ func (s *Service) UpdatePoint(ctx context.Context, id string, p domain.Knowledge
 	if err := s.store.UpdatePoint(ctx, p); err != nil {
 		return nil, err
 	}
+	s.invalidate()
 	return s.store.GetPoint(ctx, id)
 }
 
@@ -170,7 +178,11 @@ func (s *Service) ImportDocuments(ctx context.Context, versionID string, paths [
 	if len(points) == 0 {
 		return 0, 0, 0, fmt.Errorf("请选择包含知识点的文件")
 	}
-	return s.store.SaveVersionPoints(ctx, versionID, points, replace)
+	inserted, updated, duplicated, err := s.store.SaveVersionPoints(ctx, versionID, points, replace)
+	if err == nil {
+		s.invalidate()
+	}
+	return inserted, updated, duplicated, err
 }
 
 // ResolveForGeneration always looks up the selected version and rejects stale or
@@ -227,13 +239,21 @@ type TreeNode struct {
 }
 
 func (s *Service) Tree(ctx context.Context, versionID string) ([]*TreeNode, error) {
-	points, err := s.SearchFiltered(ctx, KPSearchOptions{VersionID: versionID})
+	v, err := s.ResolveVersion(ctx, versionID)
+	if versionID == "" && errors.Is(err, storage.ErrKnowledgeNoDefault) {
+		return []*TreeNode{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	points, err := s.snapshot(ctx, v.ID)
 	if err != nil {
 		return nil, err
 	}
 	roots := []*TreeNode{}
 	nodes := map[string]*TreeNode{}
-	for _, p := range points {
+	for i := range points {
+		p := &points[i]
 		values := []string{p.Category, p.Subject, p.Unit, p.SubItem}
 		fields := []string{"category", "subject", "unit", "sub_item"}
 		path := []string{}
@@ -289,5 +309,10 @@ func (s *Service) DeleteVersion(ctx context.Context, id string) (int, error) {
 	if id == "" {
 		return 0, storage.ErrKnowledgeNotFound
 	}
-	return s.store.DeleteKnowledgeVersion(ctx, id)
+	count, err := s.store.DeleteKnowledgeVersion(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	s.invalidate()
+	return count, nil
 }

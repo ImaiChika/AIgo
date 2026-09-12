@@ -7,19 +7,81 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"aigo/internal/domain"
 	"aigo/internal/storage"
 )
 
+// defaultSnapshotTTL 快照缓存兜底过期时间：服务层写入会立即失效缓存，
+// TTL 只用于覆盖进程外变更（如 CLI kp-import 直接写库）的场景。
+const defaultSnapshotTTL = 2 * time.Minute
+
+// versionSnapshot 单个大纲版本的全量知识点快照（已按大纲代码排序）。
+type versionSnapshot struct {
+	generation uint64
+	builtAt    time.Time
+	points     []domain.KnowledgePoint
+}
+
 // Service 知识点服务，封装知识点的业务操作。
 type Service struct {
 	store storage.KnowledgeStore
+
+	// versionSnapshots 按版本缓存全量知识点，供列表筛选、目录树、元数据和
+	// 统计复用，避免每个请求都全量装载（7200+ 条时每次约 100ms）。
+	// 服务层任何写入都会递增 generation 使缓存失效；单进程部署内即时生效。
+	mu         sync.Mutex
+	snapshots  map[string]*versionSnapshot
+	generation uint64
+	// CacheTTL 快照兜底过期时间，零值使用 defaultSnapshotTTL；仅供测试调整。
+	CacheTTL time.Duration
 }
 
 // NewService 创建知识点服务实例。
 func NewService(store storage.KnowledgeStore) *Service {
-	return &Service{store: store}
+	return &Service{store: store, snapshots: map[string]*versionSnapshot{}}
+}
+
+// invalidate 使全部版本快照失效（服务层写入成功后调用）。
+func (s *Service) invalidate() {
+	s.mu.Lock()
+	s.generation++
+	s.mu.Unlock()
+}
+
+// snapshotTTL 返回当前生效的快照过期时间。
+func (s *Service) snapshotTTL() time.Duration {
+	if s.CacheTTL > 0 {
+		return s.CacheTTL
+	}
+	return defaultSnapshotTTL
+}
+
+// snapshot 返回指定版本的全量知识点快照（已排序）。缓存未命中、服务层
+// 发生过写入或超过 TTL 时重新装载。读多写少场景下命中率接近 100%。
+func (s *Service) snapshot(ctx context.Context, versionID string) ([]domain.KnowledgePoint, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	gen := s.generation
+	if entry, ok := s.snapshots[versionID]; ok && entry.generation == gen && time.Since(entry.builtAt) < s.snapshotTTL() {
+		return entry.points, nil
+	}
+	points, err := s.store.ListVersionPoints(ctx, versionID)
+	if err != nil {
+		return nil, err
+	}
+	// ListVersionPoints 已按版本过滤；这里再按版本号压实一次，剔除脏数据。
+	compact := points[:0]
+	for _, p := range points {
+		if p.VersionID == versionID {
+			compact = append(compact, p)
+		}
+	}
+	sortPoints(compact)
+	s.snapshots[versionID] = &versionSnapshot{generation: gen, builtAt: time.Now(), points: compact}
+	return compact, nil
 }
 
 // SavePoints 批量保存知识点，返回 (新增, 更新, 重复跳过)。
@@ -34,12 +96,20 @@ func (s *Service) SavePoints(ctx context.Context, points []domain.KnowledgePoint
 			points[i].ID = domain.ScopedKnowledgeID(v.ID, points[i].ID)
 		}
 	}
-	return s.store.SaveVersionPoints(ctx, v.ID, points, false)
+	inserted, updated, duplicated, err := s.store.SaveVersionPoints(ctx, v.ID, points, false)
+	if err == nil {
+		s.invalidate()
+	}
+	return inserted, updated, duplicated, err
 }
 
 // DeletePoint 根据 ID 删除知识点。
 func (s *Service) DeletePoint(ctx context.Context, id string) error {
-	return s.store.DeletePoint(ctx, id)
+	if err := s.store.DeletePoint(ctx, id); err != nil {
+		return err
+	}
+	s.invalidate()
+	return nil
 }
 
 // ImportFromXlsx 从考试大纲 xlsx 文件批量导入知识点。
@@ -69,6 +139,7 @@ type KPSearchOptions struct {
 }
 
 // SearchFiltered 按条件筛选知识点（内存过滤，支持模糊+精确组合）。
+// 数据源为版本快照缓存：筛选语义与排序规则保持不变，仅免去每次请求的全量装载。
 func (s *Service) SearchFiltered(ctx context.Context, opts KPSearchOptions) ([]domain.KnowledgePoint, error) {
 	version, err := s.ResolveVersion(ctx, opts.VersionID)
 	if opts.VersionID == "" && errors.Is(err, storage.ErrKnowledgeNoDefault) {
@@ -77,16 +148,14 @@ func (s *Service) SearchFiltered(ctx context.Context, opts KPSearchOptions) ([]d
 	if err != nil {
 		return nil, err
 	}
-	all, err := s.store.ListVersionPoints(ctx, version.ID)
+	points, err := s.snapshot(ctx, version.ID)
 	if err != nil {
 		return nil, err
 	}
 	keywords := storage.SearchTokens(opts.Keyword)
 	result := []domain.KnowledgePoint{}
-	for _, p := range all {
-		if p.VersionID != version.ID {
-			continue
-		}
+	for i := range points {
+		p := &points[i]
 		path := []string{p.Category, p.Subject, p.Unit, p.SubItem}
 		matches := len(opts.Path) <= len(path)
 		for i, value := range opts.Path {
@@ -120,9 +189,8 @@ func (s *Service) SearchFiltered(ctx context.Context, opts KPSearchOptions) ([]d
 		if !matchesKeywords {
 			continue
 		}
-		result = append(result, p)
+		result = append(result, *p)
 	}
-	sortPoints(result)
 	return result, nil
 }
 
@@ -132,18 +200,25 @@ func (s *Service) ListCategoriesAndSubjects(ctx context.Context, versionID ...st
 	if len(versionID) > 0 {
 		version = versionID[0]
 	}
-	all, err := s.SearchFiltered(ctx, KPSearchOptions{VersionID: version})
+	v, err := s.ResolveVersion(ctx, version)
+	if version == "" && errors.Is(err, storage.ErrKnowledgeNoDefault) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	points, err := s.snapshot(ctx, v.ID)
 	if err != nil {
 		return nil, nil, err
 	}
 	catSet := make(map[string]bool)
 	subSet := make(map[string]bool)
-	for _, p := range all {
-		if p.Category != "" {
-			catSet[p.Category] = true
+	for i := range points {
+		if points[i].Category != "" {
+			catSet[points[i].Category] = true
 		}
-		if p.Subject != "" {
-			subSet[p.Subject] = true
+		if points[i].Subject != "" {
+			subSet[points[i].Subject] = true
 		}
 	}
 	for c := range catSet {
@@ -206,7 +281,7 @@ type KPVersionStats struct {
 }
 
 // KPStats 返回大纲版本统计：默认展示当前默认版本，另附各已发布版本的知识点总数。
-// 相比 Count+ListCategories 只做一次全量加载；各版本总数复用 ListKnowledgeVersions 自带的 PointCount。
+// 复用版本快照缓存，不再单独全量加载；各版本总数复用 ListKnowledgeVersions 自带的 PointCount。
 func (s *Service) KPStats(ctx context.Context) (*KPVersionStats, map[string]int, error) {
 	version, err := s.ResolveVersion(ctx, "")
 	if err != nil {
@@ -215,7 +290,7 @@ func (s *Service) KPStats(ctx context.Context) (*KPVersionStats, map[string]int,
 		}
 		return nil, nil, err
 	}
-	all, err := s.store.ListVersionPoints(ctx, version.ID)
+	points, err := s.snapshot(ctx, version.ID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -224,11 +299,11 @@ func (s *Service) KPStats(ctx context.Context) (*KPVersionStats, map[string]int,
 		VersionName: version.Name,
 		Year:        version.Year,
 		Enabled:     version.Status == "published",
-		Total:       len(all),
+		Total:       len(points),
 		Categories:  map[string]int{},
 	}
-	for _, p := range all {
-		cat := p.Category
+	for i := range points {
+		cat := points[i].Category
 		if cat == "" {
 			cat = "未分类"
 		}
