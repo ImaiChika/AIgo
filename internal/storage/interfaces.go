@@ -181,6 +181,9 @@ type QuestionStore interface {
 	AggregateQuestionStats(ctx context.Context, filter QuestionFilter, days int) (*QuestionStatsAggregate, error)
 	// CoveredKnowledgePointIDs 返回过滤范围内题目引用的知识点 ID 去重列表。
 	CoveredKnowledgePointIDs(ctx context.Context, filter QuestionFilter) ([]string, error)
+	// OwnerBankIDs 返回指定用户的题目所关联的分类子题库 ID 去重列表
+	//（子题库目录按“本人题目涉及”过滤用）。
+	OwnerBankIDs(ctx context.Context, ownerID string) ([]string, error)
 	GetQuestion(ctx context.Context, id string) (*domain.A2Question, error)
 	ListQuestionVersions(ctx context.Context, questionID string) ([]domain.QuestionVersion, error)
 	GetQuestionVersion(ctx context.Context, questionID string, version int) (*domain.QuestionVersion, error)

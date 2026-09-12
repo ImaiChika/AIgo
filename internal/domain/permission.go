@@ -55,6 +55,10 @@ const (
 	PermQuestionViewFormal     = "question:view_formal"     // 查看正式题库（published 定稿题）
 	PermQuestionViewEliminated = "question:view_eliminated" // 查看淘汰题库（驳回/归档留档）
 	PermQuestionDeleteFormal   = "question:delete_formal"   // 删除正式题库题目
+	// PermQuestionViewAll 查看全部题库：跨出题人查看所有人的题目（含历史无归属题）。
+	// 未持有该权限时，题库可见性 = 本人题目 ∪ 直接分配题库范围（bank_ids）内的题目；
+	// 超级管理员默认具备，下放管理员需显式授予。
+	PermQuestionViewAll = "question:view_all"
 )
 
 // PermissionMeta 权限点元数据（名称、分组、是否题库范围）。
@@ -82,6 +86,7 @@ func AllPermissions() []PermissionMeta {
 		{PermQuestionViewFormal, "查看正式题库", "题库", true},
 		{PermQuestionDeleteFormal, "删除正式题库题目", "题库", true},
 		{PermQuestionViewEliminated, "查看淘汰题库", "题库", true},
+		{PermQuestionViewAll, "查看全部题库", "题库", false},
 		{PermReviewDo, "审题", "审核", true},
 		{PermReviewFinal, "最终把关", "审核", false},
 		{PermReviewResults, "查看审核记录", "审核", false},

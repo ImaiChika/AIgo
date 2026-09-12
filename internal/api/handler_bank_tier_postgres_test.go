@@ -117,15 +117,20 @@ func TestBankTierPermissionsAndExport(t *testing.T) {
 	handler := server.Handler()
 	adminToken := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.1")
 
+	// 本测试验证分层查看边界；个人轴隔离（无 view_all 仅本人）是另一维度，
+	// 因此这些用户显式授予 question:view_all 以聚焦分层语义。
 	workerToken := createTierUser(t, handler, adminToken, "tier-worker", []string{
 		domain.PermQuestionView, domain.PermQuestionEdit, domain.PermQuestionDelete,
 		domain.PermQuestionGenerate, domain.PermQuestionDownload, domain.PermReviewResults,
+		domain.PermQuestionViewAll,
 	})
 	viewerToken := createTierUser(t, handler, adminToken, "tier-viewer", []string{
 		domain.PermQuestionView, domain.PermQuestionViewFormal, domain.PermQuestionDelete,
+		domain.PermQuestionViewAll,
 	})
 	purgerToken := createTierUser(t, handler, adminToken, "tier-purger", []string{
 		domain.PermQuestionView, domain.PermQuestionViewFormal, domain.PermQuestionDelete, domain.PermQuestionDeleteFormal,
+		domain.PermQuestionViewAll,
 	})
 	formalOnlyToken := createScopedTierUser(t, handler, adminToken, "formal-only", "", []string{
 		domain.PermQuestionViewFormal,

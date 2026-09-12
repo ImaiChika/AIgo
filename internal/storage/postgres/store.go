@@ -1167,6 +1167,29 @@ func (s *Store) CoveredKnowledgePointIDs(ctx context.Context, filter storage.Que
 
 // ===== 专家 =====
 
+// OwnerBankIDs 返回指定用户的题目所关联的分类子题库 ID 去重列表。
+func (s *Store) OwnerBankIDs(ctx context.Context, ownerID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT m.bank_id
+		FROM question_bank_members m
+		JOIN questions q ON q.id = m.question_id
+		WHERE q.owner_id = $1
+		ORDER BY m.bank_id`, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (s *Store) SaveExpert(ctx context.Context, e domain.Expert) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO experts (id, name, department, title, specialties, expert_types, contact, enabled)

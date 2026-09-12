@@ -529,6 +529,27 @@ func cloneGenerationRun(run *domain.GenerationRun) *domain.GenerationRun {
 	return &out
 }
 
+// OwnerBankIDs 返回指定用户的题目所关联的分类子题库 ID 去重列表。
+func (s *MemoryStore) OwnerBankIDs(_ context.Context, ownerID string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	set := map[string]bool{}
+	for _, q := range s.questions {
+		if q.OwnerID != ownerID {
+			continue
+		}
+		for _, b := range q.BankIDs {
+			set[b] = true
+		}
+	}
+	out := make([]string, 0, len(set))
+	for b := range set {
+		out = append(out, b)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 func (s *MemoryStore) GetQuestion(_ context.Context, id string) (*domain.A2Question, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

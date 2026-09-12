@@ -645,14 +645,14 @@ func (s *Server) applyTierScope(w http.ResponseWriter, r *http.Request, filter s
 			return filter, true
 		}
 		if r.URL.Query().Get("scope") == "personal" {
-			// 新版个人题库：三个分层都归当前用户所有，统一由 question:view 控制。
-			filter.BankScope, filter.ScopeRestricted = s.questionBankScope(r, domain.PermQuestionView)
+			// 新版个人题库：题目归属过滤 + 个人轴可见范围（view_all/题库范围/仅本人）。
+			s.applyQuestionVisibility(r, &filter, domain.PermQuestionView)
 		} else if !s.canViewTier(r, tier) {
 			// 未显式传 scope 的旧客户端继续使用原有分层权限语义。
 			writeError(w, http.StatusForbidden, "无权访问"+tier.Name())
 			return filter, false
 		} else {
-			filter.BankScope, filter.ScopeRestricted = s.questionBankScope(r, domain.TierViewPerm(tier))
+			s.applyQuestionVisibility(r, &filter, domain.TierViewPerm(tier))
 		}
 		filter.Tiers = []string{string(tier)}
 		return filter, true
@@ -680,7 +680,7 @@ func (s *Server) applyTierScope(w http.ResponseWriter, r *http.Request, filter s
 	}
 	if r.URL.Query().Get("scope") == "personal" {
 		filter.Tiers = []string{string(domain.TierFormal), string(domain.TierWorking), string(domain.TierEliminated)}
-		filter.BankScope, filter.ScopeRestricted = s.questionBankScope(r, domain.PermQuestionView)
+		s.applyQuestionVisibility(r, &filter, domain.PermQuestionView)
 		return filter, true
 	}
 	visible := s.visibleTiers(r)
@@ -699,8 +699,8 @@ func (s *Server) applyTierScope(w http.ResponseWriter, r *http.Request, filter s
 	for _, t := range visible {
 		tiers = append(tiers, string(t))
 	}
-	// bank_ids 是用户级统一边界，因此任一可见分层取到的范围都相同。
-	filter.BankScope, filter.ScopeRestricted = s.questionBankScope(r, domain.PermQuestionView)
+	// 个人轴可见范围：view_all 全部 / bank_ids 范围 / 默认仅本人。
+	s.applyQuestionVisibility(r, &filter, domain.PermQuestionView)
 	filter.Tiers = tiers
 	return filter, true
 }

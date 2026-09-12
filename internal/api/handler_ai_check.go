@@ -170,15 +170,17 @@ func (s *Server) handleAICheckSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scope, scopeRestricted := s.questionBankScope(r, domain.PermQuestionView)
+	visibilityFilter := storage.QuestionFilter{}
+	s.applyQuestionVisibility(r, &visibilityFilter, domain.PermQuestionView)
 	questions := map[string]int{}
 	for _, status := range []domain.QuestionStatus{
 		domain.StatusAIDraft, domain.StatusAutoChecked, domain.StatusAIReviewed,
 	} {
 		_, total, err := s.questionStore.SearchQuestions(r.Context(), storage.QuestionFilter{
 			Status:          string(status),
-			BankScope:       scope,
-			ScopeRestricted: scopeRestricted,
+			BankScope:       visibilityFilter.BankScope,
+			ScopeRestricted: visibilityFilter.ScopeRestricted,
+			OwnerID:         visibilityFilter.OwnerID,
 		}, 1, 1)
 		if err != nil {
 			writeError(w, 500, "统计题目失败: "+err.Error())

@@ -56,9 +56,71 @@ func (s *Server) canViewQuestion(r *http.Request, q *domain.A2Question) bool {
 		}
 		return s.permissionInQuestionBank(r, q, tierPerm)
 	}
-	// 老数据没有 owner_id/share 记录时保留旧权限语义，避免升级后历史题目
-	// 的详情、审核记录和统计入口突然失效；新生成题目不会走此分支。
-	return s.permissionInQuestionBank(r, q, domain.TierViewPerm(q.Tier()))
+	// 非本人且未分享的题目（含历史无归属题）：默认不可见，按个人轴三档判定
+	// （view_all 全部 / bank_ids 范围 / 默认仅本人）。
+	// 审核任务的题目内容由任务接口随载荷返回（reviewTaskAccess 授权），
+	// 任务分配不放大题目浏览权限。
+	return s.personalAxisVisible(r, q, domain.TierViewPerm(q.Tier()))
+}
+
+// questionVisibility 当前用户在个人题库轴上的可见范围（三档）：
+//   - 持有 question:view_all（超级管理员默认具备，可分配）→ 全部题目；
+//   - 直接分配了题库范围（users.bank_ids 非空）→ 范围内题库的题目（含他人）；
+//   - 其余 → 仅本人题目（owner 隔离；历史无归属题仅 view_all 可见）。
+type questionVisibility struct {
+	scope      []string
+	restricted bool
+	ownerOnly  bool
+}
+
+// questionVisibilityFor 按指定权限点判定当前用户的题目可见范围。
+func (s *Server) questionVisibilityFor(r *http.Request, perm string) questionVisibility {
+	userID := auth.GetUserID(r.Context())
+	if userID == "" {
+		return questionVisibility{restricted: true, ownerOnly: true}
+	}
+	if s.hasPermission(r, domain.PermQuestionViewAll) {
+		return questionVisibility{}
+	}
+	scope, fullScope, hasPerm, err := s.authSvc.GetBankScope(r.Context(), userID, perm)
+	if err != nil || !hasPerm {
+		return questionVisibility{restricted: true, ownerOnly: true}
+	}
+	if !fullScope {
+		return questionVisibility{scope: scope, restricted: true}
+	}
+	// 未分配题库范围且无 view_all：仅本人题目。
+	return questionVisibility{ownerOnly: true}
+}
+
+// applyQuestionVisibility 把个人轴可见范围写入题目过滤条件。
+// 注意：applyQuestionScope 对 scope=personal 会预先写入 OwnerID（仅本人），
+// 这里必须按可见性档位显式覆盖（view_all / 题库范围时清除该预置值）。
+func (s *Server) applyQuestionVisibility(r *http.Request, filter *storage.QuestionFilter, perm string) {
+	v := s.questionVisibilityFor(r, perm)
+	filter.BankScope = v.scope
+	filter.ScopeRestricted = v.restricted
+	filter.IncludeLegacyOwner = false
+	if v.ownerOnly {
+		filter.OwnerID = auth.GetUserID(r.Context())
+	} else {
+		filter.OwnerID = ""
+	}
+}
+
+// personalAxisVisible 个人题库轴上非本人题目的可见性判定：
+// view_all → 放行（仍需持有 perm）；bank_ids 范围授权 → 题目须落在范围内；
+// 空范围且无 view_all → 拒绝（默认只能看本人的题）。
+// 全局分享轴（questionShare 分支）不经过本函数，由 question:view_global 独立授权。
+func (s *Server) personalAxisVisible(r *http.Request, q *domain.A2Question, perm string) bool {
+	if s.hasPermission(r, domain.PermQuestionViewAll) {
+		return s.hasPermission(r, perm)
+	}
+	_, fullScope, hasPerm, err := s.authSvc.GetBankScope(r.Context(), auth.GetUserID(r.Context()), perm)
+	if err != nil || !hasPerm || fullScope {
+		return false
+	}
+	return s.permissionInQuestionBank(r, q, perm)
 }
 
 // loadViewableQuestion 用题目所属生命周期分层自动选择正确的查看权限。
@@ -82,21 +144,29 @@ func (s *Server) loadViewableQuestion(r *http.Request, id string) (*domain.A2Que
 type bankScopeEval struct {
 	hasPerm   bool
 	fullScope bool
+	// ownerID 非空表示“无 view_all 且未分配题库范围”：仅本人题目可见。
+	ownerID   string
 	bankSet   map[string]bool
 }
 
 // bankScopeEvalFor 获取用户对指定权限点的范围判定器（一次查库）。
 func (s *Server) bankScopeEvalFor(ctx context.Context, userID, perm string) bankScopeEval {
+	viewAll, err := s.authSvc.HasPermission(ctx, userID, domain.PermQuestionViewAll)
+	if err == nil && viewAll {
+		return bankScopeEval{hasPerm: true, fullScope: true}
+	}
 	scope, fullScope, hasPerm, err := s.authSvc.GetBankScope(ctx, userID, perm)
 	if err != nil || !hasPerm {
 		return bankScopeEval{}
 	}
-	e := bankScopeEval{hasPerm: true, fullScope: fullScope}
-	if !fullScope {
-		e.bankSet = make(map[string]bool, len(scope))
-		for _, b := range scope {
-			e.bankSet[b] = true
-		}
+	if fullScope {
+		// 未分配题库范围且无 view_all：仅本人题目可见。
+		return bankScopeEval{hasPerm: true, ownerID: userID}
+	}
+	e := bankScopeEval{hasPerm: true}
+	e.bankSet = make(map[string]bool, len(scope))
+	for _, b := range scope {
+		e.bankSet[b] = true
 	}
 	return e
 }
@@ -105,6 +175,9 @@ func (s *Server) bankScopeEvalFor(ctx context.Context, userID, perm string) bank
 func (e bankScopeEval) allows(q *domain.A2Question) bool {
 	if !e.hasPerm {
 		return false
+	}
+	if e.ownerID != "" {
+		return q != nil && q.OwnerID == e.ownerID
 	}
 	if e.fullScope {
 		return true
@@ -127,7 +200,13 @@ func tierFilter(tier domain.QuestionTier, evals ...bankScopeEval) *storage.Quest
 	}
 	f := &storage.QuestionFilter{Tiers: []string{string(tier)}}
 	var intersect map[string]bool
+	ownerID := ""
 	for _, e := range evals {
+		if e.ownerID != "" {
+			// 任一判定器为“仅本人”→ 合成结果收敛为仅本人（本人题不受题库标签限制）
+			ownerID = e.ownerID
+			continue
+		}
 		if e.fullScope {
 			continue
 		}
@@ -143,6 +222,10 @@ func tierFilter(tier domain.QuestionTier, evals ...bankScopeEval) *storage.Quest
 				}
 			}
 		}
+	}
+	if ownerID != "" {
+		f.OwnerID = ownerID
+		return f
 	}
 	if intersect != nil {
 		f.ScopeRestricted = true
@@ -172,7 +255,7 @@ func (s *Server) questionInScope(r *http.Request, q *domain.A2Question, perm str
 			return false
 		}
 	}
-	return s.permissionInQuestionBank(r, q, perm)
+	return s.personalAxisVisible(r, q, perm)
 }
 
 func (s *Server) permissionInQuestionBank(r *http.Request, q *domain.A2Question, perm string) bool {
@@ -381,7 +464,8 @@ func (s *Server) bankCatalogScope(r *http.Request) (scope map[string]bool, restr
 		return false
 	}
 	for _, permission := range []string{
-		domain.PermUserManage, domain.PermRoleManage, domain.PermBankManage, domain.PermFlowManage,
+		domain.PermQuestionViewAll, domain.PermUserManage, domain.PermRoleManage,
+		domain.PermBankManage, domain.PermFlowManage,
 	} {
 		if has(permission) {
 			return nil, false
@@ -402,7 +486,17 @@ func (s *Server) bankCatalogScope(r *http.Request) (scope map[string]bool, restr
 		return map[string]bool{}, true
 	}
 	if len(user.BankIDs) == 0 {
-		return nil, false
+		// 无 view_all、无管理权限、未分配题库范围：仅暴露本人题目涉及的子题库，
+		// 不再向普通用户泄露全部子题库目录（如管理员自建的测试题库）。
+		ownerBanks, err := s.questionStore.OwnerBankIDs(r.Context(), userID)
+		if err != nil {
+			return map[string]bool{}, true
+		}
+		scope = make(map[string]bool, len(ownerBanks))
+		for _, bankID := range ownerBanks {
+			scope[bankID] = true
+		}
+		return scope, true
 	}
 	scope = make(map[string]bool, len(user.BankIDs))
 	for _, bankID := range user.BankIDs {
