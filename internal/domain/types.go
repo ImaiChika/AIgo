@@ -99,14 +99,18 @@ type GenerationRequest struct {
 }
 
 // 单题命题运行状态。运行记录用于刷新恢复与幂等重试，不改变题目生命周期。
+// pending 为持久化队列的待执行态：请求快照已落库，等待 worker 抢占执行；
+// 进程重启后未完成运行由新进程的 worker 接管（running 且租约过期可重新抢占）。
 const (
+	GenerationRunPending   = "pending"
 	GenerationRunRunning   = "running"
 	GenerationRunSucceeded = "succeeded"
 	GenerationRunFailed    = "failed"
 )
 
 // GenerationRun 是一次单题命题请求的持久化执行记录。
-// 题目与 AI 检查仍分别落在 questions / ai_check_tasks；此处只保存执行指针和时间。
+// 请求快照（RequestJSON）在提交时落库，worker 依据快照执行，不再依赖发起时的 HTTP 请求；
+// 题目与 AI 检查仍分别落在 questions / ai_check_tasks，此处只保存执行指针和时间。
 type GenerationRun struct {
 	ID             string     `json:"id"`
 	OwnerID        string     `json:"-"`
@@ -117,6 +121,13 @@ type GenerationRun struct {
 	StartedAt      time.Time  `json:"started_at"`
 	CompletedAt    *time.Time `json:"completed_at,omitempty"`
 	UpdatedAt      time.Time  `json:"updated_at"`
+	// Attempts 已执行次数（worker 抢占时递增）；MaxAttempts 重试上限，超过即 failed 终态。
+	Attempts    int `json:"attempts,omitempty"`
+	MaxAttempts int `json:"max_attempts,omitempty"`
+	// LeasedUntil running 租约到期时间；pending 态复用为可重试时间。仅服务端调度使用，不外发。
+	LeasedUntil time.Time `json:"-"`
+	// RequestJSON 提交时的请求快照（pipeline.GenerationSpec 序列化），仅服务端执行使用。
+	RequestJSON []byte `json:"-"`
 }
 
 // EvaluationReport 题目质量评估报告。

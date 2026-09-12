@@ -232,10 +232,11 @@ function applyGenerationRun(data, { restoring = false } = {}) {
   generationStartedAt.value = timestamp(run.started_at) || generationStartedAt.value || Date.now();
   generationQuestionIds.value = run.question_ids || generationQuestionIds.value;
 
-  if (run.status === "running") {
+  // pending（已入持久化队列）与 running（worker 执行中）都视为进行中，继续轮询
+  if (run.status === "running" || run.status === "pending") {
     loading.value = true;
     workspaceStatus.value = "generating";
-    progressMsg.value = restoring ? "已恢复命题任务，系统仍在生成试题" : "正在生成试题，请稍候...";
+    progressMsg.value = restoring ? "已恢复命题任务，系统仍在生成试题" : "任务已提交，正在生成试题...";
     persistWorkspace();
     return false;
   }
@@ -259,6 +260,9 @@ function applyGenerationRun(data, { restoring = false } = {}) {
     showQuestion(Math.max(0, safeIndex));
   } else {
     resetQuestionPreview();
+  }
+  if (workspaceStatus.value === "generating" || workspaceStatus.value === "recovering") {
+    showToast(`已生成 ${generationQuestionIds.value.length} 道题（质量检查进行中）`);
   }
   progressMsg.value = `已生成 ${generationQuestionIds.value.length} 道题，正在自动检查质量`;
   checkStartedAt.value ||= generationCompletedAt.value;

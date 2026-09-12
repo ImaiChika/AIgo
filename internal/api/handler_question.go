@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,13 +14,16 @@ import (
 
 	"aigo/internal/auth"
 	"aigo/internal/domain"
+	"aigo/internal/pipeline"
 	"aigo/internal/storage"
 )
 
-// handleGenerate 调用千问大模型生成 A2 型试题。
+// handleGenerate 提交单题命题持久化任务。
 // 请求：{"subject": "消化", "difficulty": "0.65", "topic": "消化性溃疡", "outline_code": "110.4.3.1.1", "count": 1, "bank_id": "bank-neike"}
-// 返回：{"questions": [...], "count": N}
-// 生成的题目自动保存到数据库，状态为 ai_draft 草稿。
+// 返回：{"run": {...status=pending...}, "questions": [], "count": 0}
+// 服务端把请求快照与 pending 运行落库后立即返回；由后台 worker 抢占执行
+// （生成 → 落库 → AI 检查 → 题库归纳 → 审计），进程重启后未完成运行可被接管。
+// 前端凭 run_id 轮询 GET /api/generation-runs/{id} 获取进度与已生成题目。
 func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RunID            string `json:"run_id"` // 客户端生成的幂等运行 ID，用于刷新恢复
@@ -113,87 +117,51 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	startedAt := time.Now()
-	if s.generationRunStore != nil {
-		created, err := s.generationRunStore.CreateGenerationRun(r.Context(), domain.GenerationRun{
-			ID: req.RunID, OwnerID: userID, Status: domain.GenerationRunRunning,
-			RequestedCount: req.Count, StartedAt: startedAt,
-		})
-		if err != nil {
-			writeError(w, 500, "创建命题运行记录失败")
-			return
-		}
-		if !created {
-			existing, err := s.generationRunStore.GetGenerationRun(r.Context(), req.RunID)
-			if err != nil {
-				writeError(w, 500, "读取命题运行记录失败")
-				return
-			}
-			if existing == nil || existing.OwnerID != userID {
-				writeError(w, 404, "命题运行记录不存在")
-				return
-			}
-			s.respondGenerationRun(w, r.Context(), existing)
-			return
-		}
+	if s.generationRunStore == nil {
+		writeError(w, 503, "命题运行记录服务不可用")
+		return
 	}
-
 	actor := auth.GetUsername(r.Context())
 	if actor == "" {
 		actor = "ai"
 	}
-	// 浏览器刷新会取消原始 HTTP 请求，但已提交的命题任务应继续完成并可按 run_id 恢复。
-	workCtx, cancelWork := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Minute)
-	defer cancelWork()
-	generationCtx := storage.WithQuestionChange(workCtx, storage.QuestionChange{Actor: actor, OwnerID: userID, ChangeType: "ai_generate", ChangeNote: "AI生成题目草稿"})
-	// 调用 pipeline 生成题目（内部会调千问API + 解析JSON + 存入数据库，状态为 ai_draft 草稿）
-	questions, err := s.pipe.Generate(generationCtx, genReq)
+	// 请求快照随运行落库：worker 依据快照执行，进程重启后仍可接管未完成运行
+	specJSON, err := json.Marshal(pipeline.GenerationSpec{
+		Request: genReq, BankID: req.BankID, Actor: actor, OwnerID: userID,
+	})
 	if err != nil {
-		message := "生成失败: " + err.Error()
-		if s.generationRunStore != nil {
-			_ = s.generationRunStore.FailGenerationRun(workCtx, req.RunID, message)
-		}
-		writeError(w, 500, message)
+		writeError(w, 500, "序列化命题请求失败")
 		return
 	}
-
-	// 记录日志
-	for _, q := range questions {
-		if req.BankID != "" {
-			q.BankIDs = []string{req.BankID}
-		} else {
-			// 未指定题库：按题目专业自动归入匹配的题库（专业范围自动归纳）
-			if err := s.bankSvc.AssignBank(workCtx, &q); err != nil {
-				fmt.Printf("⚠ 自动归纳题库失败: %v\n", err)
-			}
-		}
-		if err := s.questionStore.SaveQuestion(generationCtx, q); err != nil {
-			fmt.Printf("⚠ 更新题目题库归属失败: %v\n", err)
-		}
-		s.auditSvc.LogCreate(workCtx, q.ID, actor)
-	}
-	questionIDs := make([]string, 0, len(questions))
-	for _, q := range questions {
-		questionIDs = append(questionIDs, q.ID)
-	}
-	if s.generationRunStore != nil {
-		if err := s.generationRunStore.CompleteGenerationRun(workCtx, req.RunID, questionIDs); err != nil {
-			writeError(w, 500, "更新命题运行记录失败")
-			return
-		}
-		if run, err := s.generationRunStore.GetGenerationRun(workCtx, req.RunID); err == nil && run != nil {
-			s.respondGenerationRun(w, workCtx, run)
-			return
-		}
-	}
-
-	writeJSON(w, 200, map[string]any{
-		"questions": questions,
-		"count":     len(questions),
-		"run": domain.GenerationRun{
-			ID: req.RunID, Status: domain.GenerationRunSucceeded, RequestedCount: req.Count,
-			QuestionIDs: questionIDs, StartedAt: startedAt,
-		},
+	created, err := s.generationRunStore.CreateGenerationRun(r.Context(), domain.GenerationRun{
+		ID: req.RunID, OwnerID: userID, Status: domain.GenerationRunPending,
+		RequestedCount: req.Count, StartedAt: startedAt, MaxAttempts: 3, RequestJSON: specJSON,
 	})
+	if err != nil {
+		writeError(w, 500, "创建命题运行记录失败")
+		return
+	}
+	if !created {
+		// 幂等：同一 run_id 重复提交时返回已有运行状态，不重复执行
+		existing, err := s.generationRunStore.GetGenerationRun(r.Context(), req.RunID)
+		if err != nil {
+			writeError(w, 500, "读取命题运行记录失败")
+			return
+		}
+		if existing == nil || existing.OwnerID != userID {
+			writeError(w, 404, "命题运行记录不存在")
+			return
+		}
+		s.respondGenerationRun(w, r.Context(), existing)
+		return
+	}
+	// 提交成功：立即返回 pending 运行（无题目），前端进入轮询恢复流程
+	run := &domain.GenerationRun{
+		ID: req.RunID, OwnerID: userID, Status: domain.GenerationRunPending,
+		RequestedCount: req.Count, StartedAt: startedAt, MaxAttempts: 3, Attempts: 0,
+		UpdatedAt: startedAt,
+	}
+	s.respondGenerationRun(w, r.Context(), run)
 }
 
 var generationRunIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
@@ -222,7 +190,17 @@ func (s *Server) handleGetGenerationRun(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	// 服务进程若在生成期间异常退出，不让工作台永久停留在“执行中”。
-	if run.Status == domain.GenerationRunRunning && time.Since(run.StartedAt) > 12*time.Minute {
+	// 新模型以租约判定：running 且租约过期超过 5 分钟视为卡死（worker 正常执行
+	// 期间会续租覆盖该窗口）；旧数据无租约时沿用 12 分钟兜底。
+	stale := false
+	if run.Status == domain.GenerationRunRunning {
+		if run.LeasedUntil.IsZero() {
+			stale = time.Since(run.StartedAt) > 12*time.Minute
+		} else {
+			stale = time.Since(run.LeasedUntil) > 5*time.Minute
+		}
+	}
+	if stale {
 		_ = s.generationRunStore.FailGenerationRun(r.Context(), run.ID, "命题执行超时，请重新提交")
 		run, err = s.generationRunStore.GetGenerationRun(r.Context(), id)
 		if err != nil || run == nil {

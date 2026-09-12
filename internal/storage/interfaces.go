@@ -191,12 +191,20 @@ type QuestionStore interface {
 }
 
 // GenerationRunStore 持久化单题命题运行记录，供刷新恢复、阶段计时和请求幂等使用。
-// 运行记录只保存执行状态和题目 ID，不替代题目及 AI 检查任务表。
+// 运行记录同时充当持久化生成队列：pending 运行由后台 worker 抢占执行，
+// 请求快照随提交落库，进程重启后未完成运行可由新进程接管。
 type GenerationRunStore interface {
 	CreateGenerationRun(ctx context.Context, run domain.GenerationRun) (bool, error)
 	GetGenerationRun(ctx context.Context, id string) (*domain.GenerationRun, error)
 	CompleteGenerationRun(ctx context.Context, id string, questionIDs []string) error
 	FailGenerationRun(ctx context.Context, id, message string) error
+	// ClaimNextGenerationRun 抢占下一个可执行运行（pending 且到达可重试时间，
+	// 或 running 且租约已过期），置为 running、执行次数+1 并续租；返回运行记录
+	// 与其请求快照 JSON（快照由提交方写入，执行方据此还原请求）。队列为空返回 (nil, nil, nil)。
+	ClaimNextGenerationRun(ctx context.Context, lease time.Duration) (*domain.GenerationRun, []byte, error)
+	// RetryGenerationRun 记录一次可重试失败：执行次数未达上限则回到 pending 并在
+	// backoff 后才可再次被抢占（返回 true）；已达上限标记 failed 终态（返回 false）。
+	RetryGenerationRun(ctx context.Context, id, errMsg string, backoff time.Duration) (bool, error)
 }
 
 // QuestionShareItem 是分享申请及其题目内容。题目中的 CreatedBy/OwnerID

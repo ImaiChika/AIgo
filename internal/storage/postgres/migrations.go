@@ -19,7 +19,7 @@ var baselineSchemaSQL string
 
 const (
 	// LatestSchemaVersion 是当前程序能够使用的最新数据库版本。
-	LatestSchemaVersion int64 = 23
+	LatestSchemaVersion int64 = 24
 	// migrationLockKey 在同一 PostgreSQL 数据库内串行化所有 AIgo Schema 迁移。
 	migrationLockKey int64 = 0x4149474f5f4d4947 // "AIGO_MIG"
 )
@@ -303,6 +303,23 @@ func configuredMigrations(schemaSQL string) []migration {
 				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 			)`,
 			`CREATE INDEX IF NOT EXISTS idx_generation_runs_owner_started ON generation_runs(owner_id, started_at DESC)`,
+		}},
+		{Version: 24, Name: "generation_run_persistent_queue", Statements: []string{
+			// 单题生成升级为持久化任务：请求快照随提交落库，worker 抢占执行，
+			// 租约到期可由新进程接管，失败按次数上限退避重试。
+			`ALTER TABLE generation_runs
+				ADD COLUMN IF NOT EXISTS request_json JSONB,
+				ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0,
+				ADD COLUMN IF NOT EXISTS max_attempts INT NOT NULL DEFAULT 3,
+				ADD COLUMN IF NOT EXISTS leased_until TIMESTAMPTZ`,
+			// v23 的内联 CHECK 约束被自动命名为 generation_runs_status_check，放宽加入 pending
+			`DO $$
+			 BEGIN
+				ALTER TABLE generation_runs DROP CONSTRAINT generation_runs_status_check;
+			 EXCEPTION WHEN undefined_object THEN NULL;
+			 END $$;`,
+			`ALTER TABLE generation_runs ADD CONSTRAINT generation_runs_status_check CHECK (status IN ('pending','running','succeeded','failed'))`,
+			`CREATE INDEX IF NOT EXISTS idx_generation_runs_status_lease ON generation_runs(status, leased_until)`,
 		}},
 	}
 }

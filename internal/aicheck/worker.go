@@ -6,6 +6,7 @@ package aicheck
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"aigo/internal/domain"
@@ -90,9 +91,9 @@ func (s *Service) CheckAsync(questionIDs ...string) {
 		}
 		created, err := s.taskStore.EnqueueCheckTask(context.Background(), task)
 		if err != nil {
-			fmt.Printf("⚠ AI 检查任务入队失败: %s: %v\n", id, err)
+			slog.Error("AI 检查任务入队失败", "question_id", id, "error", err)
 		} else if !created {
-			fmt.Printf("AI 检查任务已存在，跳过重复入队: %s\n", id)
+			slog.Info("AI 检查任务已存在，跳过重复入队", "question_id", id)
 		}
 	}
 }
@@ -100,7 +101,7 @@ func (s *Service) CheckAsync(questionIDs ...string) {
 // StartWorkers 启动 n 个后台检查 worker，ctx 取消时退出。
 func (s *Service) StartWorkers(ctx context.Context, n int) {
 	if s.taskStore == nil {
-		fmt.Println("⚠ 未配置 AI 检查任务存储，跳过 worker 启动")
+		slog.Warn("未配置 AI 检查任务存储，跳过 worker 启动")
 		return
 	}
 	if n < 1 {
@@ -109,8 +110,8 @@ func (s *Service) StartWorkers(ctx context.Context, n int) {
 	for i := 0; i < n; i++ {
 		go s.runWorker(ctx)
 	}
-	fmt.Printf("✓ AI 检查后台 worker 已启动（并发 %d，单次超时 %s，重试上限 %d 次）\n",
-		n, s.checkTimeoutOrDefault(), s.maxAttemptsOrDefault())
+	slog.Info("AI 检查后台 worker 已启动",
+		"并发", n, "单次超时", s.checkTimeoutOrDefault().String(), "重试上限", s.maxAttemptsOrDefault())
 }
 
 func (s *Service) runWorker(ctx context.Context) {
@@ -122,7 +123,7 @@ func (s *Service) runWorker(ctx context.Context) {
 		}
 		task, err := s.taskStore.ClaimNextCheckTask(ctx, s.leaseDuration())
 		if err != nil {
-			fmt.Printf("⚠ AI 检查任务抢占失败: %v\n", err)
+			slog.Error("AI 检查任务抢占失败", "error", err)
 			if !sleepCtx(ctx, pollInterval) {
 				return
 			}
@@ -142,6 +143,7 @@ func (s *Service) runWorker(ctx context.Context) {
 // 成功路径中，任务完成标记与检查结论在同一事务落库（见 service.checkQuestion），
 // 不会出现“题目已通过/已删除但任务仍挂着”的中间态。
 func (s *Service) executeTask(ctx context.Context, task *domain.AICheckTask) {
+	started := time.Now()
 	execCtx, cancel := context.WithTimeout(ctx, s.checkTimeoutOrDefault())
 	defer cancel()
 
@@ -150,10 +152,15 @@ func (s *Service) executeTask(ctx context.Context, task *domain.AICheckTask) {
 			err = fmt.Errorf("检查超时（单次上限 %s）", s.checkTimeoutOrDefault())
 		}
 		if ferr := s.taskStore.FailCheckTask(ctx, task.ID, err.Error(), s.retryBackoffFor(task.Attempts)); ferr != nil {
-			fmt.Printf("⚠ 记录 AI 检查失败状态出错: %s: %v\n", task.ID, ferr)
+			slog.Error("记录 AI 检查失败状态出错", "task_id", task.ID, "error", ferr)
 		}
-		fmt.Printf("⚠ AI 检查失败（第 %d/%d 次）: %s: %v\n", task.Attempts, task.MaxAttempts, task.QuestionID, err)
+		slog.Warn("AI 检查失败，将按退避重试",
+			"task_id", task.ID, "question_id", task.QuestionID,
+			"attempts", task.Attempts, "max_attempts", task.MaxAttempts, "error", err)
+		return
 	}
+	slog.Info("AI 检查完成", "task_id", task.ID, "question_id", task.QuestionID,
+		"attempts", task.Attempts, "duration_ms", time.Since(started).Milliseconds())
 }
 
 // PendingCount 返回当前排队中 + 执行中的任务数（用于观测）。

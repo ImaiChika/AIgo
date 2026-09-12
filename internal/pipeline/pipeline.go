@@ -29,16 +29,29 @@ type Pipeline struct {
 	kpSvc     *knowledge.Service
 	store     storage.QuestionStore
 	checker   DraftChecker
+	// runs 单题命题运行记录存储（即持久化生成队列）；store 同时实现时自动可用。
+	runs storage.GenerationRunStore
+	// bankAssigner/auditor 由 serve 模式注入，worker 执行时复用与原同步路径相同的题库归纳与审计行为。
+	bankAssigner BankAssigner
+	auditor      GenerationAuditor
+
+	// GenerationPollInterval/GenerationRetryBackoff 生成 worker 可调参数，零值使用默认（见 generation_worker.go）。
+	GenerationPollInterval time.Duration
+	GenerationRetryBackoff time.Duration
 }
 
 func New(generator *generator.Service, evaluator *evaluator.Service, review *review.Service, kpSvc *knowledge.Service, store storage.QuestionStore) *Pipeline {
-	return &Pipeline{
+	p := &Pipeline{
 		generator: generator,
 		evaluator: evaluator,
 		review:    review,
 		kpSvc:     kpSvc,
 		store:     store,
 	}
+	if rs, ok := store.(storage.GenerationRunStore); ok {
+		p.runs = rs
+	}
+	return p
 }
 
 func (p *Pipeline) Doctor(ctx context.Context) error {
@@ -52,8 +65,31 @@ func (p *Pipeline) Doctor(ctx context.Context) error {
 // SetDraftChecker 注入草稿自动检查器（serve 模式装配，见 cmd/aigo/main.go）。
 func (p *Pipeline) SetDraftChecker(c DraftChecker) { p.checker = c }
 
-// Generate 直接调用生成服务，供 API 使用。
+// Generate 直接调用生成服务，供 API 与 CLI 使用。
+// 生成 → 校验标注 → 逐题落库 → 触发 AI 检查；持久化 worker 路径拆用
+// generateDrafts/persistDrafts 以区分可重试与不可重试阶段（见 generation_worker.go）。
 func (p *Pipeline) Generate(ctx context.Context, req domain.GenerationRequest) ([]domain.A2Question, error) {
+	questions, err := p.generateDrafts(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.persistDrafts(ctx, questions); err != nil {
+		return nil, err
+	}
+	// 草稿落库后自动提交 AI 质量检查（后台异步执行，不阻塞生成响应）
+	if p.checker != nil && len(questions) > 0 {
+		ids := make([]string, 0, len(questions))
+		for _, q := range questions {
+			ids = append(ids, q.ID)
+		}
+		p.checker.CheckAsync(ids...)
+	}
+	return questions, nil
+}
+
+// generateDrafts 调用 LLM 生成并校验题目草稿，不产生任何落库副作用。
+// 该阶段失败（LLM 超时、解析失败等）可安全重试。
+func (p *Pipeline) generateDrafts(ctx context.Context, req domain.GenerationRequest) ([]domain.A2Question, error) {
 	questions, err := p.generator.Generate(ctx, req)
 	if err != nil {
 		return nil, err
@@ -65,19 +101,19 @@ func (p *Pipeline) Generate(ctx context.Context, req domain.GenerationRequest) (
 				Note:  err.Error(),
 			})
 		}
-		if err := p.store.SaveQuestion(ctx, questions[i]); err != nil {
-			return nil, err
-		}
-	}
-	// 草稿落库后自动提交 AI 质量检查（后台异步执行，不阻塞生成响应）
-	if p.checker != nil && len(questions) > 0 {
-		ids := make([]string, 0, len(questions))
-		for _, q := range questions {
-			ids = append(ids, q.ID)
-		}
-		p.checker.CheckAsync(ids...)
 	}
 	return questions, nil
+}
+
+// persistDrafts 把草稿逐题写入存储。任何失败由调用方决定重试语义；
+// 部分落库后的失败不允许盲目重试（会生成重复题目）。
+func (p *Pipeline) persistDrafts(ctx context.Context, questions []domain.A2Question) error {
+	for i := range questions {
+		if err := p.store.SaveQuestion(ctx, questions[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p *Pipeline) GenerateSample(ctx context.Context) error {

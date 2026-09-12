@@ -254,14 +254,17 @@ func (s *Store) ListProfessions(ctx context.Context) ([]string, error) {
 
 // ===== 单题命题运行记录 =====
 
-const generationRunColumns = `id, owner_id, status, requested_count, question_ids, error, started_at, completed_at, updated_at`
+const generationRunColumns = `id, owner_id, status, requested_count, question_ids, error, started_at, completed_at, updated_at, attempts, max_attempts, leased_until, request_json`
 
 func scanGenerationRun(scanner interface{ Scan(dest ...any) error }) (*domain.GenerationRun, error) {
 	var run domain.GenerationRun
 	var questionIDs []string
 	var completedAt sql.NullTime
+	var leasedUntil sql.NullTime
+	var requestJSON []byte
 	if err := scanner.Scan(&run.ID, &run.OwnerID, &run.Status, &run.RequestedCount,
-		pq.Array(&questionIDs), &run.Error, &run.StartedAt, &completedAt, &run.UpdatedAt); err != nil {
+		pq.Array(&questionIDs), &run.Error, &run.StartedAt, &completedAt, &run.UpdatedAt,
+		&run.Attempts, &run.MaxAttempts, &leasedUntil, &requestJSON); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -271,6 +274,10 @@ func scanGenerationRun(scanner interface{ Scan(dest ...any) error }) (*domain.Ge
 	if completedAt.Valid {
 		run.CompletedAt = &completedAt.Time
 	}
+	if leasedUntil.Valid {
+		run.LeasedUntil = leasedUntil.Time
+	}
+	run.RequestJSON = requestJSON
 	return &run, nil
 }
 
@@ -278,21 +285,73 @@ func (s *Store) CreateGenerationRun(ctx context.Context, run domain.GenerationRu
 	if run.StartedAt.IsZero() {
 		run.StartedAt = time.Now()
 	}
+	if run.MaxAttempts <= 0 {
+		run.MaxAttempts = 3
+	}
 	// question_ids 是 NOT NULL 列：nil 切片会被 pq 编码为 NULL 并触发约束错误，统一写入空数组。
 	questionIDs := run.QuestionIDs
 	if questionIDs == nil {
 		questionIDs = []string{}
 	}
+	var requestJSON any
+	if len(run.RequestJSON) > 0 {
+		requestJSON = run.RequestJSON
+	}
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO generation_runs (id, owner_id, status, requested_count, question_ids, error, started_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,'',$6,$6)
+		INSERT INTO generation_runs (id, owner_id, status, requested_count, question_ids, error, started_at, updated_at, max_attempts, request_json)
+		VALUES ($1,$2,$3,$4,$5,'',$6,$6,$7,$8)
 		ON CONFLICT (id) DO NOTHING
-	`, run.ID, run.OwnerID, run.Status, run.RequestedCount, pq.Array(questionIDs), run.StartedAt)
+	`, run.ID, run.OwnerID, run.Status, run.RequestedCount, pq.Array(questionIDs), run.StartedAt, run.MaxAttempts, requestJSON)
 	if err != nil {
 		return false, err
 	}
 	affected, err := res.RowsAffected()
 	return affected > 0, err
+}
+
+// ClaimNextGenerationRun 抢占下一个可执行运行：pending 且到达可重试时间，或
+// running 且租约过期（进程崩溃遗留）。抢占置 running、attempts+1 并续租，
+// 语义与 AI 检查任务队列一致（FOR UPDATE SKIP LOCKED 防多 worker 重复执行）。
+func (s *Store) ClaimNextGenerationRun(ctx context.Context, lease time.Duration) (*domain.GenerationRun, []byte, error) {
+	row := s.db.QueryRowContext(ctx, `
+		UPDATE generation_runs SET status='running', attempts=attempts+1, leased_until=$1, updated_at=NOW()
+		WHERE id = (
+			SELECT id FROM generation_runs
+			WHERE (status='pending' AND (leased_until IS NULL OR leased_until <= NOW()))
+			   OR (status='running' AND leased_until <= NOW())
+			ORDER BY started_at
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING `+generationRunColumns, time.Now().Add(lease))
+	run, err := scanGenerationRun(row)
+	if err != nil || run == nil {
+		return nil, nil, err
+	}
+	return run, run.RequestJSON, nil
+}
+
+// RetryGenerationRun 记录一次可重试失败：执行次数未达上限则回 pending 并退避
+// （返回 true），已达上限标记 failed 终态（返回 false）。
+func (s *Store) RetryGenerationRun(ctx context.Context, id, errMsg string, backoff time.Duration) (bool, error) {
+	row := s.db.QueryRowContext(ctx, `
+		UPDATE generation_runs SET
+			status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'pending' END,
+			leased_until = CASE WHEN attempts >= max_attempts THEN NULL ELSE $2::timestamptz END,
+			error = $3,
+			completed_at = CASE WHEN attempts >= max_attempts THEN NOW() ELSE completed_at END,
+			updated_at = NOW()
+		WHERE id=$1 AND status='running'
+		RETURNING status
+	`, id, time.Now().Add(backoff), errMsg)
+	var status string
+	if err := row.Scan(&status); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return status == domain.GenerationRunPending, nil
 }
 
 func (s *Store) GetGenerationRun(ctx context.Context, id string) (*domain.GenerationRun, error) {

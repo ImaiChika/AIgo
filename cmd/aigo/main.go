@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -39,6 +40,9 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) error {
+	// 统一结构化日志：后台任务（生成/检查）以键值对字段记录 run/task/attempt 等
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
 	if len(args) < 2 {
 		printUsage()
 		return nil
@@ -168,6 +172,9 @@ func run(ctx context.Context, args []string) error {
 
 	pipe := pipeline.New(genSvc, evaluator.NewService(), reviewSvc, kpSvc, pgStore)
 	pipe.SetDraftChecker(aiCheckSvc)
+	// 单题生成持久化任务：worker 执行时复用与原同步路径一致的题库归纳与审计行为
+	pipe.SetBankAssigner(bankSvc)
+	pipe.SetGenerationAuditor(auditSvc)
 
 	// 自动加载审核流程配置（仅在数据库为空时导入，避免覆盖管理员在 UI 上的修改）
 	existingFlows, _ := reviewSvc.ListFlows(ctx)
@@ -248,6 +255,8 @@ func run(ctx context.Context, args []string) error {
 		if cfg.AICheck.AutoEnabled {
 			aiCheckSvc.StartWorkers(workerCtx, cfg.AICheck.Concurrency)
 		}
+		// 启动单题生成后台 worker：消费 pending 命题运行（请求快照已落库，可恢复/重试）
+		pipe.StartGenerationWorkers(workerCtx, 2)
 		fmt.Printf("AI 质量检查: 自动触发=%v 并发=%d 模型=%s 送审强制前置=%v\n",
 			cfg.AICheck.AutoEnabled, cfg.AICheck.Concurrency, cfg.AICheck.Client.Model, cfg.ReviewRequireAI)
 

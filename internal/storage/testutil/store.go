@@ -409,8 +409,12 @@ func (s *MemoryStore) CreateGenerationRun(_ context.Context, run domain.Generati
 	if run.StartedAt.IsZero() {
 		run.StartedAt = time.Now()
 	}
+	if run.MaxAttempts <= 0 {
+		run.MaxAttempts = 3
+	}
 	run.UpdatedAt = run.StartedAt
 	run.QuestionIDs = append([]string(nil), run.QuestionIDs...)
+	run.RequestJSON = append([]byte(nil), run.RequestJSON...)
 	s.generationRuns[run.ID] = run
 	return true, nil
 }
@@ -423,7 +427,63 @@ func (s *MemoryStore) GetGenerationRun(_ context.Context, id string) (*domain.Ge
 		return nil, nil
 	}
 	run.QuestionIDs = append([]string(nil), run.QuestionIDs...)
+	run.RequestJSON = append([]byte(nil), run.RequestJSON...)
 	return &run, nil
+}
+
+// ClaimNextGenerationRun 抢占 pending 或租约过期的 running 运行，语义与 PostgreSQL 实现一致。
+func (s *MemoryStore) ClaimNextGenerationRun(_ context.Context, lease time.Duration) (*domain.GenerationRun, []byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	oldestID := ""
+	var oldest time.Time
+	for id, run := range s.generationRuns {
+		claimable := (run.Status == domain.GenerationRunPending && (run.LeasedUntil.IsZero() || !run.LeasedUntil.After(now))) ||
+			(run.Status == domain.GenerationRunRunning && !run.LeasedUntil.IsZero() && !run.LeasedUntil.After(now))
+		if !claimable {
+			continue
+		}
+		if oldestID == "" || run.StartedAt.Before(oldest) {
+			oldestID = id
+			oldest = run.StartedAt
+		}
+	}
+	if oldestID == "" {
+		return nil, nil, nil
+	}
+	run := s.generationRuns[oldestID]
+	run.Status = domain.GenerationRunRunning
+	run.Attempts++
+	run.LeasedUntil = now.Add(lease)
+	run.UpdatedAt = now
+	s.generationRuns[oldestID] = run
+	spec := append([]byte(nil), run.RequestJSON...)
+	return cloneGenerationRun(&run), spec, nil
+}
+
+// RetryGenerationRun 未达上限回 pending 退避重试，已达上限标记 failed 终态。
+func (s *MemoryStore) RetryGenerationRun(_ context.Context, id, errMsg string, backoff time.Duration) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, exists := s.generationRuns[id]
+	if !exists || run.Status != domain.GenerationRunRunning {
+		return false, nil
+	}
+	now := time.Now()
+	if run.Attempts >= run.MaxAttempts {
+		run.Status = domain.GenerationRunFailed
+		run.Error = errMsg
+		run.CompletedAt = &now
+		run.LeasedUntil = time.Time{}
+	} else {
+		run.Status = domain.GenerationRunPending
+		run.Error = errMsg
+		run.LeasedUntil = now.Add(backoff)
+	}
+	run.UpdatedAt = now
+	s.generationRuns[id] = run
+	return run.Status == domain.GenerationRunPending, nil
 }
 
 func (s *MemoryStore) CompleteGenerationRun(_ context.Context, id string, questionIDs []string) error {
@@ -438,6 +498,7 @@ func (s *MemoryStore) CompleteGenerationRun(_ context.Context, id string, questi
 	run.QuestionIDs = append([]string(nil), questionIDs...)
 	run.Error = ""
 	run.CompletedAt = &now
+	run.LeasedUntil = time.Time{}
 	run.UpdatedAt = now
 	s.generationRuns[id] = run
 	return nil
@@ -454,9 +515,18 @@ func (s *MemoryStore) FailGenerationRun(_ context.Context, id, message string) e
 	run.Status = domain.GenerationRunFailed
 	run.Error = message
 	run.CompletedAt = &now
+	run.LeasedUntil = time.Time{}
 	run.UpdatedAt = now
 	s.generationRuns[id] = run
 	return nil
+}
+
+// cloneGenerationRun 复制运行记录（含切片与快照字节），避免调用方修改内部状态。
+func cloneGenerationRun(run *domain.GenerationRun) *domain.GenerationRun {
+	out := *run
+	out.QuestionIDs = append([]string(nil), run.QuestionIDs...)
+	out.RequestJSON = append([]byte(nil), run.RequestJSON...)
+	return &out
 }
 
 func (s *MemoryStore) GetQuestion(_ context.Context, id string) (*domain.A2Question, error) {
