@@ -533,6 +533,7 @@ onMounted(async () => {
           <button type="button" class="scope-tab" :class="{ active: questionScope === 'personal' }" @click="switchScope('personal')">我的题库</button>
           <button type="button" class="scope-tab" :class="{ active: questionScope === 'global' }" @click="switchScope('global')">全局题库</button>
         </div>
+        <p v-if="hasPerm('question:view_all')" class="view-all-hint">已授予「查看全部题库」：列表包含所有用户的题目；分享与退修仅限本人题目。</p>
         <!-- 题库分类：正式 / 待审核 / 淘汰（黑字精简样式） -->
         <div v-if="visibleTiers.length" class="tier-tabs">
           <button
@@ -848,6 +849,12 @@ onMounted(async () => {
 	color: #6e7b8f;
 	font-size: 13px;
 	cursor: pointer;
+}
+
+.view-all-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #6e7b8f;
 }
 
 .scope-tab.active {

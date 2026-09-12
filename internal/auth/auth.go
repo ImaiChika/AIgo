@@ -146,9 +146,12 @@ func allPermissions() []string {
 // delegatedAdminPermissions 返回管理员默认权限：保留业务管理能力，
 // 排除角色模板管理和批量推理；批量推理由超级管理员按需单独授予。
 func delegatedAdminPermissions() []string {
-	result := make([]string, 0, len(domain.AllPermissions())-2)
+	// question:view_all（查看全部题库）按产品口径不随管理员角色默认下发：
+	// 未授予时管理员同样只能看本人题目，需要跨出题人送审时由超级管理员显式授予。
+	result := make([]string, 0, len(domain.AllPermissions())-3)
 	for _, permission := range domain.AllPermissions() {
-		if permission.Code == domain.PermRoleManage || permission.Code == domain.PermBatchRun {
+		if permission.Code == domain.PermRoleManage || permission.Code == domain.PermBatchRun ||
+			permission.Code == domain.PermQuestionViewAll {
 			continue
 		}
 		result = append(result, permission.Code)
