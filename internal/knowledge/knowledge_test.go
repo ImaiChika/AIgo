@@ -2,25 +2,31 @@ package knowledge
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"aigo/internal/storage/testutil"
 )
 
 func TestImportAndSearch(t *testing.T) {
+	// 大纲原件按约定不入 git（资料保密），无本地样例时跳过，保证 CI 可全量运行
+	const outline = "../../data/reference/2024年临床医师考试大纲代码给HCH老师-仅限课题使用勿外传.xlsx"
+	if _, err := os.Stat(outline); err != nil {
+		t.Skipf("本地样例不可用，跳过: %s: %v", outline, err)
+	}
 	ctx := context.Background()
 	store := testutil.NewMemoryKnowledgeStore()
 	svc := NewService(store)
 
 	// 导入（使用新大纲文件）
-	inserted, updated, duplicated, err := svc.ImportFromXlsx(ctx, "../../data/reference/2024年临床医师考试大纲代码给HCH老师-仅限课题使用勿外传.xlsx")
+	inserted, updated, duplicated, err := svc.ImportFromXlsx(ctx, outline)
 	if err != nil {
 		t.Fatalf("Import failed: %v", err)
 	}
 	t.Logf("导入: 新增 %d, 更新 %d, 重复 %d", inserted, updated, duplicated)
 
 	// 再次导入同一文件：全部应为重复（验证去重）
-	inserted2, _, duplicated2, err := svc.ImportFromXlsx(ctx, "../../data/reference/2024年临床医师考试大纲代码给HCH老师-仅限课题使用勿外传.xlsx")
+	inserted2, _, duplicated2, err := svc.ImportFromXlsx(ctx, outline)
 	if err != nil {
 		t.Fatalf("Reimport failed: %v", err)
 	}

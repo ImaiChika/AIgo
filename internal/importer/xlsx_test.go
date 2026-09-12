@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -9,8 +10,19 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+// requireLocalFixture 跳过依赖本地样例数据（data/ 目录不入 git）的测试，
+// 保证 CI 等无本地资料环境可以直接运行全量测试。
+func requireLocalFixture(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("本地样例不可用，跳过: %s: %v", path, err)
+	}
+}
+
 func TestReadXlsx(t *testing.T) {
-	rows, err := ReadXlsx("../../data/samples/2025执医A2.xlsx", true)
+	const sample = "../../data/samples/2025执医A2.xlsx"
+	requireLocalFixture(t, sample)
+	rows, err := ReadXlsx(sample, true)
 	if err != nil {
 		t.Fatalf("ReadXlsx failed: %v", err)
 	}
@@ -118,7 +130,9 @@ func TestExportKnowledgePointsToXlsx(t *testing.T) {
 }
 
 func TestConvertToQuestions(t *testing.T) {
-	rows, err := ReadXlsx("../../data/samples/2025执医A2.xlsx", true)
+	const sample = "../../data/samples/2025执医A2.xlsx"
+	requireLocalFixture(t, sample)
+	rows, err := ReadXlsx(sample, true)
 	if err != nil {
 		t.Fatalf("ReadXlsx failed: %v", err)
 	}

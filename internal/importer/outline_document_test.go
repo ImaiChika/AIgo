@@ -42,7 +42,11 @@ func TestLegacyKnowledgePointTable(t *testing.T) {
 }
 
 func TestLegacyKnowledgeWorkbook(t *testing.T) {
-	points, err := ReadOutlineDocument("../../data/knowledge/知识点表.xlsx")
+	const workbook = "../../data/knowledge/知识点表.xlsx"
+	if _, err := os.Stat(workbook); err != nil {
+		t.Skipf("本地样例不可用，跳过: %s: %v", workbook, err)
+	}
+	points, err := ReadOutlineDocument(workbook)
 	if err != nil {
 		t.Fatal(err)
 	}
