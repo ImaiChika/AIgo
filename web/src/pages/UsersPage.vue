@@ -581,4 +581,109 @@ onMounted(loadAll);
   color: #6e7b8f;
   padding: 30px;
 }
+
+@media (max-width: 700px) {
+  .permission-summary {
+    overflow-wrap: anywhere;
+  }
+
+  .create-form .form-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .form-hint {
+    display: block;
+    margin: 8px 0 0;
+  }
+
+  .users-table {
+    display: block;
+    width: 100%;
+  }
+
+  .users-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .users-table tbody {
+    display: grid;
+    gap: 8px;
+  }
+
+  .users-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 3px;
+    padding: 9px 10px;
+    border: 1px solid #e5ebf3;
+    border-radius: 8px;
+    background: #fff;
+  }
+
+  .users-table td {
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr);
+    gap: 8px;
+    min-width: 0;
+    padding: 4px 0;
+    border: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .users-table td::before {
+    color: #8a96a5;
+    font-size: 11px;
+  }
+
+  .users-table td:nth-child(1)::before { content: "用户名"; }
+  .users-table td:nth-child(2)::before { content: "显示名"; }
+  .users-table td:nth-child(3)::before { content: "角色"; }
+  .users-table td:nth-child(4)::before { content: "状态"; }
+  .users-table td:nth-child(5)::before { content: "权限"; }
+  .users-table td:nth-child(6)::before { content: "创建时间"; }
+  .users-table td:nth-child(7)::before { content: "操作"; }
+
+  .users-table td:last-child {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .users-table td:last-child::before {
+    flex: 0 0 64px;
+  }
+
+  .users-table td[colspan] {
+    display: block;
+  }
+
+  .users-table select {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .perm-matrix-row td {
+    display: block;
+    padding: 10px 0;
+  }
+
+  .perm-matrix-row td::before {
+    content: none !important;
+  }
+
+  .perm-checks {
+    gap: 6px;
+  }
+
+  .perm-check {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+}
 </style>

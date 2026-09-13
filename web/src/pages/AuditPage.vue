@@ -284,4 +284,84 @@ onMounted(() => {
   color: #6e7b8f;
   padding: 30px;
 }
+
+@media (max-width: 700px) {
+  .filter-row {
+    gap: 6px;
+  }
+
+  .filter-select,
+  .filter-input,
+  .filter-row button {
+    width: 100%;
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+
+  .audit-table {
+    display: block;
+    width: 100%;
+  }
+
+  .audit-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .audit-table tbody {
+    display: grid;
+    gap: 8px;
+  }
+
+  .audit-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 3px;
+    padding: 9px 10px;
+    border: 1px solid #e5ebf3;
+    border-radius: 8px;
+    background: #fff;
+  }
+
+  .audit-table td {
+    display: grid;
+    grid-template-columns: 56px minmax(0, 1fr);
+    gap: 8px;
+    min-width: 0;
+    padding: 4px 0;
+    border: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .audit-table td::before {
+    color: #8a96a5;
+    font-size: 11px;
+  }
+
+  .audit-table td:nth-child(1)::before { content: "时间"; }
+  .audit-table td:nth-child(2)::before { content: "操作"; }
+  .audit-table td:nth-child(3)::before { content: "操作人"; }
+  .audit-table td:nth-child(4)::before { content: "题目ID"; }
+  .audit-table td:nth-child(5)::before { content: "详情"; }
+
+  .audit-table td[colspan] {
+    display: block;
+    text-align: center;
+  }
+
+  .audit-table .time-cell,
+  .audit-table .id-cell,
+  .audit-table .detail-cell {
+    max-width: none;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+}
 </style>

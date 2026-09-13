@@ -655,4 +655,74 @@ onMounted(() => {
   color: #6e7b8f;
   padding: 30px;
 }
+
+@media (max-width: 700px) {
+  .review-scope {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .review-scope button {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .stat-card {
+    min-width: 0;
+    padding: 11px 6px;
+  }
+
+  .filter-row input {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .filter-row select,
+  .filter-row button {
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .result-head {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .r-info {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .r-meta {
+    flex-wrap: wrap;
+    gap: 4px 8px;
+  }
+
+  .r-status {
+    margin-left: 0;
+  }
+
+  .r-expand {
+    margin-left: auto;
+  }
+
+  .result-detail {
+    padding: 10px;
+  }
+
+  .record-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .task-line {
+    overflow-wrap: anywhere;
+  }
+}
 </style>

@@ -534,6 +534,7 @@ onMounted(() => {
 <style scoped>
 .flow-layout {
   max-width: 100%;
+  min-width: 0;
 }
 
 .create-form {
@@ -554,6 +555,8 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .submit-bank-select {
@@ -840,12 +843,16 @@ onMounted(() => {
   border-radius: 8px;
   padding: 16px;
   background: #fff;
+  min-width: 0;
 }
 
 .flow-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .flow-header strong {
@@ -863,6 +870,7 @@ onMounted(() => {
   margin: 6px 0 0;
   font-size: 12px;
   color: #6e7b8f;
+  overflow-wrap: anywhere;
 }
 
 .reviewers-hint {
@@ -913,6 +921,7 @@ onMounted(() => {
   background: #f8fbff;
   border-radius: 6px;
   font-size: 13px;
+  min-width: 0;
 }
 
 .round-num {
@@ -924,11 +933,15 @@ onMounted(() => {
 .round-name {
   color: #172033;
   font-weight: 600;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .round-experts {
   flex: 1;
+  min-width: 0;
   color: #6e7b8f;
+  overflow-wrap: anywhere;
 }
 
 .round-req {
@@ -972,5 +985,86 @@ onMounted(() => {
   text-align: center;
   color: #6e7b8f;
   padding: 30px;
+}
+
+@media (max-width: 700px) {
+  .create-form,
+  .flow-card {
+    padding: 12px;
+  }
+
+  .form-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .form-actions {
+    flex-wrap: wrap;
+  }
+
+  .flow-header {
+    align-items: flex-start;
+  }
+
+  .flow-header > div:first-child {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .flow-actions {
+    width: 100%;
+    gap: 6px;
+  }
+
+  .flow-actions .submit-bank-select {
+    flex: 1 1 100%;
+    max-width: none;
+    min-width: 0;
+  }
+
+  .flow-actions > button {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: auto;
+    min-height: 30px;
+    padding: 5px 8px;
+    white-space: normal;
+  }
+
+  .round-header {
+    flex-wrap: wrap;
+  }
+
+  .round-name-input {
+    flex: 1 1 160px;
+    min-width: 0;
+  }
+
+  .round-config {
+    gap: 8px;
+  }
+
+  .config-item {
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .config-item.full input {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .flow-round {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 6px 8px;
+  }
+
+  .flow-round .round-experts {
+    flex: 1 1 100%;
+  }
+
+  .flow-round .round-req {
+    margin-left: auto;
+  }
 }
 </style>

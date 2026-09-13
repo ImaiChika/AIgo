@@ -625,4 +625,67 @@ onMounted(loadStats);
   text-align: center;
   margin: 10px 0 0;
 }
+
+@media (max-width: 700px) {
+  .stats-content,
+  .chart-card,
+  .trend-card {
+    min-width: 0;
+  }
+
+  .cards-row,
+  .cards-row.six {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .stat-card {
+    min-width: 0;
+    padding: 13px 7px;
+  }
+
+  .charts-grid,
+  .extra-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .chart-card,
+  .trend-card {
+    padding: 12px;
+  }
+
+  .chart-card h3 {
+    overflow-wrap: anywhere;
+  }
+
+  .bar-row {
+    min-width: 0;
+    gap: 6px;
+  }
+
+  .bar-label,
+  .bar-label.wide {
+    width: 80px;
+    flex: 0 1 80px;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .bar-track {
+    min-width: 0;
+  }
+
+  .bar-count {
+    width: 30px;
+    flex: 0 0 30px;
+  }
+
+  .trend-card h3 {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+}
 </style>
