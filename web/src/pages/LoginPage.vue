@@ -35,7 +35,7 @@ async function doLogin() {
   try {
     const data = await api.login(username.value, password.value);
     setAuth(data.token, data.user);
-    router.push("/generate");
+    router.push("/my");
   } catch (e) {
     error.value = e.message;
   } finally {

@@ -19,10 +19,14 @@ import ReviewResultsPage from "./pages/ReviewResultsPage.vue";
 import ReviewDecisionsPage from "./pages/ReviewDecisionsPage.vue";
 import ShareRequestsPage from "./pages/ShareRequestsPage.vue";
 import AIProviderPage from "./pages/AIProviderPage.vue";
+import MyDashboardPage from "./pages/MyDashboardPage.vue";
+import PersonalSettingsPage from "./pages/PersonalSettingsPage.vue";
 
 const routes = [
   { path: "/login", component: LoginPage, meta: { public: true } },
-  { path: "/", redirect: "/generate" },
+  { path: "/", redirect: "/my" },
+  { path: "/my", component: MyDashboardPage, meta: { title: "我的工作台" } },
+  { path: "/settings", component: PersonalSettingsPage, meta: { title: "个人设置" } },
   { path: "/generate", name: "generation", component: GenerationWorkspace, children: [
     { path: "", name: "generation-single", component: GeneratePage, meta: { title: "试题生成", perm: "question:generate" } },
     { path: "batch", name: "generation-batch", component: BatchPage, meta: { title: "批量推理", perm: "batch:run" } },
@@ -60,7 +64,7 @@ router.beforeEach((to, from, next) => {
       return;
     }
     if (!permissionAllowed(to.meta.perm, hasPerm)) {
-      next("/knowledge"); // 无权限重定向到所有登录用户都可访问的知识点页
+      next("/my"); // 无权限重定向到所有登录用户都可访问的个人工作台
       return;
     }
     next();

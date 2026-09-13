@@ -1,8 +1,11 @@
 <script setup>
 import { ref, onMounted, computed, watch, nextTick } from "vue";
+import { useRoute } from "vue-router";
 import { api } from "../api.js";
 import { hasPerm } from "../auth.js";
 import AICheckScoreButton from "../components/AICheckScoreButton.vue";
+
+const route = useRoute();
 
 // 权限判断。题目唯一来源是 AI 生成：无手动新建；编辑窗口仅限专家退回修改（待我修改页）。
 // AI 检查仅在首次生成时自动执行一次，本页不提供重新检查入口；强制通过/撤回按用户管理权限。
@@ -34,10 +37,14 @@ const GLOBAL_TIER_DEFS = [
   { key: "eliminated", name: "淘汰题库", perm: "question:view_eliminated" },
 ];
 const canViewGlobal = computed(() => hasPerm("question:view_global"));
-const questionScope = ref(canViewGlobal.value ? "global" : "personal");
+const requestedScope = route.query.scope === "personal" || route.query.scope === "global" ? route.query.scope : "";
+const questionScope = ref(requestedScope === "personal" || (requestedScope === "global" && canViewGlobal.value)
+  ? requestedScope
+  : (canViewGlobal.value ? "global" : "personal"));
 const isGlobalScope = computed(() => questionScope.value === "global");
 const visibleTiers = computed(() => (isGlobalScope.value ? GLOBAL_TIER_DEFS : PERSONAL_TIER_DEFS).filter((t) => hasPerm(t.perm)));
-const activeTier = ref(visibleTiers.value[0]?.key || "");
+const requestedTier = typeof route.query.tier === "string" ? route.query.tier : "";
+const activeTier = ref(visibleTiers.value.some((tier) => tier.key === requestedTier) ? requestedTier : (visibleTiers.value[0]?.key || ""));
 
 // 各分类下可选的状态筛选
 const TIER_STATUS_OPTIONS = {

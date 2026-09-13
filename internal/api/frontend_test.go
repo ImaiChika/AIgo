@@ -35,6 +35,8 @@ func TestStaticFrontendServesAssetsAndSPAFallback(t *testing.T) {
 	}{
 		{name: "root", method: http.MethodGet, path: "/", status: 200, body: "AIgo production shell", cacheHeader: "no-cache"},
 		{name: "history route", method: http.MethodGet, path: "/review-results", status: 200, body: "AIgo production shell", cacheHeader: "no-cache"},
+		{name: "personal dashboard route", method: http.MethodGet, path: "/my", status: 200, body: "AIgo production shell", cacheHeader: "no-cache"},
+		{name: "personal settings route", method: http.MethodGet, path: "/settings", status: 200, body: "AIgo production shell", cacheHeader: "no-cache"},
 		{name: "head history route", method: http.MethodHead, path: "/bank", status: 200, cacheHeader: "no-cache"},
 		{name: "hashed asset", method: http.MethodGet, path: "/assets/app-a1b2.js", status: 200, body: "console.log", cacheHeader: "public, max-age=31536000, immutable"},
 		{name: "missing asset", method: http.MethodGet, path: "/assets/missing.js", status: 404},
