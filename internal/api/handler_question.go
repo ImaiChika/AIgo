@@ -540,15 +540,60 @@ func (s *Server) handleDeleteQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 记录日志（删除前记录，因为删除后就查不到了）
+	// 淘汰终态（驳回锁定/已归档）不可删除：终态留档是审计承诺的一部分
+	if q.Tier() == domain.TierEliminated {
+		writeError(w, http.StatusConflict, "已淘汰的题目为终态留档（驳回锁定或已归档），不可删除")
+		return
+	}
+
+	// 审核中/待决断的题目不可删除：先撤销送审或完成决断，
+	// 避免删除操作打断进行中的审核流程
+	if q.Status == domain.StatusReviewing || q.Status == domain.StatusConflict {
+		writeError(w, http.StatusConflict, "审核中的题目不能删除：请先撤销送审或完成决断")
+		return
+	}
+
+	// 已提交全局题库分享的题目不能删除（与撤回一致）：先完成或结束分享申请
+	if share := s.questionShare(r, id); share != nil {
+		writeError(w, http.StatusConflict, "题目已经提交全局题库分享，不能删除；请先完成或结束分享申请")
+		return
+	}
+
 	actor := auth.GetUsername(r.Context())
+
+	// 归档删除：已入库（published）或存在审核任务历史的题目改为归档（进淘汰
+	// 题库）——版本快照、审核记录与审计链全部保留；仅无人工审核史的
+	// 草稿/未送审题物理删除。
+	hasHistory, err := s.reviewSvc.HasReviewHistory(r.Context(), id)
+	if err != nil {
+		writeError(w, 500, "查询审核历史失败: "+err.Error())
+		return
+	}
+	if q.Status == domain.StatusPublished || hasHistory {
+		archived := *q
+		archived.Status = domain.StatusArchived
+		archived.UpdatedAt = time.Now()
+		note := "题目撤下并归档（保留版本快照与审核记录）"
+		archiveCtx := storage.WithQuestionChange(r.Context(), storage.QuestionChange{
+			Actor: actor, ChangeType: "archive", ChangeNote: note,
+		})
+		if err := s.questionStore.SaveQuestion(archiveCtx, archived); err != nil {
+			writeError(w, 500, "归档失败: "+err.Error())
+			return
+		}
+		_ = s.auditSvc.Log(r.Context(), id, "archive", actor, note)
+		writeJSON(w, 200, map[string]any{"status": "ok", "id": id, "archived": true})
+		return
+	}
+
+	// 记录日志（删除前记录，因为删除后就查不到了）
 	s.auditSvc.LogDelete(r.Context(), id, actor)
 
 	if err := s.questionStore.DeleteQuestion(r.Context(), id); err != nil {
 		writeError(w, 500, "删除失败: "+err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]string{"status": "ok", "id": id})
+	writeJSON(w, 200, map[string]any{"status": "ok", "id": id, "archived": false})
 }
 
 // handlePublishQuestion 将审核通过的题目发布到正式题库。

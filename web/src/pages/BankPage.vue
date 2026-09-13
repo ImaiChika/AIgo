@@ -15,6 +15,9 @@ const canDeleteFormal = computed(() => hasPerm("question:delete_formal"));
 
 // 按题目状态选择删除权限：已入库（正式题库）走 question:delete_formal，其余走 question:delete
 function canDeleteQuestion(q) {
+  // 淘汰终态（驳回锁定/已归档）为留档题，不可删除；审核中/待决断须先撤销或决断
+  if (q.status === "rejected" || q.status === "archived") return false;
+  if (q.status === "reviewing" || q.status === "conflict") return false;
   return q.status === "published" ? canDeleteFormal.value : canDelete.value;
 }
 
@@ -411,8 +414,8 @@ async function deleteQuestion(q) {
   if (!confirm(`确定删除题目？\n${(q.clinical_stem || "").slice(0, 50)}...`)) return;
   mutating.value = true;
   try {
-    await api.deleteQuestion(q.id);
-    showToast("已删除");
+    const data = await api.deleteQuestion(q.id);
+    showToast(data?.archived ? "已归档，题目移入淘汰题库（审核记录保留）" : "已删除");
     questions.value = questions.value.filter((item) => item.id !== q.id);
     totalCount.value = Math.max(0, totalCount.value - 1);
     if (selectedQuestion.value?.id === q.id) selectedQuestion.value = null;

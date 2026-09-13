@@ -1807,6 +1807,16 @@ func (s *Service) GetTaskByQuestionID(ctx context.Context, questionID string) (*
 	return s.reviewStore.GetTaskByQuestionID(ctx, questionID)
 }
 
+// HasReviewHistory 判断题目是否存在审核任务（任意状态，含终态）。
+// 用于删除策略：有人工审核史的题目删除时改为归档，保留审核记录。
+func (s *Service) HasReviewHistory(ctx context.Context, questionID string) (bool, error) {
+	task, err := s.reviewStore.GetTaskByQuestionID(ctx, questionID)
+	if err != nil {
+		return false, err
+	}
+	return task != nil, nil
+}
+
 // HasSubmissionBankHistory 判断分类子题库是否已被任何审核任务引用。
 // 审核任务需要永久保留提交题库快照，因此使用过的子题库不能物理删除。
 func (s *Service) HasSubmissionBankHistory(ctx context.Context, bankID string) (bool, error) {
