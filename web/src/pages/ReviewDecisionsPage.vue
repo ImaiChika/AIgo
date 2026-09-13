@@ -431,6 +431,7 @@ onMounted(() => {
   display: grid;
   grid-template-columns: 380px minmax(0, 1fr);
   gap: 16px;
+  min-width: 0;
 }
 
 .decision-list-panel {
@@ -450,6 +451,7 @@ onMounted(() => {
   background: #fff;
   cursor: pointer;
   transition: all 0.15s;
+  min-width: 0;
 }
 
 .decision-card:hover {
@@ -953,5 +955,48 @@ onMounted(() => {
 .finalize-form .primary-button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+@media (max-width: 900px) {
+  .decisions-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .decision-list-panel {
+    max-height: none;
+  }
+
+  .decision-list {
+    max-height: 42vh;
+    overflow-y: auto;
+  }
+
+  .dc-head,
+  .finalize-row,
+  .round-stats-line {
+    flex-wrap: wrap;
+  }
+
+  .dc-flow {
+    max-width: 100%;
+  }
+
+  .q-detail,
+  .task-info,
+  .ai-report,
+  .records-block,
+  .finalize-form {
+    min-width: 0;
+  }
+
+  .compare-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .finalize-row select,
+  .finalize-row .primary-button {
+    min-width: 0;
+    width: 100%;
+  }
 }
 </style>
