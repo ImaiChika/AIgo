@@ -414,7 +414,7 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 			}
 			return existing, nil
 		}
-		// 已入库（published/archived）的题目由管理员撤回到 ai_reviewed 后，
+		// 已通过或已归档（published/archived）的题目由管理员撤回到 ai_reviewed 后，
 		// 或题目被编辑回草稿（旧任务终态）时，允许创建新任务重新走流程。
 		isTerminalTask := existing.Status == domain.StatusPublished || existing.Status == domain.StatusArchived
 		if (q.Status == domain.StatusAIDraft || q.Status == domain.StatusAIReviewed) && isTerminalTask {

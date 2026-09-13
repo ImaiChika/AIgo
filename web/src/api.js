@@ -123,7 +123,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ version, reason }),
     }),
-  // 管理员撤回已入库题目至 AI 检查通过状态
+  // 管理员撤回已通过题目至 AI 检查通过状态
   unpublishQuestion: (id, reason = "") =>
     request(`/questions/${id}/unpublish`, {
       method: "POST",

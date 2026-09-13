@@ -49,10 +49,14 @@ func TestExportToDocxBuildsValidOOXML(t *testing.T) {
 		"大纲代码：110.4.3.1.1",
 		"预估难度：0.65",
 		"专业：消化",
-		"命题人：朝阳医院AI",
 	} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("document.xml 缺少 %q", want)
+		}
+	}
+	for _, unwanted := range []string{"命题人", "朝阳医院AI"} {
+		if strings.Contains(doc, unwanted) {
+			t.Errorf("document.xml 不应再包含 %q", unwanted)
 		}
 	}
 

@@ -66,8 +66,8 @@ func TestExportToXlsxWritesCompleteSheetDimension(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dimension != "A1:P4" {
-		t.Fatalf("sheet dimension = %s, want A1:P4", dimension)
+	if dimension != "A1:O4" {
+		t.Fatalf("sheet dimension = %s, want A1:O4", dimension)
 	}
 	rows, err := file.GetRows("题目")
 	if err != nil {
@@ -80,8 +80,7 @@ func TestExportToXlsxWritesCompleteSheetDimension(t *testing.T) {
 		"A1": "题号",
 		"C1": "A．",
 		"I1": "说明",
-		"P1": "命题人",
-		"P2": "朝阳医院AI",
+		"O1": "系统",
 	}
 	for cell, want := range checks {
 		got, err := file.GetCellValue("题目", cell)
@@ -90,6 +89,15 @@ func TestExportToXlsxWritesCompleteSheetDimension(t *testing.T) {
 		}
 		if got != want {
 			t.Errorf("%s = %q, want %q", cell, got, want)
+		}
+	}
+	for _, cell := range []string{"P1", "P2"} {
+		got, err := file.GetCellValue("题目", cell)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "" {
+			t.Errorf("%s 不应再输出命题人列，实际为 %q", cell, got)
 		}
 	}
 }

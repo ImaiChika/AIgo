@@ -10,10 +10,10 @@ const canDelete = computed(() => hasPerm("question:delete"));
 const canDownload = computed(() => hasPerm("question:download"));
 const canForcePass = computed(() => hasPerm("user:manage"));
 const canUnpublish = computed(() => hasPerm("user:manage"));
-// 正式题库（已入库）为定稿密封区：删除需要专门权限（question:delete_formal）
+// 正式题库（已通过）为定稿密封区：删除需要专门权限（question:delete_formal）
 const canDeleteFormal = computed(() => hasPerm("question:delete_formal"));
 
-// 按题目状态选择删除权限：已入库（正式题库）走 question:delete_formal，其余走 question:delete
+// 按题目状态选择删除权限：已通过（正式题库）走 question:delete_formal，其余走 question:delete
 function canDeleteQuestion(q) {
   // 淘汰终态（驳回锁定/已归档）为留档题，不可删除；审核中/待决断须先撤销或决断
   if (q.status === "rejected" || q.status === "archived") return false;
@@ -41,7 +41,7 @@ const activeTier = ref(visibleTiers.value[0]?.key || "");
 
 // 各分类下可选的状态筛选
 const TIER_STATUS_OPTIONS = {
-  formal: [{ value: "published", label: "已入库" }],
+  formal: [{ value: "published", label: "已通过" }],
   working: [
     { value: "ai_draft", label: "AI草稿" },
     { value: "auto_checked", label: "已初评" },
@@ -177,12 +177,12 @@ async function forcePassSelected() {
   }
 }
 
-// 管理员撤回已入库题目至 AI 检查通过状态
+// 管理员撤回已通过题目至 AI 检查通过状态
 async function unpublishSelected() {
   const q = selectedQuestion.value;
   if (!q) return;
   if (mutating.value) return;
-  if (!confirm("确定撤回该已入库题目？撤回后状态回到「已检查」，可修订后重新送审。该操作会记录到审计日志。")) return;
+  if (!confirm("确定撤回该已通过题目？撤回后状态回到「已检查」，可修订后重新送审。该操作会记录到审计日志。")) return;
   mutating.value = true;
   try {
     const updated = await api.unpublishQuestion(q.id, "题库页撤回修订");
@@ -377,7 +377,7 @@ const REVIEW_CONCLUSION_TEXT = {
   approved: "通过",
   rejected: "驳回",
   revision_required: "需修改",
-  published: "通过（已入库）",
+  published: "已通过",
 };
 
 function reviewConclusionText(status) {
@@ -445,7 +445,7 @@ function statusText(status) {
   const lifecycle = {
     ai_draft: "AI草稿", auto_checked: "已初评", ai_reviewed: "AI已检查",
     reviewing: "审核中", conflict: "待决断", approved: "已通过", rejected: "专家审核已驳回",
-    revision_required: "需修改", published: "已入库", archived: "已归档",
+    revision_required: "需修改", published: "已通过", archived: "已归档",
   };
   if (isGlobalScope.value) {
     if (activeTier.value === "formal") return "已进入全局正式库";
@@ -577,7 +577,7 @@ onMounted(async () => {
           <button class="ghost-button share-btn" type="button" :disabled="mutating || preparingShare || loading || !shareableSelected.length" @click="prepareBulkShare('selected')">提交所选至全局库</button>
           <button class="text-button" type="button" :disabled="mutating || preparingShare || loading" @click="prepareBulkShare('filtered')">{{ preparingShare ? '查询中…' : '提交筛选结果' }}</button>
         </div>
-        <!-- 导出仅包含已入库（正式题库）题目，由后端强制；仅正式题库页提供 -->
+        <!-- 导出仅包含已通过（正式题库）题目，由后端强制；仅正式题库页提供 -->
         <div class="export-btns" v-if="canDownload && activeTier === 'formal'">
           <button class="ghost-button" type="button" @click="exportXlsx" :disabled="exporting || selectedIds.size === 0">
             {{ exporting ? "导出中..." : "导出 Excel" }}
@@ -670,7 +670,7 @@ onMounted(async () => {
             v-if="!isGlobalScope && canUnpublish && activeTier === 'formal' && selectedQuestion.status === 'published'"
             class="ghost-button ai-force-btn"
             type="button"
-            title="撤回已入库题目至 AI 检查通过状态（写审计日志）"
+            title="撤回已通过题目至 AI 检查通过状态（写审计日志）"
             :disabled="mutating"
             @click="unpublishSelected"
           >

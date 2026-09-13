@@ -210,7 +210,7 @@ const importError = ref("");
 const autoImportJobs = new Set(); // 本会话已触发过自动导入的任务；后端按任务幂等兜底
 
 // 任务完成后自动导入一次，无需手动点击。仅针对本地有记录的任务（tracked）：
-// 仅存在于云端列表的历史任务没有导入跟踪，自动导入会把历史结果重复入库。
+// 仅存在于云端列表的历史任务没有导入跟踪，自动导入会把历史结果重复写入。
 // 重复触发由后端导入幂等拦截：已导入的任务只会重放上次的导入结果。
 function maybeAutoImport(job) {
   if (!job || !isCompleted(job.status) || job.imported_at || !job.tracked) return;
@@ -559,7 +559,7 @@ onMounted(() => {
 
       <p v-if="importResult.simulated" class="result-summary simulated-result">{{ importResult.message }}</p>
       <p v-else class="result-summary">
-        成功入库 <b>{{ importRows.length }}</b> 题<template v-if="importResult.failed > 0">，失败 <b class="text-danger">{{ importResult.failed }}</b> 项</template>
+        成功导入 <b>{{ importRows.length }}</b> 题<template v-if="importResult.failed > 0">，失败 <b class="text-danger">{{ importResult.failed }}</b> 项</template>
       </p>
       <p v-if="aiProgress && aiProgress.checking > 0" class="result-check">AI 检查中（已完成 {{ aiProgress.total - aiProgress.checking }}/{{ aiProgress.total }}），只有通过检查的题目才能点击查看</p>
       <p v-else-if="aiProgress && aiProgress.stalled" class="result-check">AI 检查仍在后台进行，可稍后查看结果</p>

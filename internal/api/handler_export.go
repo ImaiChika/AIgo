@@ -28,7 +28,7 @@ type questionExportRequest struct {
 }
 
 // handleExportXlsx 导出题目为 Excel 文件。
-// 导出是正式题库的出口：数据源仅限已入库（published）题目，
+// 导出是正式题库的出口：数据源仅限已通过（published）题目，
 // 且调用者需要「查看正式题库」权限（question:view_formal）。
 // 请求：{"question_ids": ["id1", "id2"]} 或 {"export_all": true}
 // 返回文件下载。

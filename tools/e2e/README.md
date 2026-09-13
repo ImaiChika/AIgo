@@ -20,6 +20,7 @@ python3 visibility_e2e.py        # 题目可见性三档（expert 仅本人 / ad
 python3 full_regression.py       # 生成全周期：提交→pending→刷新恢复→AI检查→题库命中
 python3 review_todo_e2e.py       # 审核三页：待我审核→决断→待我修改（会真实决断本地任务）
 python3 archive_deletion_e2e.py  # 删除即归档：published 题删除→淘汰题库→记录保留
+python3 export_e2e.py            # Excel/Word 导出：字段完整、无命题人占位符、文件清理
 ```
 
 环境变量（均可选）：

@@ -7,6 +7,7 @@ from playwright.sync_api import sync_playwright
 import os as _os
 
 BASE = _os.environ.get("AIGO_E2E_BASE_URL", "http://127.0.0.1:5173")
+DB_DSN = _os.environ.get("AIGO_E2E_DB_DSN", "postgres://localhost:5432/aigo")
 
 
 def _psql(query, db=_os.environ.get("AIGO_E2E_DB_DSN", "postgres://localhost:5432/aigo")):
@@ -37,7 +38,7 @@ QID = "e2e-arch-0001"
 
 def psqlx(query):
     # 带错误上抛的写库（种子失败必须立刻暴露，不允许静默继续）
-    r = subprocess.run(["psql", "postgres://localhost:5432/aigo", "-c", query],
+    r = subprocess.run(["psql", DB_DSN, "-c", query],
                        capture_output=True, text=True, timeout=10)
     if r.returncode != 0:
         raise RuntimeError(f"seed SQL failed: {r.stderr.strip()}")

@@ -393,8 +393,8 @@ type BatchJobRecord struct {
 	Failed         int    `json:"failed"`
 	OutputFileID   string `json:"output_file_id"`
 	PointsJSON     string `json:"points_json"` // 知识点列表JSON
-	// ImportedAt 非空表示任务结果已入库（导入幂等标记）；ImportResult 保存上次
-	// 导入结果 JSON，重复触发导入时重放而不重新入库。
+	// ImportedAt 非空表示任务结果已完成导入（导入幂等标记）；ImportResult 保存上次
+	// 导入结果 JSON，重复触发导入时重放而不重复写入。
 	ImportedAt   string `json:"imported_at,omitempty"`
 	ImportResult string `json:"import_result,omitempty"`
 	CreatedAt    string `json:"created_at"`

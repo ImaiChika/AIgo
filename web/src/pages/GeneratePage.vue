@@ -297,7 +297,7 @@ async function refreshGenerationRun() {
     }
     loading.value = true;
     workspaceStatus.value = "recovering";
-    progressMsg.value = "正在重新连接命题任务，已入库结果不会丢失";
+    progressMsg.value = "正在重新连接命题任务，已生成结果不会丢失";
     scheduleRunRecovery();
   } finally {
     recoveringRun = false;
@@ -332,8 +332,8 @@ function restoreWorkspace() {
 
 function clearWorkspace() {
   const hint = loading.value
-    ? "仅清空本页记录，不会取消已提交的命题，也不会删除已入库题目。确定继续吗？"
-    : "仅清空本页记录，不会删除已入库题目。确定继续吗？";
+    ? "仅清空本页记录，不会取消已提交的命题，也不会删除已生成题目。确定继续吗？"
+    : "仅清空本页记录，不会删除已生成题目。确定继续吗？";
   if (!window.confirm(hint)) return;
   stopAIProgress();
   window.clearTimeout(recoveryTimer);
@@ -550,7 +550,7 @@ onBeforeUnmount(() => {
         <div class="section-heading">
           <span class="dot blue"></span>
           <h2>命题执行流程</h2>
-          <small>实时显示本次任务的处理阶段与入库结果</small>
+          <small>实时显示本次任务的处理阶段与题目结果</small>
           <button v-if="hasWorkspaceRecord" class="workflow-clear" type="button" @click="clearWorkspace">清空本次记录</button>
         </div>
         <div class="workflow-rail">

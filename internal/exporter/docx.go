@@ -108,7 +108,7 @@ func buildDocumentXML(questions []domain.A2Question) (string, error) {
 			b.WriteString(paragraph(run("说明："+q.Explanation, runStyle{Size: 21}), paraStyle{SpaceAfter: 60}))
 		}
 
-		meta := make([]string, 0, 8)
+		meta := make([]string, 0, 6)
 		if q.OutlineCode != "" {
 			meta = append(meta, "大纲代码："+q.OutlineCode)
 		}
@@ -127,7 +127,6 @@ func buildDocumentXML(questions []domain.A2Question) (string, error) {
 		if q.System != "" {
 			meta = append(meta, "系统："+q.System)
 		}
-		meta = append(meta, "命题人：朝阳医院AI")
 		b.WriteString(paragraph(run(strings.Join(meta, "\n"), runStyle{Size: 18, Color: "666666"}), paraStyle{SpaceBefore: 120, SpaceAfter: 240, BorderTop: true}))
 	}
 

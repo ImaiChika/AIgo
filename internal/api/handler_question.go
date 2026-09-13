@@ -357,7 +357,7 @@ func (s *Server) ensureQuestionEditable(r *http.Request, q *domain.A2Question) e
 		case domain.StatusReviewing, domain.StatusConflict:
 			return errors.New("题目正在审核或等待决断，不能修改")
 		case domain.StatusPublished, domain.StatusArchived:
-			return errors.New("已入库题目已定稿；如需修订，请由管理员在题库使用「撤回」退回修改")
+			return errors.New("已通过题目已定稿；如需修订，请由管理员在题库使用「撤回」退回修改")
 		}
 	}
 	task, err := s.reviewSvc.GetTaskByQuestionID(r.Context(), q.ID)
@@ -471,8 +471,8 @@ func (s *Server) handleRestoreQuestionVersion(w http.ResponseWriter, r *http.Req
 	writeJSON(w, 200, restored)
 }
 
-// handleUnpublishQuestion 管理员把已入库（published）的题目撤回到 ai 检查通过状态
-// （ai_reviewed），供发现入库题目需要修订时使用；撤回后可重新送审。
+// handleUnpublishQuestion 管理员把已通过（published）的题目撤回到 ai 检查通过状态
+// （ai_reviewed），供发现已通过题目需要修订时使用；撤回后可重新送审。
 // 仅用户管理权限（user:manage）可用；写审计留痕。
 func (s *Server) handleUnpublishQuestion(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -482,7 +482,7 @@ func (s *Server) handleUnpublishQuestion(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if q.Status != domain.StatusPublished {
-		writeError(w, http.StatusConflict, "仅已入库（published）的题目可以撤回")
+		writeError(w, http.StatusConflict, "仅已通过（published）的题目可以撤回")
 		return
 	}
 	if share := s.questionShare(r, id); share != nil {
@@ -499,7 +499,7 @@ func (s *Server) handleUnpublishQuestion(w http.ResponseWriter, r *http.Request)
 
 	q.Status = domain.StatusAIReviewed
 	q.UpdatedAt = time.Now()
-	note := "撤回已入库题目至 AI 检查通过状态"
+	note := "撤回已通过题目至 AI 检查通过状态"
 	if reason := strings.TrimSpace(req.Reason); reason != "" {
 		note += "：" + reason
 	}
@@ -569,7 +569,7 @@ func (s *Server) handleDeleteQuestion(w http.ResponseWriter, r *http.Request) {
 
 	actor := auth.GetUsername(r.Context())
 
-	// 归档删除：已入库（published）或存在审核任务历史的题目改为归档（进淘汰
+	// 归档删除：已通过（published）或存在审核任务历史的题目改为归档（进淘汰
 	// 题库）——版本快照、审核记录与审计链全部保留；仅无人工审核史的
 	// 草稿/未送审题物理删除。
 	hasHistory, err := s.reviewSvc.HasReviewHistory(r.Context(), id)

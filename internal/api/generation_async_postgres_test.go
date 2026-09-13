@@ -67,7 +67,7 @@ func serveGenerateJSON(t *testing.T, handler http.Handler, method, path, token s
 // 1) 提交命题立即返回 pending 运行且不含题目；
 // 2) 同一 run_id 幂等返回已有运行；
 // 3) worker 执行后 GET 运行返回 succeeded 与已落库题目；
-// 4) 题目以 ai_draft 草稿入库。
+// 4) 题目以 ai_draft 草稿保存。
 func TestGenerateAsyncSubmitAndWorkerCompletion(t *testing.T) {
 	server, cleanup := generationHandlerTestServer(t)
 	defer cleanup()
@@ -166,6 +166,6 @@ func TestGenerateAsyncSubmitAndWorkerCompletion(t *testing.T) {
 	}
 	q := final.Questions[0]
 	if q.ID != final.Run.QIDs[0] || q.Status != "ai_draft" {
-		t.Fatalf("题目应以 ai_draft 草稿入库: %+v", q)
+		t.Fatalf("题目应以 ai_draft 草稿保存: %+v", q)
 	}
 }

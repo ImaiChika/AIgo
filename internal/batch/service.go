@@ -121,7 +121,7 @@ type BatchJob struct {
 	OutputFileID string `json:"output_file_id"`
 	CreatedAt    int64  `json:"created_at"`
 	Error        string `json:"error,omitempty"`
-	// ImportedAt 非空表示结果已入库（导入幂等）；前端据此决定是否触发自动导入。
+	// ImportedAt 非空表示结果已完成导入（导入幂等）；前端据此决定是否触发自动导入。
 	ImportedAt string `json:"imported_at,omitempty"`
 	// Tracked 表示该任务在本地 batch_jobs 有记录（导入幂等可用）。
 	// 仅云端列表补齐的历史任务没有本地记录，结果多半早已按旧流程入库，

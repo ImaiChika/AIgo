@@ -167,7 +167,7 @@ func (p *Pipeline) executeGenerationRun(ctx context.Context, run *domain.Generat
 		}
 		p.checker.CheckAsync(ids...)
 	}
-	// 阶段三：题库归纳 + 审计（题目已入库，仅补充归属与留痕）
+	// 阶段三：题库归纳 + 审计（题目已保存，仅补充归属与留痕）
 	questionIDs := make([]string, 0, len(drafts))
 	for i := range drafts {
 		q := drafts[i]
@@ -185,7 +185,7 @@ func (p *Pipeline) executeGenerationRun(ctx context.Context, run *domain.Generat
 			}
 		}
 		if err := p.store.SaveQuestion(genCtx, q); err != nil {
-			// 归纳失败不回滚已入库草稿：题目仍可用，仅题库归属可能为空，管理员可手动调整
+			// 归纳失败不回滚已保存草稿：题目仍可用，仅题库归属可能为空，管理员可手动调整
 			slog.Warn("更新题目题库归属失败", "run_id", run.ID, "question_id", q.ID, "error", err)
 		}
 		if p.auditor != nil {

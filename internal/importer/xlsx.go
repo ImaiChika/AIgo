@@ -204,7 +204,6 @@ func ExportToXlsx(questions []domain.A2Question, path string) error {
 	f.SetColWidth(sheet, "M", "M", 30) // 考核要点
 	f.SetColWidth(sheet, "N", "N", 10) // 专业
 	f.SetColWidth(sheet, "O", "O", 10) // 系统
-	f.SetColWidth(sheet, "P", "P", 16) // 命题人
 
 	// 表头样式
 	headerStyle, _ := f.NewStyle(&excelize.Style{
@@ -217,7 +216,7 @@ func ExportToXlsx(questions []domain.A2Question, path string) error {
 	// 写表头
 	headers := []string{
 		"题号", "题干", "A．", "B．", "C．", "D．", "E．",
-		"答案", "说明", "大纲代码", "预估难度", "认知层次", "考核要点", "专业", "系统", "命题人",
+		"答案", "说明", "大纲代码", "预估难度", "认知层次", "考核要点", "专业", "系统",
 	}
 	for i, h := range headers {
 		cell := cellName(i+1, 1)
@@ -248,11 +247,10 @@ func ExportToXlsx(questions []domain.A2Question, path string) error {
 		f.SetCellValue(sheet, cellName(13, row), q.ExamPoints)     // 考核要点
 		f.SetCellValue(sheet, cellName(14, row), q.Profession)     // 专业
 		f.SetCellValue(sheet, cellName(15, row), q.System)         // 系统
-		f.SetCellValue(sheet, cellName(16, row), "朝阳医院AI")         // 命题人
 	}
 	// 显式写入使用范围。部分读取器会严格信任 worksheet dimension；
 	// 若维持默认 A1，即使单元格已经写入，也可能只显示或读取表头。
-	if err := f.SetSheetDimension(sheet, fmt.Sprintf("A1:P%d", len(questions)+1)); err != nil {
+	if err := f.SetSheetDimension(sheet, fmt.Sprintf("A1:O%d", len(questions)+1)); err != nil {
 		return err
 	}
 
