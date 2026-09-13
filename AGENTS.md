@@ -196,7 +196,7 @@ AI 质量检查约束（2026-09-06 用户明确）：
 - `web/src/api.js`：API 服务层（封装所有后端接口）。
 - `web/src/auth.js`：认证状态管理（token、用户信息）。
 - `web/src/router.js`：路由配置 + 登录守卫。
-- `web/src/pages/`：9 个页面组件（含待我修改页 MyRevisionsPage）。
+- `web/src/pages/`：20 个页面组件（含我的工作台、个人设置、待我修改和各业务管理页）。
 
 ### 配置文件
 
