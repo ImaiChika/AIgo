@@ -529,6 +529,24 @@ func cloneGenerationRun(run *domain.GenerationRun) *domain.GenerationRun {
 	return &out
 }
 
+// GetQuestionsByIDs 批量获取题目（返回仍存在的题目，按创建时间倒序）。
+func (s *MemoryStore) GetQuestionsByIDs(_ context.Context, ids []string) ([]domain.A2Question, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	out := make([]domain.A2Question, 0, len(ids))
+	for _, q := range s.questions {
+		if want[q.ID] {
+			out = append(out, q)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
 // OwnerBankIDs 返回指定用户的题目所关联的分类子题库 ID 去重列表。
 func (s *MemoryStore) OwnerBankIDs(_ context.Context, ownerID string) ([]string, error) {
 	s.mu.Lock()
@@ -918,6 +936,74 @@ func (s *MemoryReviewStore) ListRecordsByTaskID(_ context.Context, taskID string
 	defer s.mu.Unlock()
 	out := make([]domain.ReviewRecord, len(s.records[taskID]))
 	copy(out, s.records[taskID])
+	return out, nil
+}
+
+// ListReviewTodoTasks 内存实现：语义与 PostgreSQL 版一致
+// （DedupByQuestion 按题去重取最新任务 → 状态/当前轮分配/把关人名单过滤，
+// 细粒度判断由 review 服务在 Go 侧完成）。
+func (s *MemoryReviewStore) ListReviewTodoTasks(_ context.Context, query storage.ReviewTodoQuery) ([]domain.ReviewTask, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	candidates := make([]domain.ReviewTask, 0, len(s.tasks))
+	if query.DedupByQuestion {
+		latest := map[string]domain.ReviewTask{}
+		for _, t := range s.tasks {
+			cur, ok := latest[t.QuestionID]
+			if !ok || t.CreatedAt.After(cur.CreatedAt) {
+				latest[t.QuestionID] = t
+			}
+		}
+		for _, t := range latest {
+			candidates = append(candidates, t)
+		}
+	} else {
+		for _, t := range s.tasks {
+			candidates = append(candidates, t)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].UpdatedAt.After(candidates[j].UpdatedAt)
+	})
+	out := make([]domain.ReviewTask, 0, len(candidates))
+	for _, t := range candidates {
+		status := string(domain.CanonicalLifecycleStatus(t.Status))
+		matched := false
+		for _, want := range query.Statuses {
+			if want == status {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		if query.AssignedTo != "" {
+			in := false
+			for _, id := range t.AssignedTo {
+				if id == query.AssignedTo {
+					in = true
+					break
+				}
+			}
+			if !in {
+				continue
+			}
+		}
+		if !query.FinalAny && query.FinalReviewer != "" && len(t.FinalReviewerIDs) != 0 {
+			in := false
+			for _, id := range t.FinalReviewerIDs {
+				if id == query.FinalReviewer {
+					in = true
+					break
+				}
+			}
+			if !in {
+				continue
+			}
+		}
+		out = append(out, t)
+	}
 	return out, nil
 }
 

@@ -975,11 +975,17 @@ type MyTaskItem struct {
 //   - 无论是否为把关人：自己的审核工作结束（投过票）即移开列表
 //   - 待决断任务不在此列（把关人请用 MyDecisions / 「待决断」页面）
 func (s *Service) MyTasks(ctx context.Context, userID string, hasFinalRight bool) ([]MyTaskItem, error) {
-	questions, err := s.questionStore.ListQuestions(ctx)
+	// SQL 端预过滤：按题去重取最新任务 + 状态 reviewing + 当前轮分配含我，
+	// 避免装载全部任务与全部题目；下方细粒度判断与原实现逐字一致。
+	tasks, err := s.listTodoTasks(ctx, storage.ReviewTodoQuery{
+		Statuses:        []string{string(domain.StatusReviewing)},
+		AssignedTo:      userID,
+		DedupByQuestion: true,
+	})
 	if err != nil {
 		return nil, err
 	}
-	tasks, err := s.reviewStore.ListAllTasks(ctx)
+	questionByID, err := s.loadTodoQuestions(ctx, tasks)
 	if err != nil {
 		return nil, err
 	}
@@ -993,26 +999,17 @@ func (s *Service) MyTasks(ctx context.Context, userID string, hasFinalRight bool
 		flowByName[f.ID] = f
 	}
 
-	taskByQuestion := make(map[string]*domain.ReviewTask, len(tasks))
-	for i := range tasks {
-		t := &tasks[i]
-		existing, ok := taskByQuestion[t.QuestionID]
-		if !ok || t.CreatedAt.After(existing.CreatedAt) {
-			taskByQuestion[t.QuestionID] = t
-		}
-	}
-
 	var result []MyTaskItem
-	for i := range questions {
-		q := &questions[i]
-		task := taskByQuestion[q.ID]
-		if task == nil {
-			continue
-		}
+	for i := range tasks {
+		task := &tasks[i]
 		// 待决断/终态任务不显示（待决断走「待决断」页面）；
 		// revision_required 也暂不显示（等管理员编辑题目重新提交后恢复 reviewing 再出现）
 		if task.Status != domain.StatusReviewing {
 			continue
+		}
+		q := questionByID[task.QuestionID]
+		if q == nil {
+			continue // 题目已删除（原实现按题目遍历自然跳过）
 		}
 		roundIdx := task.CurrentRound - 1
 		if roundIdx < 0 || roundIdx >= len(task.RoundResults) {
@@ -1020,7 +1017,7 @@ func (s *Service) MyTasks(ctx context.Context, userID string, hasFinalRight bool
 		}
 		round := &task.RoundResults[roundIdx]
 
-		// 当前轮分配名单必须包含我（只显示自己的审核工作）
+		// 当前轮分配名单必须包含我（只显示自己的审核工作；SQL 已预过滤，此处保持一致校验）
 		inRound := false
 		for _, id := range task.AssignedTo {
 			if id == userID {
@@ -1079,14 +1076,96 @@ func (s *Service) MyTasks(ctx context.Context, userID string, hasFinalRight bool
 		result = append(result, item)
 	}
 	// 按更新时间倒序（最新提交的优先审核）
-	for i := 0; i < len(result); i++ {
-		for j := i + 1; j < len(result); j++ {
-			if result[j].Task.UpdatedAt.After(result[i].Task.UpdatedAt) {
-				result[i], result[j] = result[j], result[i]
+	sort.SliceStable(result, func(i, j int) bool {
+		return result[i].Task.UpdatedAt.After(result[j].Task.UpdatedAt)
+	})
+	return result, nil
+}
+
+// listTodoTasks 经由存储的待办预过滤能力取任务；存储未实现该能力时
+// 回退为 ListAllTasks + 内存过滤（轻量测试存储路径），语义一致。
+func (s *Service) listTodoTasks(ctx context.Context, query storage.ReviewTodoQuery) ([]domain.ReviewTask, error) {
+	if todoStore, ok := s.reviewStore.(storage.ReviewTodoQueryStore); ok {
+		return todoStore.ListReviewTodoTasks(ctx, query)
+	}
+	tasks, err := s.reviewStore.ListAllTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]domain.ReviewTask, 0, len(tasks))
+	for i := range tasks {
+		t := &tasks[i]
+		status := string(domain.CanonicalLifecycleStatus(t.Status))
+		matched := false
+		for _, want := range query.Statuses {
+			if want == status {
+				matched = true
+				break
 			}
 		}
+		if !matched {
+			continue
+		}
+		if query.AssignedTo != "" {
+			in := false
+			for _, id := range t.AssignedTo {
+				if id == query.AssignedTo {
+					in = true
+					break
+				}
+			}
+			if !in {
+				continue
+			}
+		}
+		if !query.FinalAny && query.FinalReviewer != "" && len(t.FinalReviewerIDs) != 0 {
+			in := false
+			for _, id := range t.FinalReviewerIDs {
+				if id == query.FinalReviewer {
+					in = true
+					break
+				}
+			}
+			if !in {
+				continue
+			}
+		}
+		filtered = append(filtered, *t)
 	}
-	return result, nil
+	if query.DedupByQuestion {
+		latest := make(map[string]domain.ReviewTask, len(filtered))
+		for _, t := range filtered {
+			cur, ok := latest[t.QuestionID]
+			if !ok || t.CreatedAt.After(cur.CreatedAt) {
+				latest[t.QuestionID] = t
+			}
+		}
+		filtered = filtered[:0]
+		for _, t := range latest {
+			filtered = append(filtered, t)
+		}
+		sort.Slice(filtered, func(i, j int) bool {
+			return filtered[i].UpdatedAt.After(filtered[j].UpdatedAt)
+		})
+	}
+	return filtered, nil
+}
+
+// loadTodoQuestions 批量装载待办任务对应的题目，返回 questionID → 题目。
+func (s *Service) loadTodoQuestions(ctx context.Context, tasks []domain.ReviewTask) (map[string]*domain.A2Question, error) {
+	ids := make([]string, 0, len(tasks))
+	for i := range tasks {
+		ids = append(ids, tasks[i].QuestionID)
+	}
+	questions, err := s.questionStore.GetQuestionsByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]*domain.A2Question, len(questions))
+	for i := range questions {
+		byID[questions[i].ID] = &questions[i]
+	}
+	return byID, nil
 }
 
 // MyDecisions 列出待我决断的任务（最终把关人专用）：
@@ -1098,11 +1177,22 @@ func (s *Service) MyDecisions(ctx context.Context, userID string) ([]MyTaskItem,
 
 // MyDecisionsForViewer 支持系统管理员查看全部待决断任务；普通把关人仍受任务快照名单限制。
 func (s *Service) MyDecisionsForViewer(ctx context.Context, userID string, isSystemAdmin bool) ([]MyTaskItem, error) {
-	questions, err := s.questionStore.ListQuestions(ctx)
+	// SQL 端预过滤：按题去重取最新任务 + 状态 conflict + 把关人名单
+	// （名单空=任意把关人；系统管理员不按名单过滤），细粒度判断保持原样。
+	query := storage.ReviewTodoQuery{
+		Statuses:        []string{string(domain.StatusConflict)},
+		DedupByQuestion: true,
+	}
+	if isSystemAdmin {
+		query.FinalAny = true
+	} else {
+		query.FinalReviewer = userID
+	}
+	tasks, err := s.listTodoTasks(ctx, query)
 	if err != nil {
 		return nil, err
 	}
-	tasks, err := s.reviewStore.ListAllTasks(ctx)
+	questionByID, err := s.loadTodoQuestions(ctx, tasks)
 	if err != nil {
 		return nil, err
 	}
@@ -1116,23 +1206,17 @@ func (s *Service) MyDecisionsForViewer(ctx context.Context, userID string, isSys
 		flowByName[f.ID] = f
 	}
 
-	taskByQuestion := make(map[string]*domain.ReviewTask, len(tasks))
-	for i := range tasks {
-		t := &tasks[i]
-		existing, ok := taskByQuestion[t.QuestionID]
-		if !ok || t.CreatedAt.After(existing.CreatedAt) {
-			taskByQuestion[t.QuestionID] = t
-		}
-	}
-
 	var result []MyTaskItem
-	for i := range questions {
-		q := &questions[i]
-		task := taskByQuestion[q.ID]
-		if task == nil || task.Status != domain.StatusConflict {
+	for i := range tasks {
+		task := &tasks[i]
+		if task.Status != domain.StatusConflict {
 			continue
 		}
-		// 把关人名单校验（名单空 = 任意把关人）
+		q := questionByID[task.QuestionID]
+		if q == nil {
+			continue // 题目已删除（原实现按题目遍历自然跳过）
+		}
+		// 把关人名单校验（名单空 = 任意把关人；SQL 已预过滤，此处保持一致校验）
 		if len(task.FinalReviewerIDs) > 0 && !isSystemAdmin {
 			allowed := false
 			for _, id := range task.FinalReviewerIDs {
@@ -1176,13 +1260,9 @@ func (s *Service) MyDecisionsForViewer(ctx context.Context, userID string, isSys
 		result = append(result, item)
 	}
 	// 按更新时间倒序
-	for i := 0; i < len(result); i++ {
-		for j := i + 1; j < len(result); j++ {
-			if result[j].Task.UpdatedAt.After(result[i].Task.UpdatedAt) {
-				result[i], result[j] = result[j], result[i]
-			}
-		}
-	}
+	sort.SliceStable(result, func(i, j int) bool {
+		return result[i].Task.UpdatedAt.After(result[j].Task.UpdatedAt)
+	})
 	return result, nil
 }
 
@@ -1642,7 +1722,11 @@ type RevisionItem struct {
 // 审核任务处于 revision_required 且题目由该用户创建（CreatedBy 匹配）。
 // 按分层可见性规则裁剪：生成者仅能看到"需修改"的退修意见，看不到各专家的态度与通过/驳回评语。
 func (s *Service) MyRevisions(ctx context.Context, createdBy string) ([]RevisionItem, error) {
-	tasks, err := s.reviewStore.ListAllTasks(ctx)
+	// SQL 端预过滤：仅装载 revision_required 任务；出题人归属/题目存在性
+	// 校验保持原实现逐题判定。
+	tasks, err := s.listTodoTasks(ctx, storage.ReviewTodoQuery{
+		Statuses: []string{string(domain.StatusRevisionRequired)},
+	})
 	if err != nil {
 		return nil, err
 	}

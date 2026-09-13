@@ -150,6 +150,29 @@ type ReviewResultPage struct {
 	Stats map[string]int
 }
 
+// ReviewTodoQuery 描述审核个人待办（待我审核/待我决断/待我修改）的 SQL 端预过滤。
+// 预过滤是最终结果的超集：细粒度语义（本轮已投票、把关人名单空=任意、题目归属等）
+// 仍由 review 服务在 Go 侧原样判定，这里只负责裁掉全表装载。
+type ReviewTodoQuery struct {
+	Statuses []string // 任务状态集合（reviewing / conflict / revision_required）
+	// AssignedTo 非空：当前轮分配名单（assigned_to）须包含该用户
+	AssignedTo string
+	// FinalReviewer 非空：把关人名单须包含该用户，或名单为空（空名单=任意把关人）
+	FinalReviewer string
+	// FinalAny 为 true 时不按把关人名单过滤（系统管理员查看全部待决断）
+	FinalAny bool
+	// DedupByQuestion 按题目去重取最新任务（与原内存实现的 taskByQuestion 语义一致；
+	// 去重发生在全部任务上，再应用状态过滤——最新任务为终态时旧任务不复活）
+	DedupByQuestion bool
+}
+
+// ReviewTodoQueryStore 是生产存储可选实现的审核待办高效查询能力：
+// 按状态/分配/归属在 SQL 端预过滤，避免装载全部任务与全部题目。
+// 未实现时 review 服务回退为 ListAllTasks + 内存过滤（轻量测试存储路径）。
+type ReviewTodoQueryStore interface {
+	ListReviewTodoTasks(ctx context.Context, query ReviewTodoQuery) ([]domain.ReviewTask, error)
+}
+
 // ReviewResultQueryStore 是生产存储可选实现的审核记录高效查询能力。
 // 未实现时审核服务会回退到内存筛选，便于轻量测试存储继续工作。
 type ReviewResultQueryStore interface {
@@ -181,6 +204,8 @@ type QuestionStore interface {
 	AggregateQuestionStats(ctx context.Context, filter QuestionFilter, days int) (*QuestionStatsAggregate, error)
 	// CoveredKnowledgePointIDs 返回过滤范围内题目引用的知识点 ID 去重列表。
 	CoveredKnowledgePointIDs(ctx context.Context, filter QuestionFilter) ([]string, error)
+	// GetQuestionsByIDs 批量获取题目（返回仍存在的题目；顺序按创建时间倒序）。
+	GetQuestionsByIDs(ctx context.Context, ids []string) ([]domain.A2Question, error)
 	// OwnerBankIDs 返回指定用户的题目所关联的分类子题库 ID 去重列表
 	//（子题库目录按“本人题目涉及”过滤用）。
 	OwnerBankIDs(ctx context.Context, ownerID string) ([]string, error)

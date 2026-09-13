@@ -1190,6 +1190,21 @@ func (s *Store) OwnerBankIDs(ctx context.Context, ownerID string) ([]string, err
 	return ids, rows.Err()
 }
 
+// GetQuestionsByIDs 批量获取题目（返回仍存在的题目，按创建时间倒序）。
+func (s *Store) GetQuestionsByIDs(ctx context.Context, ids []string) ([]domain.A2Question, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := s.queryContext(ctx, `SELECT `+questionSelectColumns+`
+		FROM questions q WHERE q.id = ANY($1)
+		ORDER BY q.created_at DESC, q.id DESC`, pq.Array(ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanQuestions(rows)
+}
+
 func (s *Store) SaveExpert(ctx context.Context, e domain.Expert) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO experts (id, name, department, title, specialties, expert_types, contact, enabled)
@@ -1405,6 +1420,75 @@ func (s *Store) ListRecordsByTaskID(ctx context.Context, taskID string) ([]domai
 }
 
 // ListAllTasks 列出全部审核任务（含历史，审核结果汇总用）。
+// ListReviewTodoTasks 审核个人待办的 SQL 端预过滤：
+// DedupByQuestion 时先按题目去重取最新任务（去重发生在全部任务上再应用状态
+// 过滤，最新任务为终态时旧任务不复活，与内存实现语义一致），再按状态/
+// 当前轮分配/把关人名单/题目出题人收敛。细粒度语义（本轮已投票等）由
+// review 服务在 Go 侧原样判定。
+func (s *Store) ListReviewTodoTasks(ctx context.Context, query storage.ReviewTodoQuery) ([]domain.ReviewTask, error) {
+	if len(query.Statuses) == 0 {
+		return nil, nil
+	}
+	// 关键语义：去重发生在全部任务上（先 DISTINCT ON 取每题最新任务），
+	// 状态/分配/把关人过滤作用在去重结果上——最新任务为终态时旧任务不复活。
+	args := []any{pq.Array(query.Statuses)}
+	where := " WHERE latest.status = ANY($1)"
+	n := 1
+	if query.AssignedTo != "" {
+		n++
+		where += fmt.Sprintf(" AND $%d = ANY(latest.assigned_to)", n)
+		args = append(args, query.AssignedTo)
+	}
+	if !query.FinalAny && query.FinalReviewer != "" {
+		n++
+		where += fmt.Sprintf(" AND (cardinality(latest.final_reviewer_ids) = 0 OR $%d = ANY(latest.final_reviewer_ids))", n)
+		args = append(args, query.FinalReviewer)
+	}
+	innerOrder := " ORDER BY latest.created_at DESC, latest.id DESC"
+	dedup := ""
+	if query.DedupByQuestion {
+		dedup = " DISTINCT ON (latest.question_id)"
+		innerOrder = " ORDER BY latest.question_id, latest.created_at DESC, latest.id DESC"
+	}
+	rows, err := s.queryContext(ctx, `SELECT `+taskColumns+` FROM (
+		SELECT`+dedup+` `+taskColumns+` FROM review_tasks latest`+innerOrder+`
+	) latest`+where+` ORDER BY latest.updated_at DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []domain.ReviewTask
+	for rows.Next() {
+		t, err := scanReviewTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *t)
+	}
+	return result, rows.Err()
+}
+
+// scanReviewTask 扫描一行审核任务（列清单见 taskColumns）。
+func scanReviewTask(scanner interface{ Scan(dest ...any) error }) (*domain.ReviewTask, error) {
+	var t domain.ReviewTask
+	var assignedTo, finalReviewerIDs []string
+	var resultsJSON, finalDecisionJSON []byte
+	if err := scanner.Scan(&t.ID, &t.QuestionID, &t.FlowID, &t.SubmissionBankID, &t.CurrentRound, &t.Status, pqArrayScanner(&assignedTo), pqArrayScanner(&finalReviewerIDs), &finalDecisionJSON, &t.QuestionPrevStatus, &t.QuestionVersion, &t.Attempt, &resultsJSON, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		return nil, err
+	}
+	t.AssignedTo = assignedTo
+	t.FinalReviewerIDs = finalReviewerIDs
+	t.Status = domain.CanonicalLifecycleStatus(t.Status)
+	json.Unmarshal(resultsJSON, &t.RoundResults)
+	if len(finalDecisionJSON) > 0 && string(finalDecisionJSON) != "null" {
+		var fd domain.ExpertReview
+		if json.Unmarshal(finalDecisionJSON, &fd) == nil {
+			t.FinalDecision = &fd
+		}
+	}
+	return &t, nil
+}
+
 func (s *Store) ListAllTasks(ctx context.Context) ([]domain.ReviewTask, error) {
 	rows, err := s.queryContext(ctx, `SELECT `+taskColumns+` FROM review_tasks ORDER BY created_at DESC`)
 	if err != nil {
@@ -1413,23 +1497,11 @@ func (s *Store) ListAllTasks(ctx context.Context) ([]domain.ReviewTask, error) {
 	defer rows.Close()
 	var result []domain.ReviewTask
 	for rows.Next() {
-		var t domain.ReviewTask
-		var assignedTo, finalReviewerIDs []string
-		var resultsJSON, finalDecisionJSON []byte
-		if err := rows.Scan(&t.ID, &t.QuestionID, &t.FlowID, &t.SubmissionBankID, &t.CurrentRound, &t.Status, pqArrayScanner(&assignedTo), pqArrayScanner(&finalReviewerIDs), &finalDecisionJSON, &t.QuestionPrevStatus, &t.QuestionVersion, &t.Attempt, &resultsJSON, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		t, err := scanReviewTask(rows)
+		if err != nil {
 			return nil, err
 		}
-		t.AssignedTo = assignedTo
-		t.FinalReviewerIDs = finalReviewerIDs
-		t.Status = domain.CanonicalLifecycleStatus(t.Status)
-		json.Unmarshal(resultsJSON, &t.RoundResults)
-		if len(finalDecisionJSON) > 0 && string(finalDecisionJSON) != "null" {
-			var fd domain.ExpertReview
-			if json.Unmarshal(finalDecisionJSON, &fd) == nil {
-				t.FinalDecision = &fd
-			}
-		}
-		result = append(result, t)
+		result = append(result, *t)
 	}
 	return result, rows.Err()
 }
