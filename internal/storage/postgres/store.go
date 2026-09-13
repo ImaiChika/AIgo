@@ -90,6 +90,33 @@ func (s *Store) WithReviewTransaction(ctx context.Context, questionStore storage
 	return nil
 }
 
+// WithTransaction 在单个数据库事务中执行 fn（已处于事务上下文时直接复用）。
+// fn 内通过 txCtx 调用的存储写入（业务与审计）自动并入同一事务，任一失败整体回滚。
+func (s *Store) WithTransaction(ctx context.Context, fn func(txCtx context.Context) error) error {
+	if reviewTransactionFromContext(ctx) != nil {
+		return fn(ctx)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("开始事务失败: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	txCtx := context.WithValue(ctx, reviewTransactionContextKey{}, tx)
+	if err := fn(txCtx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交事务失败: %w", err)
+	}
+	committed = true
+	return nil
+}
+
 // New 创建 PostgreSQL 存储。
 func New(dsn string) (*Store, error) {
 	db, err := sql.Open("postgres", dsn)
@@ -1190,6 +1217,25 @@ func (s *Store) OwnerBankIDs(ctx context.Context, ownerID string) ([]string, err
 	return ids, rows.Err()
 }
 
+// CountGenerationRunsByStatus 按状态统计命题运行数量（存储端聚合）。
+func (s *Store) CountGenerationRunsByStatus(ctx context.Context) (map[string]int, error) {
+	rows, err := s.queryContext(ctx, `SELECT status, COUNT(*) FROM generation_runs GROUP BY status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		out[status] = count
+	}
+	return out, rows.Err()
+}
+
 // GetQuestionsByIDs 批量获取题目（返回仍存在的题目，按创建时间倒序）。
 func (s *Store) GetQuestionsByIDs(ctx context.Context, ids []string) ([]domain.A2Question, error) {
 	if len(ids) == 0 {
@@ -1252,7 +1298,7 @@ func (s *Store) DeleteExpert(ctx context.Context, id string) error {
 
 func (s *Store) SaveFlowConfig(ctx context.Context, f domain.ReviewFlowConfig) error {
 	rounds, _ := json.Marshal(f.Rounds)
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execContext(ctx, `
 		INSERT INTO review_flows (id, name, description, subject, bank_id, final_reviewer_ids, vote_rule, rounds, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		ON CONFLICT (id) DO UPDATE SET
@@ -1286,7 +1332,7 @@ func (s *Store) ListFlowConfigs(ctx context.Context) ([]domain.ReviewFlowConfig,
 }
 
 func (s *Store) DeleteFlowConfig(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM review_flows WHERE id=$1`, id)
+	_, err := s.execContext(ctx, `DELETE FROM review_flows WHERE id=$1`, id)
 	return err
 }
 
@@ -1530,7 +1576,7 @@ func (s *Store) ListRecordsByTaskIDs(ctx context.Context, taskIDs []string) ([]d
 // ===== 操作日志 =====
 
 func (s *Store) SaveLog(ctx context.Context, log domain.AuditLog) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execContext(ctx, `
 		INSERT INTO audit_logs (id, question_id, action, actor, detail, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6)
 	`, log.ID, log.QuestionID, log.Action, log.Actor, log.Detail, log.CreatedAt)
@@ -2311,7 +2357,7 @@ func (s *Store) DeleteRole(ctx context.Context, id string) error {
 // ===== 题库 =====
 
 func (s *Store) SaveBank(ctx context.Context, b domain.QuestionBank) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execContext(ctx, `
 		INSERT INTO question_banks (id, name, description, professions, created_at)
 		VALUES ($1,$2,$3,$4,$5)
 		ON CONFLICT (id) DO UPDATE SET
@@ -2355,7 +2401,7 @@ func (s *Store) ListBanks(ctx context.Context) ([]domain.QuestionBank, error) {
 }
 
 func (s *Store) DeleteBank(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM question_banks WHERE id=$1`, id)
+	_, err := s.execContext(ctx, `DELETE FROM question_banks WHERE id=$1`, id)
 	return err
 }
 

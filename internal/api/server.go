@@ -4,8 +4,8 @@
 package api
 
 import (
+	"log/slog"
 	"context"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -320,7 +320,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 				kpCovered = len(ids)
 			}
 		} else {
-			fmt.Printf("⚠ 统计聚合查询失败: %v\n", err)
+			slog.Warn("统计聚合查询失败", "error", err)
 		}
 	}
 
@@ -336,7 +336,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			knowledgeCategories = kpStats.Categories
 			kpVersionsTotal = perVersion
 		} else {
-			fmt.Printf("⚠ 知识点统计查询失败: %v\n", err)
+			slog.Warn("知识点统计查询失败", "error", err)
 		}
 	}
 

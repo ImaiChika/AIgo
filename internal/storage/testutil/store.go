@@ -521,6 +521,17 @@ func (s *MemoryStore) FailGenerationRun(_ context.Context, id, message string) e
 	return nil
 }
 
+// CountGenerationRunsByStatus 按状态统计命题运行数量。
+func (s *MemoryStore) CountGenerationRunsByStatus(_ context.Context) (map[string]int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]int{}
+	for _, run := range s.generationRuns {
+		out[run.Status]++
+	}
+	return out, nil
+}
+
 // cloneGenerationRun 复制运行记录（含切片与快照字节），避免调用方修改内部状态。
 func cloneGenerationRun(run *domain.GenerationRun) *domain.GenerationRun {
 	out := *run

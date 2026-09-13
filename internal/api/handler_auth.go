@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -474,10 +475,26 @@ func (s *Server) handleCreateBank(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "请求格式错误")
 		return
 	}
-	bank, err := s.bankSvc.CreateBank(r.Context(), req.ID, req.Name, req.Description, req.Professions)
-	if err != nil {
-		writeError(w, 400, err.Error())
+	actor := auth.GetUsername(r.Context())
+	detail := fmt.Sprintf("创建题库「%s」（专业范围 %v）", req.Name, req.Professions)
+	ok := s.withAuditedTx(w, r, "创建题库",
+		func(txCtx context.Context) error {
+			_, err := s.bankSvc.CreateBank(txCtx, req.ID, req.Name, req.Description, req.Professions)
+			if err != nil {
+				writeError(w, 400, err.Error())
+				return errResponded
+			}
+			return nil
+		},
+		func(txCtx context.Context) error {
+			return s.auditSvc.Log(txCtx, "", "bank_create", actor, detail)
+		})
+	if !ok {
 		return
+	}
+	bank, _ := s.bankSvc.GetBank(r.Context(), req.ID)
+	if bank == nil {
+		bank = &domain.QuestionBank{ID: req.ID, Name: req.Name, Description: req.Description, Professions: req.Professions}
 	}
 	writeJSON(w, 201, bank)
 }
@@ -494,10 +511,25 @@ func (s *Server) handleUpdateBank(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "请求格式错误")
 		return
 	}
-	bank, err := s.bankSvc.UpdateBank(r.Context(), id, req.Name, req.Description, req.Professions)
-	if err != nil {
-		writeError(w, 400, err.Error())
+	actor := auth.GetUsername(r.Context())
+	ok := s.withAuditedTx(w, r, "更新题库",
+		func(txCtx context.Context) error {
+			_, err := s.bankSvc.UpdateBank(txCtx, id, req.Name, req.Description, req.Professions)
+			if err != nil {
+				writeError(w, 400, err.Error())
+				return errResponded
+			}
+			return nil
+		},
+		func(txCtx context.Context) error {
+			return s.auditSvc.Log(txCtx, "", "bank_update", actor, fmt.Sprintf("更新题库「%s」（专业范围 %v）", req.Name, req.Professions))
+		})
+	if !ok {
 		return
+	}
+	bank, _ := s.bankSvc.GetBank(r.Context(), id)
+	if bank == nil {
+		bank = &domain.QuestionBank{ID: id, Name: req.Name, Description: req.Description, Professions: req.Professions}
 	}
 	writeJSON(w, 200, bank)
 }
@@ -538,8 +570,19 @@ func (s *Server) handleDeleteBank(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "题库已有审核历史，需永久保留用于追溯，不能物理删除")
 		return
 	}
-	if err := s.bankSvc.DeleteBank(r.Context(), id); err != nil {
-		writeError(w, 400, err.Error())
+	actor := auth.GetUsername(r.Context())
+	ok := s.withAuditedTx(w, r, "删除题库",
+		func(txCtx context.Context) error {
+			if err := s.bankSvc.DeleteBank(txCtx, id); err != nil {
+				writeError(w, 400, err.Error())
+				return errResponded
+			}
+			return nil
+		},
+		func(txCtx context.Context) error {
+			return s.auditSvc.Log(txCtx, "", "bank_delete", actor, "删除题库（题目自动归未分类）")
+		})
+	if !ok {
 		return
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok", "id": id})

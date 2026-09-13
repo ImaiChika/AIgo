@@ -505,11 +505,19 @@ func (s *Server) handleUnpublishQuestion(w http.ResponseWriter, r *http.Request)
 	}
 	actor := auth.GetUsername(r.Context())
 	unpublishCtx := storage.WithQuestionChange(r.Context(), storage.QuestionChange{Actor: actor, ChangeType: "unpublish", ChangeNote: note})
-	if err := s.questionStore.SaveQuestion(unpublishCtx, *q); err != nil {
-		writeError(w, 500, "撤回失败: "+err.Error())
+	ok := s.withAuditedTx(w, r, "撤回题目",
+		func(txCtx context.Context) error {
+			if err := s.questionStore.SaveQuestion(unpublishCtx, *q); err != nil {
+				return fmt.Errorf("撤回失败: %w", err)
+			}
+			return nil
+		},
+		func(txCtx context.Context) error {
+			return s.auditSvc.Log(txCtx, q.ID, "unpublish", actor, note)
+		})
+	if !ok {
 		return
 	}
-	s.auditSvc.Log(r.Context(), q.ID, "unpublish", actor, note)
 	writeJSON(w, 200, q)
 }
 
@@ -577,20 +585,35 @@ func (s *Server) handleDeleteQuestion(w http.ResponseWriter, r *http.Request) {
 		archiveCtx := storage.WithQuestionChange(r.Context(), storage.QuestionChange{
 			Actor: actor, ChangeType: "archive", ChangeNote: note,
 		})
-		if err := s.questionStore.SaveQuestion(archiveCtx, archived); err != nil {
-			writeError(w, 500, "归档失败: "+err.Error())
+		ok := s.withAuditedTx(w, r, "归档题目",
+			func(txCtx context.Context) error {
+				if err := s.questionStore.SaveQuestion(archiveCtx, archived); err != nil {
+					return fmt.Errorf("归档失败: %w", err)
+				}
+				return nil
+			},
+			func(txCtx context.Context) error {
+				return s.auditSvc.Log(txCtx, id, "archive", actor, note)
+			})
+		if !ok {
 			return
 		}
-		_ = s.auditSvc.Log(r.Context(), id, "archive", actor, note)
 		writeJSON(w, 200, map[string]any{"status": "ok", "id": id, "archived": true})
 		return
 	}
 
-	// 记录日志（删除前记录，因为删除后就查不到了）
-	s.auditSvc.LogDelete(r.Context(), id, actor)
-
-	if err := s.questionStore.DeleteQuestion(r.Context(), id); err != nil {
-		writeError(w, 500, "删除失败: "+err.Error())
+	// 物理删除（无人工审核史的草稿/未送审题）：业务与审计同事务
+	ok := s.withAuditedTx(w, r, "删除题目",
+		func(txCtx context.Context) error {
+			if err := s.questionStore.DeleteQuestion(txCtx, id); err != nil {
+				return fmt.Errorf("删除失败: %w", err)
+			}
+			return nil
+		},
+		func(txCtx context.Context) error {
+			return s.auditSvc.LogDelete(txCtx, id, actor)
+		})
+	if !ok {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"status": "ok", "id": id, "archived": false})
@@ -605,13 +628,20 @@ func (s *Server) handlePublishQuestion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	if err := s.reviewSvc.PublishQuestion(r.Context(), id); err != nil {
-		writeError(w, 400, err.Error())
+	ok := s.withAuditedTx(w, r, "发布题目",
+		func(txCtx context.Context) error {
+			if err := s.reviewSvc.PublishQuestion(txCtx, id); err != nil {
+				writeError(w, 400, err.Error())
+				return errResponded
+			}
+			return nil
+		},
+		func(txCtx context.Context) error {
+			return s.auditSvc.LogPublish(txCtx, id, actor)
+		})
+	if !ok {
 		return
 	}
-
-	// 记录发布日志
-	s.auditSvc.LogPublish(r.Context(), id, actor)
 
 	q, _ := s.questionStore.GetQuestion(r.Context(), id)
 	writeJSON(w, 200, q)

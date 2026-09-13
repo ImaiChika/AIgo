@@ -166,6 +166,13 @@ type ReviewTodoQuery struct {
 	DedupByQuestion bool
 }
 
+// TransactionStore 是生产存储可选实现的通用事务能力：
+// 在单个数据库事务中执行业务写入与审计写入（关键配置操作的审计一致性）。
+// fn 必须使用传入的 txCtx 调用存储方法（tx 经 context 传递，写入方法自动并入事务）。
+type TransactionStore interface {
+	WithTransaction(ctx context.Context, fn func(txCtx context.Context) error) error
+}
+
 // ReviewTodoQueryStore 是生产存储可选实现的审核待办高效查询能力：
 // 按状态/分配/归属在 SQL 端预过滤，避免装载全部任务与全部题目。
 // 未实现时 review 服务回退为 ListAllTasks + 内存过滤（轻量测试存储路径）。
@@ -233,6 +240,8 @@ type GenerationRunStore interface {
 	// RetryGenerationRun 记录一次可重试失败：执行次数未达上限则回到 pending 并在
 	// backoff 后才可再次被抢占（返回 true）；已达上限标记 failed 终态（返回 false）。
 	RetryGenerationRun(ctx context.Context, id, errMsg string, backoff time.Duration) (bool, error)
+	// CountGenerationRunsByStatus 按状态统计命题运行数量（存储端 GROUP BY，最小任务指标）。
+	CountGenerationRunsByStatus(ctx context.Context) (map[string]int, error)
 }
 
 // QuestionShareItem 是分享申请及其题目内容。题目中的 CreatedBy/OwnerID

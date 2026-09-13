@@ -4,6 +4,7 @@
 package aicheck
 
 import (
+	"log/slog"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -108,7 +109,7 @@ func (s *Service) checkQuestion(ctx context.Context, questionID, taskID string) 
 		return nil, err
 	}
 	if result.Verdict != "pass" && q.Status == domain.StatusAIDraft {
-		fmt.Printf("AI 检查淘汰题目 %s（%s）：已留档并删除\n", questionID, result.Verdict)
+		slog.Info("AI 检查淘汰题目", "question_id", questionID, "verdict", result.Verdict)
 	}
 
 	return result, nil

@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"errors"
+	"context"
+	"aigo/internal/storage"
 )
 
 // readJSON 从 HTTP 请求体读取 JSON 并解析到目标结构体。
@@ -58,4 +61,36 @@ func withJSON(next http.Handler) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// errResponded 标记业务函数已自行写出错误响应（如 400 校验错误），
+// 外层不再重复写响应，也不覆盖业务错误状态码。
+var errResponded = errors.New("response already written")
+
+// withAuditedTx 在单个数据库事务中执行业务写入与审计写入：
+// 要么业务完成且审计留痕同时提交，要么整体回滚（审计一致性口径）。
+// 存储不支持事务能力时退化为顺序执行（轻量测试存储路径）。
+// business 可调用 writeError 后返回 errResponded 以保留业务错误状态码。
+func (s *Server) withAuditedTx(w http.ResponseWriter, r *http.Request, op string,
+	business func(txCtx context.Context) error, audit func(txCtx context.Context) error) bool {
+	run := func(txCtx context.Context) error {
+		if err := business(txCtx); err != nil {
+			return err
+		}
+		return audit(txCtx)
+	}
+	var err error
+	if txStore, ok := s.questionStore.(storage.TransactionStore); ok {
+		err = txStore.WithTransaction(r.Context(), run)
+	} else {
+		err = run(r.Context())
+	}
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, errResponded) {
+		return false
+	}
+	writeError(w, 500, op+"失败: "+err.Error())
+	return false
 }

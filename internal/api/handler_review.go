@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log/slog"
 	"context"
 	"errors"
 	"fmt"
@@ -34,7 +35,7 @@ func (s *Server) aiReviewsForQuestions(ctx context.Context, questionIDs []string
 	}
 	results, err := s.aiCheckSvc.GetResultsByQuestionIDs(ctx, questionIDs)
 	if err != nil {
-		fmt.Printf("⚠ 加载 AI 检查结果失败: %v\n", err)
+		slog.Warn("加载 AI 检查结果失败", "error", err)
 		return nil
 	}
 	return results
@@ -103,7 +104,7 @@ func (s *Server) handleSubmitReview(w http.ResponseWriter, r *http.Request) {
 		actor = auth.GetUserID(r.Context())
 	}
 	if err := s.auditSvc.LogSubmit(r.Context(), req.QuestionID, req.FlowID, actor, isResubmit); err != nil {
-		fmt.Printf("⚠ 写提交日志失败: %v\n", err)
+		slog.Warn("写提交日志失败", "question_id", req.QuestionID, "error", err)
 	}
 
 	writeJSON(w, 200, task)
@@ -569,13 +570,20 @@ func (s *Server) handleCreateFlow(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureFlowBankExists(w, r, flow.BankID) {
 		return
 	}
-	if err := s.reviewSvc.CreateFlow(r.Context(), flow); err != nil {
-		writeError(w, 400, err.Error())
-		return
-	}
 	actor := auth.GetUsername(r.Context())
-	if err := s.auditSvc.LogFlow(r.Context(), flow.ID, actor, "create", fmt.Sprintf("创建流程「%s」（%d 轮）", flow.Name, len(flow.Rounds))); err != nil {
-		fmt.Printf("⚠ 写流程日志失败: %v\n", err)
+	ok := s.withAuditedTx(w, r, "创建审核流程",
+		func(txCtx context.Context) error {
+			if err := s.reviewSvc.CreateFlow(txCtx, flow); err != nil {
+				writeError(w, 400, err.Error())
+				return errResponded
+			}
+			return nil
+		},
+		func(txCtx context.Context) error {
+			return s.auditSvc.LogFlow(txCtx, flow.ID, actor, "create", fmt.Sprintf("创建流程「%s」（%d 轮）", flow.Name, len(flow.Rounds)))
+		})
+	if !ok {
+		return
 	}
 	writeJSON(w, 201, flow)
 }
@@ -591,13 +599,20 @@ func (s *Server) handleUpdateFlow(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureFlowBankExists(w, r, flow.BankID) {
 		return
 	}
-	if err := s.reviewSvc.UpdateFlow(r.Context(), flow); err != nil {
-		writeError(w, 400, err.Error())
-		return
-	}
 	actor := auth.GetUsername(r.Context())
-	if err := s.auditSvc.LogFlow(r.Context(), flow.ID, actor, "update", fmt.Sprintf("修改流程「%s」（%d 轮）", flow.Name, len(flow.Rounds))); err != nil {
-		fmt.Printf("⚠ 写流程日志失败: %v\n", err)
+	ok := s.withAuditedTx(w, r, "更新审核流程",
+		func(txCtx context.Context) error {
+			if err := s.reviewSvc.UpdateFlow(txCtx, flow); err != nil {
+				writeError(w, 400, err.Error())
+				return errResponded
+			}
+			return nil
+		},
+		func(txCtx context.Context) error {
+			return s.auditSvc.LogFlow(txCtx, flow.ID, actor, "update", fmt.Sprintf("修改流程「%s」（%d 轮）", flow.Name, len(flow.Rounds)))
+		})
+	if !ok {
+		return
 	}
 	writeJSON(w, 200, flow)
 }
@@ -621,13 +636,20 @@ func (s *Server) ensureFlowBankExists(w http.ResponseWriter, r *http.Request, ba
 // handleDeleteFlow 删除审核流程。
 func (s *Server) handleDeleteFlow(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := s.reviewSvc.DeleteFlow(r.Context(), id); err != nil {
-		writeError(w, 500, err.Error())
-		return
-	}
 	actor := auth.GetUsername(r.Context())
-	if err := s.auditSvc.LogFlow(r.Context(), id, actor, "delete", "删除流程"); err != nil {
-		fmt.Printf("⚠ 写流程日志失败: %v\n", err)
+	ok := s.withAuditedTx(w, r, "删除审核流程",
+		func(txCtx context.Context) error {
+			if err := s.reviewSvc.DeleteFlow(txCtx, id); err != nil {
+				writeError(w, 500, err.Error())
+				return errResponded
+			}
+			return nil
+		},
+		func(txCtx context.Context) error {
+			return s.auditSvc.LogFlow(txCtx, id, actor, "delete", "删除流程")
+		})
+	if !ok {
+		return
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok", "id": id})
 }

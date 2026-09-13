@@ -189,9 +189,17 @@ func (s *Server) handleAICheckSummary(w http.ResponseWriter, r *http.Request) {
 		questions[string(status)] = total
 	}
 
+	generationRuns := map[string]int{}
+	if s.generationRunStore != nil {
+		if counts, err := s.generationRunStore.CountGenerationRunsByStatus(r.Context()); err == nil {
+			generationRuns = counts
+		}
+	}
+
 	writeJSON(w, 200, map[string]any{
-		"tasks":     tasks,
-		"questions": questions,
+		"tasks":           tasks,
+		"questions":       questions,
+		"generation_runs": generationRuns,
 	})
 }
 

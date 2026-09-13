@@ -1,6 +1,8 @@
 package postgres
 
 import (
+	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -164,5 +166,50 @@ func TestReviewTodoQuerySemantics(t *testing.T) {
 	got = taskIDs(tasks)
 	if !got["todo-t7"] {
 		t.Fatalf("模式 C 应命中 t7，实际 %v", got)
+	}
+}
+
+
+// TestWithTransactionAuditAtomicity 验证通用事务能力：业务写入与审计写入
+// 要么同时提交、要么一起回滚（关键配置操作的审计一致性口径）。
+func TestWithTransactionAuditAtomicity(t *testing.T) {
+	store, ctx := newAICheckOutcomeTestStore(t)
+
+	// 成功路径：题库写入 + 审计写入同事务提交
+	err := store.WithTransaction(ctx, func(txCtx context.Context) error {
+		if err := store.SaveBank(txCtx, domain.QuestionBank{ID: "tx-bank-ok", Name: "事务题库", CreatedAt: time.Now()}); err != nil {
+			return err
+		}
+		return store.SaveLog(txCtx, domain.AuditLog{ID: "tx-log-ok", Action: "bank_create", Actor: "tester", CreatedAt: time.Now()})
+	})
+	if err != nil {
+		t.Fatalf("事务提交失败: %v", err)
+	}
+	if bank, _ := store.GetBank(ctx, "tx-bank-ok"); bank == nil {
+		t.Fatal("业务写入应已提交")
+	}
+	counts, _ := store.ListLogs(ctx, 10)
+	sawLog := false
+	for _, l := range counts {
+		if l.ID == "tx-log-ok" {
+			sawLog = true
+		}
+	}
+	if !sawLog {
+		t.Fatal("审计写入应已提交")
+	}
+
+	// 回滚路径：审计步骤返回错误 → 业务写入一并回滚
+	err = store.WithTransaction(ctx, func(txCtx context.Context) error {
+		if err := store.SaveBank(txCtx, domain.QuestionBank{ID: "tx-bank-rollback", Name: "回滚题库", CreatedAt: time.Now()}); err != nil {
+			return err
+		}
+		return fmt.Errorf("注入的审计失败")
+	})
+	if err == nil {
+		t.Fatal("注入错误应导致事务失败")
+	}
+	if bank, _ := store.GetBank(ctx, "tx-bank-rollback"); bank != nil {
+		t.Fatal("事务回滚后业务写入不得残留")
 	}
 }
