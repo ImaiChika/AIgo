@@ -36,7 +36,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+          # Go 依赖/构建缓存偶发出现 tar 恢复失败；CI 以可重复性优先，
+          # 避免缓存状态把无关的后端测试标成失败。
+          cache: false
 
       - name: go build
         run: go build ./...
@@ -45,10 +47,10 @@ jobs:
         run: go vet ./...
 
       - name: go test（全量，含 PostgreSQL 集成测试）
-        run: go test ./...
+        run: go test -count=1 ./...
 
       - name: go test -race（存储层竞态）
-        run: go test -race ./internal/storage/... ./internal/aicheck/ ./internal/review/
+        run: go test -count=1 -race ./internal/storage/... ./internal/aicheck/ ./internal/review/
 
       - name: govulncheck（可达漏洞必须为 0）
         run: |
