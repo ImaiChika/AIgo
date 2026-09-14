@@ -100,7 +100,13 @@ with sync_playwright() as playwright:
             displayed = page.locator(".review-info-field .rc-card")
             text = page.locator(".review-info-field").inner_text()
             check("题库详情展示全部审核记录", displayed.count() == len(records), f"page={displayed.count()} api={len(records)}")
-            written = [record.get("opinion", "").strip() for record in records if record.get("opinion", "").strip()]
+            written = []
+            for record in records:
+                structured = [str((record.get("comment") or {}).get(key, "")).strip() for key in ("stem", "options", "answer", "other")]
+                if any(structured):
+                    written.extend(value for value in structured if value)
+                elif record.get("opinion", "").strip():
+                    written.append(record["opinion"].strip())
             if written:
                 check("全部书面评论文字可见", all(opinion in text for opinion in written), f"written={len(written)}")
             if {record.get("review_status") for record in records}.issuperset({"approved", "rejected"}):
