@@ -8,7 +8,7 @@
   color: #e6edf7; background: #16324d; z-index: 10;
 }
 .app-shell .sidebar .brand { align-items: flex-start; flex-direction: column; gap: 8px; padding: 0 10px; }
-.app-shell .sidebar .brand-logo { display: block; width: min(100%, 198px); height: auto; }
+.app-shell .sidebar .brand-logo { display: block; width: min(100%, 198px); height: auto; padding: 5px 7px; border-radius: 6px; background: #fff; box-sizing: border-box; }
 .app-shell .sidebar .brand-product-name { color: #f4f8ff; font-size: 13px; letter-spacing: -.01em; line-height: 1.35; }
 .app-shell .sidebar .user-info { border-color: #35516e; padding: 16px 7px 0; gap: 8px; }
 .app-shell .sidebar .user-detail strong { color: #e4eef8; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
