@@ -192,7 +192,7 @@ AI 质量检查约束（2026-09-06 用户明确）：
 
 ### 前端 Vue 3
 
-- `web/src/App.vue`：根组件（侧边栏、用户信息、昵称编辑）。
+- `web/src/App.vue`：根组件（侧边栏、用户信息、个人设置入口）。
 - `web/src/api.js`：API 服务层（封装所有后端接口）。
 - `web/src/auth.js`：认证状态管理（token、用户信息）。
 - `web/src/router.js`：路由配置 + 登录守卫。
