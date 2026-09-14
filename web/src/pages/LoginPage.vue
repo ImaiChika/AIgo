@@ -83,9 +83,8 @@ function switchMode(m) {
   <div class="login-page">
     <div class="login-card">
       <div class="login-brand">
-        <div class="brand-mark">A</div>
-        <h1>AIgo</h1>
-        <p>命题审核平台</p>
+        <img class="login-logo" src="/zhique-logo.png" alt="治趣" />
+        <h1>AI医学试题生成系统</h1>
       </div>
 
       <div v-if="mode === 'login'">
@@ -165,29 +164,17 @@ function switchMode(m) {
   margin-bottom: 32px;
 }
 
-.brand-mark {
-  display: inline-grid;
-  place-items: center;
-  width: 56px;
-  height: 56px;
-  border-radius: 12px;
-  background: #1385f8;
-  color: #fff;
-  font-size: 28px;
-  font-weight: 800;
-  margin-bottom: 12px;
+.login-logo {
+  display: block;
+  width: min(100%, 300px);
+  height: auto;
+  margin: 0 auto 16px;
 }
 
 .login-brand h1 {
   margin: 0;
   font-size: 24px;
   color: #172033;
-}
-
-.login-brand p {
-  margin: 4px 0 0;
-  color: #6e7b8f;
-  font-size: 14px;
 }
 
 .field {
@@ -276,6 +263,17 @@ function switchMode(m) {
 .switch-hint.note {
   font-size: 12px;
   color: #9aa5b4;
+}
+
+@media (max-width: 460px) {
+  .login-card {
+    width: calc(100vw - 28px);
+    padding: 28px 22px;
+  }
+
+  .login-logo {
+    width: min(100%, 280px);
+  }
 }
 
 </style>

@@ -56,11 +56,8 @@ const isLoginPage = computed(() => route.path === "/login");
     <div v-if="mobileNavigationOpen" class="navigation-backdrop" aria-hidden="true" @click="mobileNavigationOpen = false"></div>
     <aside ref="sidebar" class="sidebar" id="application-navigation" :role="mobileNavigationOpen ? 'dialog' : undefined" :aria-modal="mobileNavigationOpen || undefined" aria-label="应用导航" @keydown="sidebarKeydown">
       <div class="brand">
-        <div class="brand-mark">A</div>
-        <div>
-          <strong>AIgo</strong>
-          <span>命题审核平台</span>
-        </div>
+        <img class="brand-logo" src="/zhique-logo.png" alt="治趣" />
+        <strong class="brand-product-name">AI医学试题生成系统</strong>
         <button class="mobile-navigation-close" type="button" aria-label="关闭导航" @click="mobileNavigationOpen = false">×</button>
       </div>
 
