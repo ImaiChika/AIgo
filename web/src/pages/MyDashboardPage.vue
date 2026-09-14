@@ -59,10 +59,10 @@ async function loadDashboard() {
   );
 
   if (hasPerm("review:do")) {
-    addJob(api.myTasks, (data) => { counts.value.review = data.total ?? (data.tasks || []).length; });
+    addJob(() => api.myTasks(1, 1), (data) => { counts.value.review = data.total ?? (data.tasks || []).length; });
   }
   if (hasPerm("review:final")) {
-    addJob(api.myDecisions, (data) => { counts.value.decisions = data.total ?? (data.tasks || []).length; });
+    addJob(() => api.myDecisions(1, 1), (data) => { counts.value.decisions = data.total ?? (data.tasks || []).length; });
   }
   if (hasPerm("question:edit")) {
     addJob(api.myRevisions, (data) => { counts.value.revisions = data.total ?? (data.items || []).length; });

@@ -23,11 +23,8 @@ const myTasks = ref([]);
 const myTasksLoading = ref(false);
 const taskPage = ref(1);
 const taskPageSize = 20;
-const taskPageCount = computed(() => Math.max(1, Math.ceil(myTasks.value.length / taskPageSize)));
-const pagedMyTasks = computed(() => {
-  const start = (taskPage.value - 1) * taskPageSize;
-  return myTasks.value.slice(start, start + taskPageSize);
-});
+const taskTotal = ref(0);
+const taskPageCount = computed(() => Math.max(1, Math.ceil(taskTotal.value / taskPageSize)));
 const currentFlowName = computed(() => reviewTask.value?._flow_name || reviewTask.value?.flow_id || "");
 const currentFlowRounds = computed(() => reviewTask.value?._round_count || reviewTask.value?.round_results?.length || 0);
 const currentRoundName = computed(() => reviewTask.value?._round_name || "");
@@ -104,9 +101,15 @@ function showToast(msg) {
 async function loadMyTasks() {
   myTasksLoading.value = true;
   try {
-    const data = await api.myTasks();
+    let data = await api.myTasks(taskPage.value, taskPageSize);
+    taskTotal.value = data.total || 0;
+    const validPage = Math.min(taskPage.value, taskPageCount.value);
+    if (validPage !== taskPage.value) {
+      taskPage.value = validPage;
+      data = await api.myTasks(taskPage.value, taskPageSize);
+      taskTotal.value = data.total || 0;
+    }
     myTasks.value = data.tasks || [];
-    taskPage.value = Math.min(taskPage.value, taskPageCount.value);
     // 若当前选中项已不在列表中（投完/进入下一轮），保留右侧供查看
   } catch (e) {
     showToast("加载待审任务失败: " + e.message);
@@ -116,11 +119,12 @@ async function loadMyTasks() {
 }
 
 function goTaskPage(page) {
-  if (page < 1 || page > taskPageCount.value || page === taskPage.value) return;
+  if (myTasksLoading.value || page < 1 || page > taskPageCount.value || page === taskPage.value) return;
   taskPage.value = page;
   selectedQuestion.value = null;
   reviewTask.value = null;
   reviewRecords.value = [];
+  loadMyTasks();
   document.querySelector(".my-task-list")?.scrollTo({ top: 0 });
 }
 
@@ -251,7 +255,7 @@ onMounted(() => {
       <div class="section-heading">
         <span class="dot blue"></span>
         <h2>待我审核</h2>
-        <small>{{ myTasks.length }} 项</small>
+        <small>{{ taskTotal }} 项</small>
       </div>
 
       <div v-if="myTasksLoading" class="loading">加载中...</div>
@@ -261,7 +265,7 @@ onMounted(() => {
       </div>
       <div v-else class="my-task-list">
         <div
-          v-for="item in pagedMyTasks"
+          v-for="item in myTasks"
           :key="item.task.id"
           class="my-task-card"
           :class="{ active: selectedQuestion?.id === item.question.id }"
@@ -286,7 +290,7 @@ onMounted(() => {
         </div>
       </div>
       <CompactPager
-        v-if="myTasks.length"
+        v-if="taskTotal"
         :page="taskPage"
         :total-pages="taskPageCount"
         :disabled="myTasksLoading"

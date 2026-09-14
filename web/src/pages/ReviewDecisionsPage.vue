@@ -17,11 +17,8 @@ const reviewers = ref([]); // 名字映射
 const activeRoundTab = ref(1); // 当前对比的轮次；0 = 时间线视图
 const decisionPage = ref(1);
 const decisionPageSize = 20;
-const decisionPageCount = computed(() => Math.max(1, Math.ceil(decisions.value.length / decisionPageSize)));
-const pagedDecisions = computed(() => {
-  const start = (decisionPage.value - 1) * decisionPageSize;
-  return decisions.value.slice(start, start + decisionPageSize);
-});
+const decisionTotal = ref(0);
+const decisionPageCount = computed(() => Math.max(1, Math.ceil(decisionTotal.value / decisionPageSize)));
 
 function showToast(msg) {
   toast.value = msg;
@@ -32,9 +29,15 @@ function showToast(msg) {
 async function loadDecisions() {
   loading.value = true;
   try {
-    const data = await api.myDecisions();
+    let data = await api.myDecisions(decisionPage.value, decisionPageSize);
+    decisionTotal.value = data.total || 0;
+    const validPage = Math.min(decisionPage.value, decisionPageCount.value);
+    if (validPage !== decisionPage.value) {
+      decisionPage.value = validPage;
+      data = await api.myDecisions(decisionPage.value, decisionPageSize);
+      decisionTotal.value = data.total || 0;
+    }
     decisions.value = data.tasks || [];
-    decisionPage.value = Math.min(decisionPage.value, decisionPageCount.value);
     // 若当前选中项已被决断，清空选中
     if (selected.value && !decisions.value.some((d) => d.task.id === selected.value.task.id)) {
       selected.value = null;
@@ -48,10 +51,11 @@ async function loadDecisions() {
 }
 
 function goDecisionPage(page) {
-  if (page < 1 || page > decisionPageCount.value || page === decisionPage.value) return;
+  if (loading.value || page < 1 || page > decisionPageCount.value || page === decisionPage.value) return;
   decisionPage.value = page;
   selected.value = null;
   reviewRecords.value = [];
+  loadDecisions();
   document.querySelector(".decision-list")?.scrollTo({ top: 0 });
 }
 
@@ -235,7 +239,7 @@ onMounted(() => {
       <div class="section-heading">
         <span class="dot blue"></span>
         <h2>待我决断</h2>
-        <small>{{ decisions.length }} 项</small>
+        <small>{{ decisionTotal }} 项</small>
       </div>
       <div v-if="loading" class="loading">加载中...</div>
       <div v-else-if="!decisions.length" class="empty">
@@ -244,7 +248,7 @@ onMounted(() => {
       </div>
       <div v-else class="decision-list">
         <div
-          v-for="item in pagedDecisions"
+          v-for="item in decisions"
           :key="item.task.id"
           class="decision-card"
           :class="{ active: selected?.task.id === item.task.id }"
@@ -270,7 +274,7 @@ onMounted(() => {
         </div>
       </div>
       <CompactPager
-        v-if="decisions.length"
+        v-if="decisionTotal"
         :page="decisionPage"
         :total-pages="decisionPageCount"
         :disabled="loading"

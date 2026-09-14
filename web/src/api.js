@@ -351,8 +351,8 @@ export const api = {
     return request(`/review/results?${qs}`);
   },
   listReviewers: () => request("/review/reviewers"),
-  myTasks: () => request("/review/my-tasks"),
-  myDecisions: () => request("/review/my-decisions"),
+  myTasks: (page = 1, pageSize = 20) => request(`/review/my-tasks?page=${page}&page_size=${pageSize}`),
+  myDecisions: (page = 1, pageSize = 20) => request(`/review/my-decisions?page=${page}&page_size=${pageSize}`),
   // 待我修改（退回修改的题目；提交修改=保存回库，送审由管理员负责）
   myRevisions: () => request("/review/my-revisions"),
   reviewAction: (params) =>

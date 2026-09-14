@@ -1,10 +1,10 @@
 package api
 
 import (
-	"log/slog"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -282,7 +282,12 @@ func (s *Server) handleMyTasks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"tasks": s.attachAIReviews(r.Context(), tasks), "total": len(tasks)})
+	page, pageSize := reviewTodoPageParams(r)
+	pageTasks, total, hasMore := paginateReviewTodo(tasks, page, pageSize)
+	writeJSON(w, 200, map[string]any{
+		"tasks": s.attachAIReviews(r.Context(), pageTasks), "total": total,
+		"page": page, "page_size": pageSize, "has_more": hasMore,
+	})
 }
 
 // handleMyDecisions 列出待我决断的任务（最终把关人专用，供「待决断」页面）。
@@ -303,7 +308,37 @@ func (s *Server) handleMyDecisions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"tasks": s.attachAIReviews(r.Context(), tasks), "total": len(tasks)})
+	page, pageSize := reviewTodoPageParams(r)
+	pageTasks, total, hasMore := paginateReviewTodo(tasks, page, pageSize)
+	writeJSON(w, 200, map[string]any{
+		"tasks": s.attachAIReviews(r.Context(), pageTasks), "total": total,
+		"page": page, "page_size": pageSize, "has_more": hasMore,
+	})
+}
+
+func reviewTodoPageParams(r *http.Request) (int, int) {
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	return page, pageSize
+}
+
+func paginateReviewTodo(items []review.MyTaskItem, page, pageSize int) ([]review.MyTaskItem, int, bool) {
+	total := len(items)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	return items[start:end], total, end < total
 }
 
 // handleMyRevisions 列出退回给当前用户修改的题目（待我修改页数据源）。
