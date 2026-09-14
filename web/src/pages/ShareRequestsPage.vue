@@ -3,12 +3,14 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api.js";
 import { currentUser, hasPerm } from "../auth.js";
 import AICheckScoreButton from "../components/AICheckScoreButton.vue";
+import ReviewHistoryPanel from "../components/ReviewHistoryPanel.vue";
 
 const loading = ref(false);
 const items = ref([]);
 const toast = ref("");
 const showAll = ref(false);
 const actingID = ref("");
+const reviewPanels = ref({});
 
 const canReview = computed(() => hasPerm("question:share_review"));
 const listScope = computed(() => canReview.value ? (showAll.value ? "all" : "pending") : "mine");
@@ -54,6 +56,28 @@ async function review(item, status, note = "") {
     showToast("处理申请失败：" + error.message);
   } finally {
     actingID.value = "";
+  }
+}
+
+async function toggleReviewHistory(item) {
+  const questionID = item.question?.id || item.request?.question_id;
+  if (!questionID) return;
+  const current = reviewPanels.value[questionID];
+  if (current?.loaded) {
+    reviewPanels.value = { ...reviewPanels.value, [questionID]: { ...current, open: !current.open } };
+    return;
+  }
+  reviewPanels.value = { ...reviewPanels.value, [questionID]: { open: true, loading: true, loaded: false, records: [] } };
+  try {
+    const task = await api.getTaskByQuestion(questionID);
+    const data = task?.id ? await api.reviewRecords(task.id) : { records: [] };
+    reviewPanels.value = {
+      ...reviewPanels.value,
+      [questionID]: { open: true, loading: false, loaded: true, records: data.records || [] },
+    };
+  } catch (error) {
+    reviewPanels.value = { ...reviewPanels.value, [questionID]: { open: false, loading: false, loaded: false, records: [] } };
+    showToast("加载审核意见失败：" + error.message);
   }
 }
 
@@ -125,6 +149,17 @@ onMounted(load);
             <span v-if="item.question.profession">专业 {{ item.question.profession }}</span>
             <span>题目 ID {{ item.request.question_id }}</span>
             <AICheckScoreButton class="share-ai-score" :question-id="item.question.id" />
+          </div>
+          <div class="request-review-history">
+            <button class="review-history-toggle" type="button" @click="toggleReviewHistory(item)">
+              {{ reviewPanels[item.question.id]?.open ? "收起审核意见" : "查看审核意见" }}
+            </button>
+            <span v-if="reviewPanels[item.question.id]?.loading" class="review-history-loading">加载中</span>
+            <ReviewHistoryPanel
+              v-if="reviewPanels[item.question.id]?.open && reviewPanels[item.question.id]?.loaded"
+              :records="reviewPanels[item.question.id].records"
+              compact
+            />
           </div>
           <p v-if="item.request.review_note" class="review-note">审批说明：{{ item.request.review_note }}</p>
           <div v-if="canReview && item.request.status === 'pending'" class="request-actions">
@@ -308,6 +343,32 @@ onMounted(load);
   flex-wrap: wrap;
   gap: 10px;
   padding: 0 14px 12px;
+  color: #8a96a5;
+  font-size: 11px;
+}
+
+.request-review-history {
+  display: grid;
+  gap: 10px;
+  padding: 0 14px 12px;
+}
+
+.review-history-toggle {
+  justify-self: start;
+  padding: 4px 9px;
+  border: 1px solid #dce5e1;
+  border-radius: 5px;
+  color: #49665b;
+  background: #fff;
+  font-size: 11px;
+}
+
+.review-history-toggle:hover {
+  border-color: #8ba99d;
+  background: #f7faf8;
+}
+
+.review-history-loading {
   color: #8a96a5;
   font-size: 11px;
 }

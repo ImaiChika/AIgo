@@ -22,6 +22,7 @@ python3 review_todo_e2e.py       # 审核三页：待我审核→决断→待我
 python3 archive_deletion_e2e.py  # 删除即归档：published 题删除→淘汰题库→记录保留
 python3 export_e2e.py            # Excel/Word 导出：字段完整、无命题人占位符、文件清理
 python3 personal_center_e2e.py    # 个人工作台、零权限新用户、昵称/密码、移动端与清理
+python3 review_pagination_e2e.py  # 待审/决断分页，终态题全部评论与分享页按需展开
 ```
 
 环境变量（均可选）：

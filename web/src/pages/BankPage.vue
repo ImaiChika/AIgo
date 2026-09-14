@@ -4,6 +4,7 @@ import { useRoute } from "vue-router";
 import { api } from "../api.js";
 import { hasPerm } from "../auth.js";
 import AICheckScoreButton from "../components/AICheckScoreButton.vue";
+import ReviewHistoryPanel from "../components/ReviewHistoryPanel.vue";
 
 const route = useRoute();
 
@@ -754,18 +755,11 @@ onMounted(async () => {
           </div>
         </div>
 
-        <!-- 审核意见：已结束任务展示完整轮次评语与决断（驳回理由在这里） -->
-        <div v-if="reviewInfo" class="detail-field review-info-field">
+        <div v-if="reviewInfoLoading" class="detail-field review-loading">审核意见加载中</div>
+        <!-- 终态任务向有权查看题目的用户开放全部审核记录；进行中仍由服务端保持评语隔离。 -->
+        <div v-else-if="reviewInfo" class="detail-field review-info-field">
           <label>审核意见（第 {{ reviewInfo.task.attempt || 1 }} 次送审 · {{ reviewConclusionText(reviewInfo.task.status) }}）</label>
-          <div v-for="rec in reviewInfo.records" :key="rec.id" class="review-record" :class="{ 'review-final': (rec.id || '').startsWith('rec-final-') }">
-            <div class="review-record-head">
-              <span class="review-round">{{ (rec.id || '').startsWith('rec-final-') ? '最终决断' : `第 ${rec.round_number} 轮` }}</span>
-              <span class="review-reviewer">{{ rec.expert_name || rec.expert_id }}</span>
-              <span class="review-conclusion" :class="`review-conclusion-${rec.review_status}`">{{ reviewConclusionText(rec.review_status) }}</span>
-            </div>
-            <p v-if="rec.opinion" class="review-opinion">{{ rec.opinion }}</p>
-          </div>
-          <p v-if="!reviewInfo.records.length" class="review-empty">暂无审核记录</p>
+          <ReviewHistoryPanel :records="reviewInfo.records" compact />
         </div>
 
         <div class="detail-field">
@@ -1318,57 +1312,9 @@ onMounted(async () => {
   font-family: monospace;
 }
 
-.review-info-field .review-record {
-  border: 1px solid #e5ebf3;
-  border-radius: 8px;
-  padding: 8px 10px;
-  margin-bottom: 8px;
-  background: #fbfdff;
-}
-
-.review-info-field .review-record.review-final {
-  border-color: #f3c8cd;
-  background: #fffafa;
-}
-
-.review-record-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.review-loading {
+  color: #6e7b8f;
   font-size: 12px;
-}
-
-.review-round {
-  color: #6e7b8f;
-  font-weight: 600;
-}
-
-.review-reviewer {
-  color: #172033;
-  font-weight: 600;
-}
-
-.review-conclusion {
-  padding: 1px 8px;
-  border-radius: 4px;
-  font-weight: 600;
-}
-
-.review-conclusion-approved, .review-conclusion-published { background: #e9f8ef; color: #199e63; }
-.review-conclusion-rejected { background: #fff0f0; color: #c54858; }
-.review-conclusion-revision_required { background: #fff3e2; color: #dd8a00; }
-
-.review-opinion {
-  margin: 6px 0 0 !important;
-  font-size: 13px !important;
-  color: #435269 !important;
-  line-height: 1.6;
-  white-space: pre-wrap;
-}
-
-.review-empty {
-  color: #6e7b8f;
-  font-size: 13px;
 }
 
 .empty-panel { display: grid; place-items: center; color: #6e7b8f; }

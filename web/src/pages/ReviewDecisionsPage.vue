@@ -3,6 +3,7 @@ import { ref, onMounted, computed } from "vue";
 import { api } from "../api.js";
 import StructuredCommentInput from "../components/StructuredCommentInput.vue";
 import ReviewCommentCard from "../components/ReviewCommentCard.vue";
+import CompactPager from "../components/CompactPager.vue";
 
 const toast = ref("");
 const decisions = ref([]);
@@ -14,6 +15,13 @@ const finalizeComment = ref({ stem: "", options: "", answer: "", other: "" });
 const submitting = ref(false);
 const reviewers = ref([]); // 名字映射
 const activeRoundTab = ref(1); // 当前对比的轮次；0 = 时间线视图
+const decisionPage = ref(1);
+const decisionPageSize = 20;
+const decisionPageCount = computed(() => Math.max(1, Math.ceil(decisions.value.length / decisionPageSize)));
+const pagedDecisions = computed(() => {
+  const start = (decisionPage.value - 1) * decisionPageSize;
+  return decisions.value.slice(start, start + decisionPageSize);
+});
 
 function showToast(msg) {
   toast.value = msg;
@@ -26,6 +34,7 @@ async function loadDecisions() {
   try {
     const data = await api.myDecisions();
     decisions.value = data.tasks || [];
+    decisionPage.value = Math.min(decisionPage.value, decisionPageCount.value);
     // 若当前选中项已被决断，清空选中
     if (selected.value && !decisions.value.some((d) => d.task.id === selected.value.task.id)) {
       selected.value = null;
@@ -36,6 +45,14 @@ async function loadDecisions() {
   } finally {
     loading.value = false;
   }
+}
+
+function goDecisionPage(page) {
+  if (page < 1 || page > decisionPageCount.value || page === decisionPage.value) return;
+  decisionPage.value = page;
+  selected.value = null;
+  reviewRecords.value = [];
+  document.querySelector(".decision-list")?.scrollTo({ top: 0 });
 }
 
 async function loadReviewers() {
@@ -227,7 +244,7 @@ onMounted(() => {
       </div>
       <div v-else class="decision-list">
         <div
-          v-for="item in decisions"
+          v-for="item in pagedDecisions"
           :key="item.task.id"
           class="decision-card"
           :class="{ active: selected?.task.id === item.task.id }"
@@ -252,6 +269,13 @@ onMounted(() => {
           <div class="dc-action">去决断 →</div>
         </div>
       </div>
+      <CompactPager
+        v-if="decisions.length"
+        :page="decisionPage"
+        :total-pages="decisionPageCount"
+        :disabled="loading"
+        @change="goDecisionPage"
+      />
     </section>
 
     <!-- 右侧决断工作台 -->
@@ -435,13 +459,23 @@ onMounted(() => {
 }
 
 .decision-list-panel {
+  display: flex;
+  flex-direction: column;
   max-height: calc(100vh - 180px);
-  overflow-y: auto;
+  overflow: hidden;
+}
+
+.decision-list-panel > .section-heading {
+  flex-shrink: 0;
 }
 
 .decision-list {
   display: grid;
   gap: 8px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .decision-card {

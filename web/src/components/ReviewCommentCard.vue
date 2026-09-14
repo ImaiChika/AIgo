@@ -24,6 +24,7 @@ const attitude = attitudeMap[props.record.review_status] || { text: props.record
 const displayName = props.record.expert_name || props.fallbackName || props.record.expert_id;
 
 const attemptTag = props.record.attempt > 1 ? `第${props.record.attempt}批` : "";
+const isFinal = (props.record.id || "").startsWith("rec-final-");
 
 function sectionValue(key) {
   return (props.record.comment && props.record.comment[key] || "").trim();
@@ -42,6 +43,7 @@ function formatTime(ts) {
   <div class="rc-card" :class="[compact ? 'compact' : '', record.review_status]">
     <div class="rc-head">
       <span class="rc-name">{{ displayName }}</span>
+      <span v-if="isFinal" class="rc-final">最终决断</span>
       <span class="rc-attitude" :class="attitude.cls">{{ attitude.text }}</span>
       <span v-if="attemptTag" class="rc-attempt">{{ attemptTag }}</span>
       <span class="rc-time">{{ formatTime(record.created_at) }}</span>
@@ -95,6 +97,16 @@ function formatTime(ts) {
   font-weight: 700;
   padding: 1px 7px;
   border-radius: 4px;
+  white-space: nowrap;
+}
+
+.rc-final {
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #7652bb;
+  background: #f2edff;
+  font-size: 10px;
+  font-weight: 700;
   white-space: nowrap;
 }
 

@@ -5,6 +5,7 @@ import { currentUser, hasPerm } from "../auth.js";
 import QuestionDetailModal from "../components/QuestionDetailModal.vue";
 import StructuredCommentInput from "../components/StructuredCommentInput.vue";
 import ReviewCommentCard from "../components/ReviewCommentCard.vue";
+import CompactPager from "../components/CompactPager.vue";
 
 const toast = ref("");
 const selectedQuestion = ref(null);
@@ -20,6 +21,13 @@ const experts = ref([]);
 // 待我审核（本页唯一视图：审题人投票工作区）
 const myTasks = ref([]);
 const myTasksLoading = ref(false);
+const taskPage = ref(1);
+const taskPageSize = 20;
+const taskPageCount = computed(() => Math.max(1, Math.ceil(myTasks.value.length / taskPageSize)));
+const pagedMyTasks = computed(() => {
+  const start = (taskPage.value - 1) * taskPageSize;
+  return myTasks.value.slice(start, start + taskPageSize);
+});
 const currentFlowName = computed(() => reviewTask.value?._flow_name || reviewTask.value?.flow_id || "");
 const currentFlowRounds = computed(() => reviewTask.value?._round_count || reviewTask.value?.round_results?.length || 0);
 const currentRoundName = computed(() => reviewTask.value?._round_name || "");
@@ -98,12 +106,22 @@ async function loadMyTasks() {
   try {
     const data = await api.myTasks();
     myTasks.value = data.tasks || [];
+    taskPage.value = Math.min(taskPage.value, taskPageCount.value);
     // 若当前选中项已不在列表中（投完/进入下一轮），保留右侧供查看
   } catch (e) {
     showToast("加载待审任务失败: " + e.message);
   } finally {
     myTasksLoading.value = false;
   }
+}
+
+function goTaskPage(page) {
+  if (page < 1 || page > taskPageCount.value || page === taskPage.value) return;
+  taskPage.value = page;
+  selectedQuestion.value = null;
+  reviewTask.value = null;
+  reviewRecords.value = [];
+  document.querySelector(".my-task-list")?.scrollTo({ top: 0 });
 }
 
 // 从待审任务卡片进入审核
@@ -243,7 +261,7 @@ onMounted(() => {
       </div>
       <div v-else class="my-task-list">
         <div
-          v-for="item in myTasks"
+          v-for="item in pagedMyTasks"
           :key="item.task.id"
           class="my-task-card"
           :class="{ active: selectedQuestion?.id === item.question.id }"
@@ -267,6 +285,13 @@ onMounted(() => {
           <div class="mt-action">去审核 →</div>
         </div>
       </div>
+      <CompactPager
+        v-if="myTasks.length"
+        :page="taskPage"
+        :total-pages="taskPageCount"
+        :disabled="myTasksLoading"
+        @change="goTaskPage"
+      />
     </section>
 
     <!-- 右侧审核工作区 -->
@@ -420,8 +445,14 @@ onMounted(() => {
 }
 
 .question-list-panel {
+  display: flex;
+  flex-direction: column;
   max-height: calc(100vh - 180px);
-  overflow-y: auto;
+  overflow: hidden;
+}
+
+.question-list-panel > .section-heading {
+  flex-shrink: 0;
 }
 
 .question-list {
@@ -521,8 +552,10 @@ onMounted(() => {
 .my-task-list {
   display: grid;
   gap: 8px;
-  max-height: calc(100vh - 260px);
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  padding-right: 2px;
 }
 
 .my-task-card {
