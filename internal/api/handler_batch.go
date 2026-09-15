@@ -153,8 +153,14 @@ func (s *Server) handleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 		jobName = fmt.Sprintf("批量生成 %d题 %s", len(points), time.Now().Format("01-02 15:04"))
 	}
 
-	// 提交任务
-	jobID, count, err := s.batchSvc.GenerateAndSubmit(r.Context(), points, req.Count, jobName)
+	// 提交任务：把当前用户归属写入批量任务，后续状态查询/结果导入必须按任务拥有者隔离。
+	batchCtx := storage.WithQuestionChange(r.Context(), storage.QuestionChange{
+		Actor:      auth.GetUsername(r.Context()),
+		OwnerID:    auth.GetUserID(r.Context()),
+		ChangeType: "batch_generate",
+		ChangeNote: "单题 API 批量生成任务",
+	})
+	jobID, count, err := s.batchSvc.GenerateAndSubmit(batchCtx, points, req.Count, jobName)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, batch.ErrUnavailable) {
