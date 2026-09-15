@@ -19,7 +19,7 @@ const canDeleteFormal = computed(() => hasPerm("question:delete_formal"));
 
 // 按题目状态选择删除权限：已通过（正式题库）走 question:delete_formal，其余走 question:delete
 function canDeleteQuestion(q) {
-  // 淘汰终态（驳回锁定/已归档）为留档题，不可删除；审核中/待决断须先撤销或决断
+  // 淘汰终态（驳回锁定/已归档）为留档题，不可删除；审核中/待决断须先完成审核或决断
   if (q.status === "rejected" || q.status === "archived") return false;
   if (q.status === "reviewing" || q.status === "conflict") return false;
   return q.status === "published" ? canDeleteFormal.value : canDelete.value;

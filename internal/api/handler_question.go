@@ -563,10 +563,10 @@ func (s *Server) handleDeleteQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 审核中/待决断的题目不可删除：先撤销送审或完成决断，
+	// 审核中/待决断的题目不可删除：先完成当前审核或做出最终决断，
 	// 避免删除操作打断进行中的审核流程
 	if q.Status == domain.StatusReviewing || q.Status == domain.StatusConflict {
-		writeError(w, http.StatusConflict, "审核中的题目不能删除：请先撤销送审或完成决断")
+		writeError(w, http.StatusConflict, "审核中的题目不能删除：请先完成当前审核或做出最终决断")
 		return
 	}
 

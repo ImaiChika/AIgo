@@ -395,7 +395,7 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 				return nil, fmt.Errorf("%w: 题目已退回修改，但当前仍是送审版本 %d；请先在「待我修改」中提交新版本后再送审", domain.ErrReviewNotSubmittable, existing.QuestionVersion)
 			}
 			if existing.FlowID != flowID {
-				return nil, fmt.Errorf("%w: 题目已按审核流程 %s 退回修改，修改后需沿用原流程重新送审；如需更换流程，请先撤销原审核任务", domain.ErrReviewNotSubmittable, existing.FlowID)
+				return nil, fmt.Errorf("%w: 题目已按审核流程 %s 退回修改，修改后需沿用原流程重新送审", domain.ErrReviewNotSubmittable, existing.FlowID)
 			}
 			roundIdx := existing.CurrentRound - 1
 			if roundIdx < 0 || roundIdx >= len(flow.Rounds) {
@@ -410,7 +410,7 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 			existing.SubmissionBankID = submissionBankID
 			existing.AssignedTo = assigned
 			existing.FinalReviewerIDs = flow.FinalReviewerIDs
-			existing.QuestionPrevStatus = q.Status // 记录重提前状态（撤销时恢复）
+			existing.QuestionPrevStatus = q.Status // 保留本次重新送审前的状态快照
 			existing.QuestionVersion = q.Version
 			if roundIdx >= 0 && roundIdx < len(existing.RoundResults) {
 				existing.RoundResults[roundIdx].Reviews = nil
@@ -447,7 +447,7 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 	}
 
 	// 更新题目状态（版本号保持不变，版本由内容编辑递增，AI 检查结果依赖它判断过期）
-	// 记录提交前状态（撤销时据此恢复题目），再更新题目为审核中
+	// 记录提交前状态快照，再更新题目为审核中
 	prevStatus := q.Status
 	q.Status = domain.StatusReviewing
 	q.UpdatedAt = time.Now()
@@ -455,7 +455,7 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 		return nil, fmt.Errorf("更新题目状态失败: %w", err)
 	}
 
-	// 创建审核任务（记录提交前状态，撤销时据此恢复题目）
+	// 创建审核任务（保留提交前状态快照，兼容历史任务数据）
 	task := domain.ReviewTask{
 		ID:                 fmt.Sprintf("task-%s-%d", questionID, time.Now().UnixNano()),
 		QuestionID:         questionID,
@@ -1787,7 +1787,7 @@ func (s *Service) ensureTaskQuestionVersion(ctx context.Context, task *domain.Re
 		return fmt.Errorf("审核任务 %s 未绑定有效题目版本，不能继续审核", task.ID)
 	}
 	if q.Version != task.QuestionVersion {
-		return fmt.Errorf("%w: 审核任务绑定版本 %d，但题目当前为版本 %d；请撤销或退回后重新提交", domain.ErrQuestionVersionConflict, task.QuestionVersion, q.Version)
+		return fmt.Errorf("%w: 审核任务绑定版本 %d，但题目当前为版本 %d；请由管理员处理当前审核任务后再重新提交", domain.ErrQuestionVersionConflict, task.QuestionVersion, q.Version)
 	}
 	return nil
 }
