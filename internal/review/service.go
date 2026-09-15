@@ -90,6 +90,26 @@ func (s *Service) withReviewMutation(ctx context.Context, fn func(txCtx context.
 	return s.reviewStore.WithReviewTransaction(ctx, s.questionStore, fn)
 }
 
+// WithQuestionMutation 串行化题目内容编辑与送审/审核状态变更。
+// 题目保存本身还会用版本号和行锁做乐观并发校验；这里再复用审核锁，
+// 让“保存 + 审计”与送审不会在同一题上交错执行，避免页面同时操作时出现
+// 题目内容、版本记录和审核任务观察到不同快照。
+func (s *Service) WithQuestionMutation(ctx context.Context, fn func(txCtx context.Context) error) (mutationErr error) {
+	release, err := s.reviewStore.AcquireReviewMutationLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if releaseErr := release(); mutationErr == nil {
+			mutationErr = releaseErr
+		}
+	}()
+	if txStore, ok := s.questionStore.(storage.TransactionStore); ok {
+		return txStore.WithTransaction(ctx, fn)
+	}
+	return fn(ctx)
+}
+
 // ===== 专家管理 =====
 
 // CreateExpert 创建专家。

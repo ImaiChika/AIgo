@@ -328,17 +328,20 @@ func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 		auditMessage = "新题提交审核前微调题目"
 	}
 	editCtx := storage.WithQuestionChange(r.Context(), storage.QuestionChange{Actor: actor, ChangeType: changeType, ChangeNote: strings.TrimSpace(req.ChangeReason)})
-	if err := s.questionStore.SaveQuestion(editCtx, *existing); err != nil {
-		if errors.Is(err, domain.ErrQuestionVersionConflict) {
-			writeError(w, http.StatusConflict, err.Error())
+	saveErr := s.reviewSvc.WithQuestionMutation(editCtx, func(txCtx context.Context) error {
+		if err := s.questionStore.SaveQuestion(txCtx, *existing); err != nil {
+			return err
+		}
+		return s.auditSvc.LogUpdate(txCtx, existing.ID, actor, auditMessage)
+	})
+	if saveErr != nil {
+		if errors.Is(saveErr, domain.ErrQuestionVersionConflict) {
+			writeError(w, http.StatusConflict, saveErr.Error())
 			return
 		}
-		writeError(w, 500, "保存失败: "+err.Error())
+		writeError(w, 500, "保存失败: "+saveErr.Error())
 		return
 	}
-
-	// 记录日志
-	s.auditSvc.LogUpdate(r.Context(), existing.ID, actor, auditMessage)
 
 	// 注意：退回修改不触发 AI 复检（AI 检查仅在题目首次生成时执行一次），
 	// 修改完成后题目保持 ai_reviewed，由管理员重新送审。

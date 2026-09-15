@@ -56,10 +56,30 @@ func TestTeacherSubmitsOwnQuestionsWithoutBankSelection(t *testing.T) {
 	if err := store.SaveQuestion(t.Context(), other); err != nil {
 		t.Fatal(err)
 	}
+	batchQuestion := question
+	batchQuestion.ID = "teacher-submit-batch-own"
+	if err := store.SaveQuestion(t.Context(), batchQuestion); err != nil {
+		t.Fatal(err)
+	}
 
 	flows := serveAuthJSON(t, h, http.MethodGet, "/api/review/available-flows", teacherToken, "198.51.100.2", nil)
 	if flows.Code != http.StatusOK || strings.Contains(flows.Body.String(), teacher.ID) {
 		t.Fatalf("teacher flow summary leaked reviewer details: %d %s", flows.Code, flows.Body)
+	}
+	batch := serveAuthJSON(t, h, http.MethodPost, "/api/review/submit-batch", teacherToken, "198.51.100.2", map[string]any{
+		"question_ids": []string{batchQuestion.ID}, "flow_id": flow.ID,
+	})
+	var batchResult struct {
+		Submitted int `json:"submitted"`
+		Failed    []struct {
+			QuestionID string `json:"question_id"`
+		} `json:"failed"`
+	}
+	if err := json.Unmarshal(batch.Body.Bytes(), &batchResult); err != nil {
+		t.Fatalf("batch submit unedited question response: %d %s (decode: %v)", batch.Code, batch.Body, err)
+	}
+	if batch.Code != http.StatusOK || batchResult.Submitted != 1 || len(batchResult.Failed) != 0 {
+		t.Fatalf("batch submit unedited question: %d %s", batch.Code, batch.Body)
 	}
 	submitted := serveAuthJSON(t, h, http.MethodPost, "/api/review/submit", teacherToken, "198.51.100.2", map[string]any{
 		"question_id": question.ID, "flow_id": flow.ID,

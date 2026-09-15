@@ -23,7 +23,14 @@ const editForm = ref({ clinical_stem: "", options: [], answer: "", explanation: 
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)));
 const allSelected = computed(() => questions.value.length > 0 && questions.value.every((q) => selectedIds.value.has(q.id)));
 const selectedCount = computed(() => selectedIds.value.size);
-const selectedDirty = computed(() => selected.value && JSON.stringify(editPayload(editForm.value)) !== JSON.stringify(editPayload(selected.value)));
+const selectedDirty = computed(() => Boolean(selected.value && JSON.stringify(editPayload(editForm.value)) !== JSON.stringify(editPayload(selected.value))));
+const submitDisabledReason = computed(() => {
+  if (submitting.value) return "正在提交审核，请稍候";
+  if (saving.value) return "正在保存当前题目，请稍候";
+  if (selectedDirty.value) return "当前题目有未保存修改，请先保存或撤销修改";
+  if (!flowId.value) return "请先在右侧选择审核流程";
+  return "";
+});
 
 function showToast(message) {
   toast.value = message;
@@ -80,8 +87,22 @@ function startEdit(question) {
   editForm.value = { ...editPayload(question), change_reason: "" };
 }
 
-function toggleQuestion(question) {
+function selectQuestion(question) {
+  if (saving.value || submitting.value) return;
+  if (selectedDirty.value) {
+    if (selected.value?.id !== question.id) showToast("当前题目有未保存修改，请先保存或撤销后再切换");
+    return;
+  }
   startEdit(question);
+}
+
+function toggleQuestion(question) {
+  if (saving.value || submitting.value) return;
+  if (selectedDirty.value && selected.value?.id !== question.id) {
+    showToast("当前题目有未保存修改，请先保存或撤销后再切换");
+    return;
+  }
+  if (selected.value?.id !== question.id) startEdit(question);
   const next = new Set(selectedIds.value);
   if (next.has(question.id)) next.delete(question.id);
   else next.add(question.id);
@@ -89,7 +110,7 @@ function toggleQuestion(question) {
 }
 
 async function saveDraft() {
-  if (!selected.value || !selectedDirty.value || saving.value) return;
+  if (!selected.value || !selectedDirty.value || saving.value || submitting.value) return;
   saving.value = true;
   try {
     const data = await api.updateQuestion(selected.value.id, {
@@ -108,6 +129,7 @@ async function saveDraft() {
 }
 
 function toggleAll() {
+  if (saving.value || submitting.value) return;
   const next = new Set(selectedIds.value);
   if (allSelected.value) questions.value.forEach((q) => next.delete(q.id));
   else questions.value.forEach((q) => next.add(q.id));
@@ -115,7 +137,11 @@ function toggleAll() {
 }
 
 function goPage(nextPage) {
-  if (loading.value || nextPage < 1 || nextPage > pageCount.value || nextPage === page.value) return;
+  if (loading.value || saving.value || submitting.value || nextPage < 1 || nextPage > pageCount.value || nextPage === page.value) return;
+  if (selectedDirty.value) {
+    showToast("当前题目有未保存修改，请先保存或撤销后再翻页");
+    return;
+  }
   page.value = nextPage;
   selected.value = null;
   selectedIds.value = new Set();
@@ -124,6 +150,11 @@ function goPage(nextPage) {
 }
 
 async function submit(ids) {
+  if (saving.value) {
+    showToast("当前题目正在保存，请保存完成后再提交审核");
+    return;
+  }
+  if (submitting.value) return;
   if (!ids.length) {
     showToast("请先选择至少一道新题");
     return;
@@ -132,13 +163,12 @@ async function submit(ids) {
     showToast("请先选择审核流程");
     return;
   }
-  if (selectedDirty.value && ids.includes(selected.value?.id)) {
-    showToast("当前题目有未保存修改，请先保存微调");
+  if (selectedDirty.value) {
+    showToast("当前题目有未保存修改，请先保存或撤销修改");
     return;
   }
   const flow = flows.value.find((item) => item.id === flowId.value);
   if (!confirm(`确定将 ${ids.length} 道题提交到“${flow?.name || flowId.value}”吗？提交后将进入审核流程，本页不再显示。`)) return;
-  if (submitting.value) return;
   submitting.value = true;
   try {
     const result = await api.submitReviewBatch(ids, flowId.value);
@@ -177,12 +207,24 @@ onMounted(() => {
         <div class="section-heading"><span class="dot blue"></span><h2>新题修改与提交审核</h2><small>{{ total }} 道待提交</small></div>
         <p class="intro-copy">这里集中处理本账号刚生成且 AI 检查通过的新题。提交后由管理员配置的审核流程继续处理。</p>
       </div>
+      <div class="workspace-actions">
+        <span v-if="submitDisabledReason" class="submit-hint">{{ submitDisabledReason }}</span>
+        <button
+          class="primary-button batch-submit-button"
+          type="button"
+          :disabled="submitting || saving || !selectedCount || selectedDirty || !flowId"
+          :title="submitDisabledReason || `提交已选 ${selectedCount} 道题`"
+          @click="submit([...selectedIds])"
+        >
+          {{ submitting ? "提交中..." : `批量提交审核${selectedCount ? `（${selectedCount}）` : ""}` }}
+        </button>
+      </div>
     </div>
 
     <div class="new-question-layout">
       <section class="panel new-question-list-panel">
         <div class="list-toolbar">
-          <label class="select-all"><input type="checkbox" :checked="allSelected" @change="toggleAll" /> 全选本页</label>
+          <label class="select-all"><input type="checkbox" :checked="allSelected" :disabled="saving || submitting" @change="toggleAll" /> 全选本页</label>
           <span class="selected-hint">已选 {{ selectedCount }} 道</span>
         </div>
         <div v-if="loading" class="loading">加载中...</div>
@@ -193,9 +235,9 @@ onMounted(() => {
             :key="question.id"
             class="new-question-card"
             :class="{ active: selected?.id === question.id, checked: selectedIds.has(question.id) }"
-            @click="startEdit(question)"
+            @click="selectQuestion(question)"
           >
-            <input type="checkbox" :checked="selectedIds.has(question.id)" @click.stop @change="toggleQuestion(question)" />
+            <input type="checkbox" :checked="selectedIds.has(question.id)" :disabled="saving || submitting" @click.stop @change="toggleQuestion(question)" />
             <div class="new-question-card-body">
               <strong>{{ question.clinical_stem || "（题干为空）" }}</strong>
               <span>{{ question.profession || "未填写专业" }} · {{ difficultyText(question.difficulty) }} · v{{ question.version }}<b v-if="selected?.id === question.id && selectedDirty" class="unsaved-tag">未保存</b></span>
@@ -215,43 +257,53 @@ onMounted(() => {
         </div>
         <div class="edit-field">
           <label>题干 *</label>
-          <textarea v-model="editForm.clinical_stem" class="edit-textarea"></textarea>
+          <textarea v-model="editForm.clinical_stem" class="edit-textarea" :disabled="saving || submitting"></textarea>
         </div>
         <div class="edit-field">
           <label>选项 *</label>
           <div v-for="(option, index) in editForm.options" :key="index" class="edit-option-row">
             <span class="opt-label">{{ option.label }}</span>
-            <input v-model="option.text" class="edit-input" />
+            <input v-model="option.text" class="edit-input" :disabled="saving || submitting" />
           </div>
         </div>
         <div class="edit-field inline-edit-field">
           <label>正确答案 *</label>
-          <select v-model="editForm.answer" class="edit-select">
+          <select v-model="editForm.answer" class="edit-select" :disabled="saving || submitting">
             <option v-for="option in editForm.options" :key="option.label" :value="option.label">{{ option.label }}</option>
           </select>
         </div>
         <div class="edit-field">
           <label>解析</label>
-          <textarea v-model="editForm.explanation" class="edit-textarea"></textarea>
+          <textarea v-model="editForm.explanation" class="edit-textarea" :disabled="saving || submitting"></textarea>
         </div>
         <div class="edit-field">
           <label>微调说明（可选）</label>
-          <input v-model="editForm.change_reason" class="edit-input" placeholder="简述提交前做了哪些微调" />
+          <input v-model="editForm.change_reason" class="edit-input" placeholder="简述提交前做了哪些微调" :disabled="saving || submitting" />
         </div>
         <div class="edit-actions">
-          <button class="primary-button" type="button" :disabled="saving || !selectedDirty" @click="saveDraft">{{ saving ? "保存中..." : "保存微调" }}</button>
-          <button class="ghost-button" type="button" :disabled="saving || !selectedDirty" @click="startEdit(selected)">撤销未保存修改</button>
+          <div class="edit-actions-main">
+            <button class="primary-button" type="button" :disabled="saving || submitting || !selectedDirty" @click="saveDraft">{{ saving ? "保存中..." : "保存微调" }}</button>
+            <button
+              class="primary-button secondary submit-current-button"
+              type="button"
+              :disabled="submitting || saving || !flowId || selectedDirty"
+              :title="submitDisabledReason || '提交当前题进入审核流程'"
+              @click="submit([selected.id])"
+            >
+              {{ submitting ? "提交中..." : "提交当前题" }}
+            </button>
+          </div>
+          <button class="ghost-button" type="button" :disabled="saving || submitting || !selectedDirty" @click="startEdit(selected)">撤销未保存修改</button>
         </div>
         <h3>提交审核</h3>
         <div class="submit-box">
           <label>审核流程</label>
-          <select v-model="flowId">
+          <select v-model="flowId" :disabled="saving || submitting">
             <option value="">请选择管理员配置的流程</option>
             <option v-for="flow in flows" :key="flow.id" :value="flow.id">{{ flow.name }} · {{ flow.round_count }} 轮</option>
           </select>
           <small v-if="flows.length === 0">暂无可用流程，请联系管理员先配置审核流程。</small>
-          <button class="primary-button" type="button" :disabled="submitting || !flowId" @click="submit([selected.id])">提交当前题</button>
-          <button class="primary-button secondary" type="button" :disabled="submitting || !flowId || !selectedCount" @click="submit([...selectedIds])">提交已选 {{ selectedCount }} 道</button>
+          <small v-else>保存按钮只处理当前题；上方“提交当前题”和右上角批量按钮均使用此审核流程。</small>
         </div>
       </section>
       <section v-else class="panel new-question-detail empty">请选择左侧新题<span class="empty-hint">右侧会显示题目预览与送审操作</span></section>
@@ -274,6 +326,9 @@ onMounted(() => {
 .workspace-intro { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin-bottom: 14px; }
 .workspace-intro .section-heading { margin-bottom: 4px; }
 .intro-copy { margin: 0; color: #6e7b8f; font-size: 13px; line-height: 1.6; }
+.workspace-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-left: auto; }
+.batch-submit-button { min-width: 132px; white-space: nowrap; }
+.submit-hint { max-width: 210px; color: #9a6a24; font-size: 11px; line-height: 1.45; text-align: right; }
 .new-question-layout { display: grid; grid-template-columns: minmax(300px, .85fr) minmax(0, 1.15fr); gap: 14px; align-items: start; }
 .new-question-list-panel { min-height: 560px; }
 .list-toolbar { display: flex; align-items: center; justify-content: space-between; padding-bottom: 12px; border-bottom: 1px solid #edf1f6; color: #52647a; font-size: 12px; }
@@ -306,7 +361,9 @@ onMounted(() => {
 .inline-edit-field { display: flex; align-items: center; gap: 12px; }
 .inline-edit-field label { margin: 0; }
 .inline-edit-field .edit-select { width: 100px; }
-.edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin: 2px 0 18px; }
+.edit-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 2px 0 18px; }
+.edit-actions-main { display: flex; align-items: center; gap: 8px; }
+.submit-current-button { min-width: 104px; }
 .error-overlay { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; background: rgba(15, 23, 42, .45); }
 .error-modal { width: min(500px, calc(100vw - 40px)); padding: 22px; border-radius: 12px; background: #fff; box-shadow: 0 18px 48px rgba(15, 23, 42, .25); }
 .error-modal h3 { margin: 0 0 10px; color: #c54858; font-size: 16px; }
@@ -323,5 +380,6 @@ onMounted(() => {
 .empty { display: grid; place-items: center; align-content: center; gap: 6px; color: #7d8a9b; min-height: 260px; }
 .empty-hint { color: #a3adba; font-size: 12px; }
 .loading { padding: 40px 0; text-align: center; color: #7d8a9b; }
-@media (max-width: 900px) { .new-question-layout { grid-template-columns: 1fr; } .workspace-intro { align-items: flex-start; flex-direction: column; } .new-question-list { max-height: 360px; } }
+@media (max-width: 900px) { .new-question-layout { grid-template-columns: 1fr; } .workspace-intro { align-items: flex-start; flex-direction: column; } .workspace-actions { width: 100%; justify-content: space-between; margin-left: 0; } .submit-hint { max-width: none; text-align: left; } .new-question-list { max-height: 360px; } }
+@media (max-width: 600px) { .edit-actions { align-items: stretch; flex-direction: column; } .edit-actions-main { width: 100%; } .edit-actions-main > button { flex: 1; } .edit-actions > .ghost-button { align-self: flex-end; } }
 </style>

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"aigo/internal/domain"
 	"aigo/internal/storage"
@@ -59,6 +60,46 @@ func testQuestion(bankID string) *domain.A2Question {
 		Status:  domain.StatusAIDraft,
 		Version: 1,
 		BankIDs: []string{bankID},
+	}
+}
+
+func TestWithQuestionMutationSerializesQuestionEdits(t *testing.T) {
+	svc, _, _ := newTestService(map[string][]string{}, map[string]bool{})
+	ctx := context.Background()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	secondEntered := make(chan struct{})
+	firstDone := make(chan error, 1)
+	secondDone := make(chan error, 1)
+
+	go func() {
+		firstDone <- svc.WithQuestionMutation(ctx, func(context.Context) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+
+	go func() {
+		secondDone <- svc.WithQuestionMutation(ctx, func(context.Context) error {
+			close(secondEntered)
+			return nil
+		})
+	}()
+
+	select {
+	case <-secondEntered:
+		t.Fatal("第二个题目变更不应在第一个变更释放审核锁前进入")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("第一个题目变更失败: %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("第二个题目变更失败: %v", err)
 	}
 }
 
