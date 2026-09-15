@@ -234,8 +234,8 @@ onMounted(loadProviders);
     <section class="ai-config-note">
       <strong>使用说明</strong>
       <p>生成模型和检查模型默认填写相同值；如果检查模型留空，后端会自动使用生成模型。保存或切换配置后，新生成和新进入队列的 AI 检查会使用新配置，无需重启服务。</p>
-      <div class="batch-config-summary"><span>批量推理 API</span><strong>同页独立填写，默认跟随生成配置</strong><small>批量页面读取这里保存的批量地址、批量 API Key 和批量模型；当前 Web 批量仅模拟提交、进度和导入，不调用外部 API，也不写入真实题目。</small></div>
-      <p>当前配置仅超级管理员可查看和修改。CLI 的旧批量命令保留原有独立执行器，不受 Web 模拟流程影响。</p>
+      <div class="batch-config-summary"><span>CLI 批量兼容配置</span><strong>Web 端使用本地单题 API 队列</strong><small>批量地址、批量 API Key 和批量模型仅供 CLI 兼容命令使用；Web 批量逐题调用实时生成服务，不使用 Files/Batches。</small></div>
+      <p>当前配置仅超级管理员可查看和修改。Web 批量任务逐题调用单题 API；CLI 的旧批量命令仍保留独立兼容执行器。</p>
     </section>
 
     <div v-if="showForm" class="modal-overlay" @click.self="closeForm">
@@ -253,7 +253,7 @@ onMounted(loadProviders);
           <label class="field"><span>AI 生成模型 <b>*</b></span><input v-model="form.generation_model" placeholder="qwen3.5-flash" /></label>
           <label class="field"><span>AI 检查模型 <b>*</b></span><input v-model="form.check_model" placeholder="默认与生成模型相同" /><button class="inline-link" type="button" @click="useSameModel">使用生成模型</button></label>
           <div class="full-field batch-form-section">
-            <div class="batch-form-title">批量推理 API <small>默认跟随生成配置；Web 端当前仅模拟流程</small></div>
+            <div class="batch-form-title">CLI 批量兼容配置 <small>Web 端使用本地单题 API 队列</small></div>
             <div class="batch-form-grid">
               <label class="field"><span>批量 API 地址</span><input v-model="form.batch_base_url" placeholder="默认与 API 地址相同" /></label>
               <label class="field"><span>批量模型</span><input v-model="form.batch_model" placeholder="默认与生成模型相同" /></label>

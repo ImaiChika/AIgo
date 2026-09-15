@@ -42,7 +42,7 @@ AIgo 项目使用方法
    # QWEN_BASE_URL=http://qwen-vllm.internal:8000/v1
    # QWEN_MODEL=Qwen/Qwen3.5-35B-A3B
    # QWEN_LOCAL_API_KEY=  # 本地网关无鉴权时留空
-   # QWEN_BATCH_BACKEND=local  # 当前为预留值，本地批量队列尚未实现
+   # Web 批量任务使用本地单题 API 队列；QWEN_BATCH_BACKEND 仅供 CLI 兼容命令
 
 4. 启动后端：
 

@@ -26,7 +26,7 @@ const (
 // BatchConfig 描述批量出题执行器。批量端点与实时文本端点分开配置，
 // 从而支持“实时推理先迁本地、批量暂时保留百炼”的渐进迁移。
 type BatchConfig struct {
-	Backend        string // auto / dashscope / local（预留）/ disabled
+	Backend        string // auto / dashscope / local（CLI兼容）/ disabled
 	APIKey         string // DashScope 批量 API Key
 	BaseURL        string // DashScope OpenAI-compatible base URL
 	Model          string // 批量任务使用的云端模型

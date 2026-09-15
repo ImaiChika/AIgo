@@ -884,7 +884,7 @@ Environment:
 	QWEN_API_KEY        云端/自建网关实时推理凭证
 	QWEN_LOCAL_API_KEY  本地实时端点独立凭证；无鉴权时可留空
 	DASHSCOPE_API_KEY   百炼凭证（云端实时、云端批量）
-	QWEN_BATCH_BACKEND  auto（默认）/ dashscope / local（预留）/ disabled
+	QWEN_BATCH_BACKEND  auto（默认）/ dashscope / local（CLI兼容）/ disabled
 		QWEN_BATCH_API_KEY  独立百炼 Batch 凭证（可选）
 		AIGO_HTTP_ADDR       HTTP 监听地址（默认 127.0.0.1:8080）
 		AIGO_WEB_DIST_DIR    Vite 生产构建目录（空=仅提供 API）

@@ -280,9 +280,18 @@ func localBatchJob(record storage.BatchJobRecord) BatchJob {
 	return BatchJob{
 		JobID: record.ID, OwnerID: record.OwnerID, Backend: "local_single_api", Model: record.Model,
 		JobName: record.JobName, Status: record.Status, TotalCount: record.TotalCount,
-		Completed: record.Completed, Failed: record.Failed, CreatedAt: parseBatchCreatedAt(record.CreatedAt),
+		Completed: record.Completed, Failed: record.Failed, CreatedAt: parseLocalBatchCreatedAt(record.CreatedAt),
 		ImportedAt: record.ImportedAt, Tracked: true,
 	}
+}
+
+func parseLocalBatchCreatedAt(value string) int64 {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05.999999999-07:00"} {
+		if parsed, err := time.Parse(layout, strings.TrimSpace(value)); err == nil {
+			return parsed.Unix()
+		}
+	}
+	return 0
 }
 
 var _ Executor = (*LocalExecutor)(nil)

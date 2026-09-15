@@ -2,7 +2,7 @@
 
 面向国家执业医师考试 A2 型试题的 AI 辅助命题系统。
 
-当前产品只处理纯文本 A2 单选题，题目唯一来源是 AI 单题生成。AI 生图、题目图片、多模态素材和图片审核永久不做；批量推理暂缓，现有 Web 模拟流程仅用于保留界面与兼容能力。
+当前产品只处理纯文本 A2 单选题，题目唯一来源是 AI 单题生成。AI 生图、题目图片、多模态素材和图片审核永久不做；Web 批量任务拆成单题 API 调用并持久化进度，CLI 仍保留历史 DashScope 批量兼容命令。
 
 > **当前阶段（2026-09-12）**：项目尚未验收。实时出题与 AI 检查使用用户自有的云端千问 API（百炼）；客户本地部署是最终交付目标，本地模型/GPU 资源尚未具备，OpenAI-compatible 切换接口已预留。本地开发环境与 ECS 服务器保持同一可用版本，代码变更经本地回归与 CI 验证后再同步服务器。
 
@@ -75,7 +75,7 @@ cd web && npm install && npm run dev
 | `QWEN_API_KEY` | 首次启动兼容导入/回退的实时端点凭证 | UI 配置后可留空 |
 | `QWEN_LOCAL_API_KEY` | 兼容导入的本地实时端点凭证；不会回退云 Key | 本地无鉴权时可空 |
 | `QWEN_ENABLE_THINKING` | `true` / `false` / `auto` | `auto` |
-| `QWEN_BATCH_BACKEND` | `auto` / `dashscope` / `local`（预留）/ `disabled`；本地模式下 `auto` 不外发 | `auto` |
+| `QWEN_BATCH_BACKEND` | CLI 兼容命令的 `auto` / `dashscope` / `local` / `disabled`；Web 批量不使用 Files/Batches | `auto` |
 | `QWEN_BATCH_API_KEY` | CLI 批量命令使用的独立百炼 Batch 凭证；空则使用 `DASHSCOPE_API_KEY` | 空 |
 | `QWEN_BATCH_BASE_URL` | 百炼 Batch base URL；cloud 下空则继承实时端点 | 空 |
 | `QWEN_BATCH_MODEL` | 百炼批量模型 | `qwen3.5-flash` |
@@ -104,9 +104,9 @@ QWEN_BATCH_BACKEND=dashscope
 QWEN_BATCH_MODEL=qwen3.5-flash
 ```
 
-`qwen3.5-flash` 是百炼托管模型 ID；本地服务应填写实际开放权重或 `--served-model-name`，不能在业务代码里写死。当前 `local` 批量后端仅预留接口：本地实时推理可用，但本地持久任务队列尚未实现。实时部署地址、密钥和模型可由超级管理员在 Web 的“AI 服务配置”页面维护；本地模型进程、GPU 参数和网络连通性仍由部署运维管理。Batch 配置继续独立保留。
+`qwen3.5-flash` 是百炼托管模型 ID；本地服务应填写实际开放权重或 `--served-model-name`，不能在业务代码里写死。Web 批量任务已使用本地单题 API 队列，实时部署地址、密钥和模型可由超级管理员在 Web 的“AI 服务配置”页面维护；本地模型进程、GPU 参数和网络连通性仍由部署运维管理。Batch 配置仅供 CLI 兼容命令保留。
 
-Web 管理端的批量推理页面当前使用本地模拟执行器，只验证任务提交、进度轮询和导入幂等流程，不调用外部 API，也不写入真实题目；上述 `QWEN_BATCH_*` 变量仅保留给 CLI 批量命令兼容使用。
+Web 管理端的批量推理页面使用本地单题 API 队列：每道题独立调用实时生成服务，任务进度、失败明细和结果快照持久化，导入后进入正常 AI 检查流程；上述 `QWEN_BATCH_*` 变量仅保留给 CLI 批量命令兼容使用。
 
 ## CLI 命令
 
@@ -128,7 +128,7 @@ go run ./cmd/aigo doctor             # 检查系统状态
 | **AI 检查** | 题目首次生成后自动异步触发，LLM 检查科学性、答案、解析与 A2 格式；命题元数据只作提示词反馈；送审强制前置；检查结果、题目状态/淘汰与任务完成在同一 PostgreSQL 事务落库 |
 | **知识点管理** | 年度大纲版本，Excel/CSV/Word 多文件导入，目录树、搜索及单条增删改 |
 | **题目管理** | AI 生成题查询、筛选、退修编辑、版本记录和状态管理；无手动新建 |
-| **批量推理** | 当前暂缓；Web 端仅模拟提交、进度和导入，不调用外部 API、不写入题目 |
+| **批量推理** | Web 端使用本地单题 API 队列，任务可轮询、持久化和幂等导入；CLI 保留 DashScope 兼容路径 |
 | **多轮审核** | 可配置流程、多轮审核、通过/驳回/退回修改；待审/决断任务固定分页；终态题按轮次并列展示全部专家意见和最终决断 |
 | **题目通过** | 最终把关通过 → `published` 唯一成功终态 |
 | **导出** | Excel (.xlsx)、Word (.docx) 导出；仅包含 `published/已通过` 题目，不输出命题人列 |
