@@ -224,3 +224,34 @@ func TestBuiltinAuthoringPermissionsAreSeparated(t *testing.T) {
 		t.Fatalf("审题老师角色不应通过模板获得批量权限: %v", expertAfter.Permissions)
 	}
 }
+
+func TestCustomAuthoringRoleAutomaticallyGetsBatchPermission(t *testing.T) {
+	service, cleanup := loginLimitTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	if err := service.InitBuiltinRoles(ctx); err != nil {
+		t.Fatal(err)
+	}
+	role := domain.Role{ID: "custom-authoring", Name: "临时命题角色", Permissions: []string{domain.PermQuestionGenerate}}
+	if err := service.SaveRole(ctx, role); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := service.GetRole(ctx, role.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(stored.Permissions, domain.PermBatchRun) {
+		t.Fatalf("包含单题出题权限的命题角色应自动拥有批量推理: %v", stored.Permissions)
+	}
+	adminRole := domain.Role{ID: "custom-admin-like", Name: "管理员型角色", Permissions: []string{domain.PermQuestionGenerate, domain.PermUserManage}}
+	if err := service.SaveRole(ctx, adminRole); err != nil {
+		t.Fatal(err)
+	}
+	adminStored, err := service.GetRole(ctx, adminRole.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(adminStored.Permissions, domain.PermBatchRun) {
+		t.Fatalf("管理员型角色不应因单题出题自动获得批量推理: %v", adminStored.Permissions)
+	}
+}

@@ -1122,6 +1122,7 @@ func (s *Service) SaveRole(ctx context.Context, r domain.Role) error {
 	if r.Name == "" {
 		return fmt.Errorf("角色名称不能为空")
 	}
+	r.Permissions = normalizeAuthoringRolePermissions(r.Permissions)
 	for _, p := range r.Permissions {
 		if !domain.IsValidPermission(p) {
 			return fmt.Errorf("无效的权限点: %s", p)
@@ -1143,6 +1144,18 @@ func (s *Service) SaveRole(ctx context.Context, r domain.Role) error {
 			permissions=EXCLUDED.permissions, updated_at=EXCLUDED.updated_at
 	`, r.ID, r.Name, r.Description, pqArray(r.Permissions), r.IsBuiltin, r.CreatedAt, r.UpdatedAt)
 	return err
+}
+
+// normalizeAuthoringRolePermissions 命题型角色模板默认同时具备单题与批量出题能力。
+// 管理员角色仍保持批量权限独立授权；审题角色没有 question:generate，不会被补权。
+func normalizeAuthoringRolePermissions(permissions []string) []string {
+	result := append([]string(nil), permissions...)
+	hasGenerate := containsPermission(result, domain.PermQuestionGenerate)
+	isManager := containsPermission(result, domain.PermUserManage) || containsPermission(result, domain.PermRoleManage)
+	if hasGenerate && !isManager && !containsPermission(result, domain.PermBatchRun) {
+		result = append(result, domain.PermBatchRun)
+	}
+	return result
 }
 
 // DeleteRoleAs 删除非系统保护角色模板。
