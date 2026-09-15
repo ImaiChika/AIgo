@@ -79,6 +79,79 @@ func TestTeacherSubmitsOwnQuestionsWithoutBankSelection(t *testing.T) {
 	}
 }
 
+func TestTeacherCanEditCheckedQuestionBeforeFirstSubmissionWithoutRecheck(t *testing.T) {
+	s, store, cleanup := authHandlerTestServer(t)
+	defer cleanup()
+	s.reviewSvc = review.NewService(store, store, store, s.authSvc)
+	h := s.Handler()
+	adminToken := loginForAuthTest(t, h, "admin", "admin-password", "198.51.100.10")
+	created := serveAuthJSON(t, h, http.MethodPost, "/api/users", adminToken, "198.51.100.10", map[string]any{
+		"username": "pre-review-editor", "password": "pre-review-editor-password", "display_name": "提交前编辑老师", "role": domain.RoleTeacher,
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create pre-review editor: %d %s", created.Code, created.Body)
+	}
+	var teacher struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &teacher); err != nil || teacher.ID == "" {
+		t.Fatalf("parse pre-review editor: %v %s", err, created.Body)
+	}
+	teacherToken := loginForAuthTest(t, h, "pre-review-editor", "pre-review-editor-password", "198.51.100.11")
+	now := time.Now()
+	question := domain.A2Question{
+		ID: "pre-review-edit-question", OwnerID: teacher.ID, CreatedBy: "pre-review-editor",
+		ClinicalStem: "男，45岁。反复胸痛1天。该患者最可能的诊断是",
+		Options:      []domain.Option{{Label: "A", Text: "甲"}, {Label: "B", Text: "乙"}, {Label: "C", Text: "丙"}, {Label: "D", Text: "丁"}},
+		Answer:       "A", Explanation: "原解析", Status: domain.StatusAIReviewed, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.SaveQuestion(t.Context(), question); err != nil {
+		t.Fatal(err)
+	}
+	updated := serveAuthJSON(t, h, http.MethodPut, "/api/questions/"+question.ID, teacherToken, "198.51.100.11", map[string]any{
+		"clinical_stem": "男，45岁。反复胸痛1天，活动后加重。该患者最可能的诊断是",
+		"options":       []map[string]string{{"label": "A", "text": "甲"}, {"label": "B", "text": "乙"}, {"label": "C", "text": "丙"}, {"label": "D", "text": "丁"}},
+		"answer":        "A", "explanation": "修改后的解析", "change_reason": "补充活动后加重信息",
+	})
+	if updated.Code != http.StatusOK {
+		t.Fatalf("pre-review edit failed: %d %s", updated.Code, updated.Body)
+	}
+	var edited domain.A2Question
+	if err := json.Unmarshal(updated.Body.Bytes(), &edited); err != nil || edited.Version != 2 {
+		t.Fatalf("pre-review edit did not create v2: err=%v question=%+v", err, edited)
+	}
+	versions, err := store.ListQuestionVersions(t.Context(), question.ID)
+	preReviewVersion := false
+	for _, version := range versions {
+		if version.Version == 2 && version.ChangeType == "pre_review_edit" {
+			preReviewVersion = true
+		}
+	}
+	if err != nil || len(versions) != 2 || !preReviewVersion {
+		t.Fatalf("pre-review version audit missing: err=%v versions=%+v", err, versions)
+	}
+
+	flow := domain.ReviewFlowConfig{
+		ID: "pre-review-flow", Name: "提交前编辑后审核", CreatedAt: now,
+		Rounds: []domain.RoundConfig{{RoundNumber: 1, Name: "审题", ExpertIDs: []string{teacher.ID}, RequiredCount: 1}},
+	}
+	if err := store.SaveFlowConfig(t.Context(), flow); err != nil {
+		t.Fatal(err)
+	}
+	submitted := serveAuthJSON(t, h, http.MethodPost, "/api/review/submit", teacherToken, "198.51.100.11", map[string]any{"question_id": question.ID, "flow_id": flow.ID})
+	if submitted.Code != http.StatusOK {
+		t.Fatalf("submit edited question: %d %s", submitted.Code, submitted.Body)
+	}
+	var task domain.ReviewTask
+	if err := json.Unmarshal(submitted.Body.Bytes(), &task); err != nil || task.QuestionVersion != 2 {
+		t.Fatalf("review task did not bind edited version: err=%v task=%+v", err, task)
+	}
+	blocked := serveAuthJSON(t, h, http.MethodPut, "/api/questions/"+question.ID, teacherToken, "198.51.100.11", map[string]any{"clinical_stem": "不应在审核中修改"})
+	if blocked.Code != http.StatusConflict {
+		t.Fatalf("reviewing question remained editable: %d %s", blocked.Code, blocked.Body)
+	}
+}
+
 func TestFiveRoundPersonalReviewAndBulkShare(t *testing.T) {
 	s, store, cleanup := authHandlerTestServer(t)
 	defer cleanup()

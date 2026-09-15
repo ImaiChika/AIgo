@@ -14,12 +14,16 @@ const total = ref(0);
 const pageSize = 20;
 const loading = ref(false);
 const submitting = ref(false);
+const saving = ref(false);
 const toast = ref("");
+const errorDialog = ref("");
 const detailQuestion = ref(null);
+const editForm = ref({ clinical_stem: "", options: [], answer: "", explanation: "", change_reason: "" });
 
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)));
 const allSelected = computed(() => questions.value.length > 0 && questions.value.every((q) => selectedIds.value.has(q.id)));
 const selectedCount = computed(() => selectedIds.value.size);
+const selectedDirty = computed(() => selected.value && JSON.stringify(editPayload(editForm.value)) !== JSON.stringify(editPayload(selected.value)));
 
 function showToast(message) {
   toast.value = message;
@@ -38,8 +42,8 @@ async function loadQuestions() {
     }
     questions.value = data.questions || [];
     selectedIds.value = new Set([...selectedIds.value].filter((id) => questions.value.some((q) => q.id === id)));
-    if (selected.value && !questions.value.some((q) => q.id === selected.value.id)) selected.value = questions.value[0] || null;
-    if (!selected.value) selected.value = questions.value[0] || null;
+    if (selected.value && !questions.value.some((q) => q.id === selected.value.id)) startEdit(questions.value[0] || null);
+    if (!selected.value) startEdit(questions.value[0] || null);
   } catch (error) {
     showToast("加载新题失败：" + error.message);
   } finally {
@@ -57,12 +61,50 @@ async function loadFlows() {
   }
 }
 
-function toggleQuestion(question) {
+function editPayload(question) {
+  if (!question) return null;
+  return {
+    clinical_stem: question.clinical_stem || "",
+    options: (question.options || []).map((option) => ({ label: option.label, text: option.text })),
+    answer: question.answer || "",
+    explanation: question.explanation || "",
+  };
+}
+
+function startEdit(question) {
+  if (!question) {
+    selected.value = null;
+    return;
+  }
   selected.value = question;
+  editForm.value = { ...editPayload(question), change_reason: "" };
+}
+
+function toggleQuestion(question) {
+  startEdit(question);
   const next = new Set(selectedIds.value);
   if (next.has(question.id)) next.delete(question.id);
   else next.add(question.id);
   selectedIds.value = next;
+}
+
+async function saveDraft() {
+  if (!selected.value || !selectedDirty.value || saving.value) return;
+  saving.value = true;
+  try {
+    const data = await api.updateQuestion(selected.value.id, {
+      ...editPayload(editForm.value),
+      change_reason: editForm.value.change_reason || "提交审核前微调",
+    });
+    const index = questions.value.findIndex((question) => question.id === data.id);
+    if (index >= 0) questions.value[index] = data;
+    startEdit(data);
+    showToast(`已保存为 v${data.version}，不会触发 AI 复检`);
+  } catch (error) {
+    errorDialog.value = error.message || "保存微调失败，请稍后重试";
+  } finally {
+    saving.value = false;
+  }
 }
 
 function toggleAll() {
@@ -90,6 +132,10 @@ async function submit(ids) {
     showToast("请先选择审核流程");
     return;
   }
+  if (selectedDirty.value && ids.includes(selected.value?.id)) {
+    showToast("当前题目有未保存修改，请先保存微调");
+    return;
+  }
   const flow = flows.value.find((item) => item.id === flowId.value);
   if (!confirm(`确定将 ${ids.length} 道题提交到“${flow?.name || flowId.value}”吗？提交后将进入审核流程，本页不再显示。`)) return;
   if (submitting.value) return;
@@ -99,7 +145,7 @@ async function submit(ids) {
     const failedIDs = new Set((result.failed || []).map((item) => item.question_id));
     const submittedIDs = new Set(ids.filter((id) => !failedIDs.has(id)));
     selectedIds.value = new Set([...selectedIds.value].filter((id) => !submittedIDs.has(id)));
-    if (selected.value && submittedIDs.has(selected.value.id)) selected.value = null;
+    if (selected.value && submittedIDs.has(selected.value.id)) startEdit(null);
     if (result.failed?.length) {
       showToast(`已提交 ${result.submitted} 道，${result.failed.length} 道未提交，请查看列表状态后重试`);
     } else {
@@ -148,12 +194,12 @@ onMounted(() => {
             :key="question.id"
             class="new-question-card"
             :class="{ active: selected?.id === question.id, checked: selectedIds.has(question.id) }"
-            @click="selected = question"
+            @click="startEdit(question)"
           >
             <input type="checkbox" :checked="selectedIds.has(question.id)" @click.stop @change="toggleQuestion(question)" />
             <div class="new-question-card-body">
               <strong>{{ question.clinical_stem || "（题干为空）" }}</strong>
-              <span>{{ question.profession || "未填写专业" }} · {{ difficultyText(question.difficulty) }} · v{{ question.version }}</span>
+              <span>{{ question.profession || "未填写专业" }} · {{ difficultyText(question.difficulty) }} · v{{ question.version }}<b v-if="selected?.id === question.id && selectedDirty" class="unsaved-tag">未保存</b></span>
             </div>
           </article>
         </div>
@@ -161,13 +207,41 @@ onMounted(() => {
       </section>
 
       <section class="panel new-question-detail" v-if="selected">
-        <div class="section-heading"><span class="dot blue"></span><h2>题目预览</h2><button class="ghost-button" type="button" @click="detailQuestion = selected">查看属性</button></div>
-        <div class="readonly-note">AI 生成结果在这里保持只读；审核退回后的修改请在「待我修改」中完成。</div>
-        <h3>题干</h3>
-        <p class="stem">{{ selected.clinical_stem }}</p>
-        <h3>选项</h3>
-        <div v-for="option in selected.options || []" :key="option.label" class="option-row" :class="{ correct: option.label === selected.answer }">
-          <b>{{ option.label }}</b><span>{{ option.text }}</span><em v-if="option.label === selected.answer">正确答案</em>
+        <div class="section-heading"><span class="dot blue"></span><h2>新题微调</h2><button class="ghost-button" type="button" @click="detailQuestion = selected">查看属性</button></div>
+        <div class="edit-note"><strong>AI 检查已通过</strong><span>这里允许出题老师提交前微调；保存会生成新版本，但不会再次触发 AI 检查。</span></div>
+        <div class="version-strip" :class="{ dirty: selectedDirty }" role="status">
+          <span>当前版本 <strong>v{{ selected.version }}</strong></span>
+          <span v-if="selectedDirty" class="version-arrow">→ 待保存的新版本</span>
+          <em v-if="selectedDirty">保存后直接沿用人工审核流程</em>
+        </div>
+        <div class="edit-field">
+          <label>题干 *</label>
+          <textarea v-model="editForm.clinical_stem" class="edit-textarea"></textarea>
+        </div>
+        <div class="edit-field">
+          <label>选项 *</label>
+          <div v-for="(option, index) in editForm.options" :key="index" class="edit-option-row">
+            <span class="opt-label">{{ option.label }}</span>
+            <input v-model="option.text" class="edit-input" />
+          </div>
+        </div>
+        <div class="edit-field inline-edit-field">
+          <label>正确答案 *</label>
+          <select v-model="editForm.answer" class="edit-select">
+            <option v-for="option in editForm.options" :key="option.label" :value="option.label">{{ option.label }}</option>
+          </select>
+        </div>
+        <div class="edit-field">
+          <label>解析</label>
+          <textarea v-model="editForm.explanation" class="edit-textarea"></textarea>
+        </div>
+        <div class="edit-field">
+          <label>微调说明（可选）</label>
+          <input v-model="editForm.change_reason" class="edit-input" placeholder="简述提交前做了哪些微调" />
+        </div>
+        <div class="edit-actions">
+          <button class="primary-button" type="button" :disabled="saving || !selectedDirty" @click="saveDraft">{{ saving ? "保存中..." : "保存微调" }}</button>
+          <button class="ghost-button" type="button" :disabled="saving || !selectedDirty" @click="startEdit(selected)">撤销未保存修改</button>
         </div>
         <h3>提交审核</h3>
         <div class="submit-box">
@@ -186,6 +260,13 @@ onMounted(() => {
   </section>
 
   <QuestionDetailModal v-if="detailQuestion" :question="detailQuestion" @close="detailQuestion = null" />
+  <div v-if="errorDialog" class="error-overlay" role="alertdialog" aria-modal="true" aria-labelledby="new-question-error-title">
+    <div class="error-modal">
+      <h3 id="new-question-error-title">保存失败</h3>
+      <p>{{ errorDialog }}</p>
+      <button class="primary-button" type="button" @click="errorDialog = ''">知道了，继续修改</button>
+    </div>
+  </div>
   <div class="toast" :class="{ show: toast }" role="status" aria-live="polite">{{ toast }}</div>
 </template>
 
@@ -206,10 +287,31 @@ onMounted(() => {
 .new-question-card-body { min-width: 0; display: grid; gap: 7px; }
 .new-question-card-body strong { color: #172033; font-size: 13px; line-height: 1.55; font-weight: 600; }
 .new-question-card-body span { color: #8a97a8; font-size: 11px; }
+.unsaved-tag { margin-left: 6px; color: #b56f1f; font-weight: 700; }
 .new-question-detail { min-height: 560px; }
 .new-question-detail h3 { margin: 20px 0 8px; color: #52647a; font-size: 12px; }
 .stem { margin: 0; color: #1e2a3d; line-height: 1.8; font-size: 14px; white-space: pre-wrap; }
-.readonly-note { padding: 9px 12px; border-radius: 6px; background: #fff8e9; color: #9a6a24; font-size: 12px; line-height: 1.6; }
+.edit-note { display: grid; gap: 3px; padding: 10px 12px; border-radius: 7px; background: #eef8f4; border: 1px solid #c6e7dc; color: #49665b; font-size: 12px; line-height: 1.6; }
+.edit-note strong { color: #087c55; }
+.version-strip { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 12px 0; padding: 8px 10px; border: 1px solid #e5ebf3; border-radius: 7px; background: #f7f9fc; color: #64758a; font-size: 12px; }
+.version-strip strong { color: #172033; }
+.version-strip.dirty { border-color: #f3d9b0; background: #fff8ec; }
+.version-strip em { color: #b56f1f; font-style: normal; }
+.edit-field { margin: 0 0 12px; }
+.edit-field label { display: block; margin-bottom: 5px; color: #52647a; font-size: 12px; font-weight: 650; }
+.edit-textarea { width: 100%; min-height: 92px; box-sizing: border-box; border: 1px solid #dce8f7; border-radius: 7px; padding: 9px 10px; color: #1e2a3d; font: inherit; font-size: 13px; line-height: 1.65; resize: vertical; }
+.edit-input, .edit-select { width: 100%; height: 36px; box-sizing: border-box; border: 1px solid #dce8f7; border-radius: 7px; padding: 0 10px; color: #1e2a3d; font: inherit; font-size: 13px; background: #fff; }
+.edit-option-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.edit-option-row .edit-input { flex: 1; }
+.opt-label { display: grid; width: 25px; height: 25px; place-items: center; flex: 0 0 25px; border-radius: 50%; background: #eaf5ff; color: #1385f8; font-size: 12px; font-weight: 700; }
+.inline-edit-field { display: flex; align-items: center; gap: 12px; }
+.inline-edit-field label { margin: 0; }
+.inline-edit-field .edit-select { width: 100px; }
+.edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin: 2px 0 18px; }
+.error-overlay { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; background: rgba(15, 23, 42, .45); }
+.error-modal { width: min(500px, calc(100vw - 40px)); padding: 22px; border-radius: 12px; background: #fff; box-shadow: 0 18px 48px rgba(15, 23, 42, .25); }
+.error-modal h3 { margin: 0 0 10px; color: #c54858; font-size: 16px; }
+.error-modal p { margin: 0 0 16px; color: #53647a; line-height: 1.6; white-space: pre-wrap; }
 .option-row { display: flex; align-items: flex-start; gap: 10px; padding: 9px 10px; border: 1px solid #edf1f6; border-radius: 6px; margin: 6px 0; color: #3a4658; font-size: 13px; line-height: 1.5; }
 .option-row b { color: #1385f8; }
 .option-row em { margin-left: auto; color: #087c55; font-size: 11px; font-style: normal; white-space: nowrap; }

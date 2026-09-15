@@ -124,6 +124,7 @@ type QuestionFilter struct {
 	BankID              string   // 指定题库（多对多成员之一）
 	Unclassified        bool     // 仅未归入任何分类子题库的题目
 	ClassifiableOnly    bool     // 仅尚未进入审核、允许调整分类子题库的待审核题目
+	NoReviewTask        bool     // 仅尚未创建人工审核任务的题目（新题送审前编辑窗口）
 	BankScope           []string // 权限可见题库范围
 	ScopeRestricted     bool     // true 时仅返回 BankScope 内题库的题目
 }

@@ -13,7 +13,7 @@ import (
 )
 
 // ensureQuestionEditable 的编辑窗口规则：
-// 仅"专家审核退回修改（需修改）"的题目（ai_reviewed + 任务 revision_required）可以编辑，
+// AI 检查通过且尚未送审的新题、以及审核退回修改的题目可以编辑，
 // 且仅限出题人本人（历史题无生成者快照时回退到个人题库归属）。
 func TestEnsureQuestionEditable(t *testing.T) {
 	questionStore := testutil.NewMemoryStore()
@@ -72,11 +72,14 @@ func TestEnsureQuestionEditable(t *testing.T) {
 		t.Fatalf("非归属人不应可编辑无快照题目: %v", err)
 	}
 
-	// 普通已检查（无任务）→ 不可编辑
+	// 普通已检查且尚未创建审核任务 → 出题人可在新题页微调
 	plain := mkQuestion("q-plain", domain.StatusAIReviewed)
 	save(plain)
-	if err := server.ensureQuestionEditable(request, plain); err == nil {
-		t.Fatal("未退回修改的已检查题目不应可编辑")
+	if err := server.ensureQuestionEditable(request, plain); err != nil {
+		t.Fatalf("尚未送审的已检查题目应可编辑: %v", err)
+	}
+	if err := server.ensureQuestionEditable(otherRequest, plain); !errors.Is(err, ErrNotQuestionCreator) {
+		t.Fatalf("非出题人不应可编辑尚未送审题目: %v", err)
 	}
 
 	// 其余状态一律不可编辑

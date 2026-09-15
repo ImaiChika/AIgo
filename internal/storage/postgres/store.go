@@ -896,6 +896,9 @@ func questionFilterWhere(f storage.QuestionFilter) (string, []any) {
 	if f.ClassifiableOnly {
 		clauses = append(clauses, "q.status IN ('ai_draft','auto_checked','ai_reviewed','revision_required')")
 	}
+	if f.NoReviewTask {
+		clauses = append(clauses, "NOT EXISTS (SELECT 1 FROM review_tasks nrt WHERE nrt.question_id = q.id)")
+	}
 	if f.ScopeRestricted {
 		if len(f.BankScope) == 0 {
 			clauses = append(clauses, "FALSE")

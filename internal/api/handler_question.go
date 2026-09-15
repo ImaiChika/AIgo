@@ -249,7 +249,7 @@ func (s *Server) handleGetQuestion(w http.ResponseWriter, r *http.Request) {
 
 // handleUpdateQuestion 修改题目内容（题干、选项、答案、解析）。
 // 只更新请求中提供的字段，版本号自动递增。校验题库范围（question:edit）。
-// 编辑窗口：仅限专家审核退回修改（需修改）的题目；题目唯一来源是 AI 生成。
+// 编辑窗口：AI 检查通过且尚未送审的新题，或审核流程退回的题目；题目唯一来源是 AI 生成。
 func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	existing, status, err := s.loadScopedQuestion(r, id, domain.PermQuestionEdit)
@@ -321,7 +321,13 @@ func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 	if actor == "" {
 		actor = auth.GetUserID(r.Context())
 	}
-	editCtx := storage.WithQuestionChange(r.Context(), storage.QuestionChange{Actor: actor, ChangeType: "revision_edit", ChangeNote: strings.TrimSpace(req.ChangeReason)})
+	changeType := "revision_edit"
+	auditMessage := "按审核退回意见修改题目"
+	if task, taskErr := s.reviewSvc.GetTaskByQuestionID(r.Context(), existing.ID); taskErr == nil && task == nil {
+		changeType = "pre_review_edit"
+		auditMessage = "新题提交审核前微调题目"
+	}
+	editCtx := storage.WithQuestionChange(r.Context(), storage.QuestionChange{Actor: actor, ChangeType: changeType, ChangeNote: strings.TrimSpace(req.ChangeReason)})
 	if err := s.questionStore.SaveQuestion(editCtx, *existing); err != nil {
 		if errors.Is(err, domain.ErrQuestionVersionConflict) {
 			writeError(w, http.StatusConflict, err.Error())
@@ -332,7 +338,7 @@ func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 记录日志
-	s.auditSvc.LogUpdate(r.Context(), existing.ID, actor, "按审核退回意见修改题目")
+	s.auditSvc.LogUpdate(r.Context(), existing.ID, actor, auditMessage)
 
 	// 注意：退回修改不触发 AI 复检（AI 检查仅在题目首次生成时执行一次），
 	// 修改完成后题目保持 ai_reviewed，由管理员重新送审。
@@ -345,8 +351,8 @@ func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 var ErrNotQuestionCreator = errors.New("仅出题人本人可以修改退回的题目")
 
 // ensureQuestionEditable 校验题目是否处于可编辑窗口：
-// 仅限专家审核退回修改（需修改）的题目——题目 ai_reviewed 且审核任务标记为 revision_required；
-// 且只允许出题人本人编辑（与「待我修改」页的数据范围一致，防止他人代改出题人责任内容）。
+// 1) AI 检查通过、尚未创建审核任务的新题；2) 审核退回修改的题目。
+// 两种窗口都只允许出题人本人编辑，保存只生成新版本，不触发 AI 复检。
 func (s *Server) ensureQuestionEditable(r *http.Request, q *domain.A2Question) error {
 	if q.Status != domain.StatusAIReviewed {
 		switch q.Status {
@@ -364,9 +370,6 @@ func (s *Server) ensureQuestionEditable(r *http.Request, q *domain.A2Question) e
 	if err != nil {
 		return errors.New("查询审核任务失败，暂不能修改")
 	}
-	if task == nil || task.Status != domain.StatusRevisionRequired {
-		return errors.New("仅专家审核退回修改（需修改）的题目可以编辑")
-	}
 	// 出题人校验：优先比对生成时的用户名快照，历史题无快照时回退到个人题库归属。
 	caller := auth.GetUsername(r.Context())
 	if caller == "" {
@@ -377,7 +380,13 @@ func (s *Server) ensureQuestionEditable(r *http.Request, q *domain.A2Question) e
 		isCreator = caller == q.OwnerID
 	}
 	if !isCreator {
-		return fmt.Errorf("%w（当前题目由 %s 生成，可在其「待我修改」页操作；管理员可用流程「撤销提交」退回该题）", ErrNotQuestionCreator, q.CreatedBy)
+		return fmt.Errorf("%w（当前题目由 %s 生成）", ErrNotQuestionCreator, q.CreatedBy)
+	}
+	if task == nil {
+		return nil
+	}
+	if task.Status != domain.StatusRevisionRequired {
+		return errors.New("题目已经进入审核流程，不能在新题页面编辑")
 	}
 	return nil
 }
@@ -695,9 +704,10 @@ func (s *Server) handleSearchQuestions(w http.ResponseWriter, r *http.Request) {
 // 用于“新题修改与提交审核”工作区避免误提交他人题目。
 func (s *Server) handleMyNewQuestions(w http.ResponseWriter, r *http.Request) {
 	filter := storage.QuestionFilter{
-		OwnerID: auth.GetUserID(r.Context()),
-		Status:  string(domain.StatusAIReviewed),
-		Tiers:   []string{string(domain.TierWorking)},
+		OwnerID:      auth.GetUserID(r.Context()),
+		Status:       string(domain.StatusAIReviewed),
+		Tiers:        []string{string(domain.TierWorking)},
+		NoReviewTask: true,
 	}
 	s.respondPagedQuestions(w, r, filter)
 }
