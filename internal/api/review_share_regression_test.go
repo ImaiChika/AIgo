@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,71 @@ import (
 	"aigo/internal/review"
 	"aigo/internal/storage"
 )
+
+func TestTeacherSubmitsOwnQuestionsWithoutBankSelection(t *testing.T) {
+	s, store, cleanup := authHandlerTestServer(t)
+	defer cleanup()
+	s.reviewSvc = review.NewService(store, store, store, s.authSvc)
+	h := s.Handler()
+	adminToken := loginForAuthTest(t, h, "admin", "admin-password", "198.51.100.1")
+	created := serveAuthJSON(t, h, http.MethodPost, "/api/users", adminToken, "198.51.100.1", map[string]any{
+		"username": "submission-teacher", "password": "submission-teacher-password", "display_name": "命题老师", "role": domain.RoleTeacher,
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create teacher: %d %s", created.Code, created.Body)
+	}
+	var teacher struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &teacher); err != nil || teacher.ID == "" {
+		t.Fatalf("parse teacher: %v %s", err, created.Body)
+	}
+	teacherToken := loginForAuthTest(t, h, "submission-teacher", "submission-teacher-password", "198.51.100.2")
+	now := time.Now()
+	flow := domain.ReviewFlowConfig{
+		ID: "teacher-submit-flow", Name: "命题教师流程", CreatedAt: now,
+		Rounds: []domain.RoundConfig{{RoundNumber: 1, Name: "审题老师审核", ExpertIDs: []string{teacher.ID}, RequiredCount: 1}},
+	}
+	if err := store.SaveFlowConfig(t.Context(), flow); err != nil {
+		t.Fatal(err)
+	}
+	question := domain.A2Question{
+		ID: "teacher-submit-own", OwnerID: teacher.ID, CreatedBy: "submission-teacher",
+		ClinicalStem: "男，50岁。突发胸痛2小时。该患者最可能的诊断是",
+		Options:      []domain.Option{{Label: "A", Text: "甲"}, {Label: "B", Text: "乙"}, {Label: "C", Text: "丙"}, {Label: "D", Text: "丁"}},
+		Answer:       "A", Status: domain.StatusAIReviewed, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.SaveQuestion(t.Context(), question); err != nil {
+		t.Fatal(err)
+	}
+	other := question
+	other.ID = "teacher-submit-other"
+	other.OwnerID = "admin-user"
+	if err := store.SaveQuestion(t.Context(), other); err != nil {
+		t.Fatal(err)
+	}
+
+	flows := serveAuthJSON(t, h, http.MethodGet, "/api/review/available-flows", teacherToken, "198.51.100.2", nil)
+	if flows.Code != http.StatusOK || strings.Contains(flows.Body.String(), teacher.ID) {
+		t.Fatalf("teacher flow summary leaked reviewer details: %d %s", flows.Code, flows.Body)
+	}
+	submitted := serveAuthJSON(t, h, http.MethodPost, "/api/review/submit", teacherToken, "198.51.100.2", map[string]any{
+		"question_id": question.ID, "flow_id": flow.ID,
+	})
+	if submitted.Code != http.StatusOK {
+		t.Fatalf("teacher submit own question: %d %s", submitted.Code, submitted.Body)
+	}
+	var task domain.ReviewTask
+	if err := json.Unmarshal(submitted.Body.Bytes(), &task); err != nil || task.SubmissionBankID != "" {
+		t.Fatalf("teacher submission should keep empty bank snapshot: err=%v task=%+v", err, task)
+	}
+	forbidden := serveAuthJSON(t, h, http.MethodPost, "/api/review/submit", teacherToken, "198.51.100.2", map[string]any{
+		"question_id": other.ID, "flow_id": flow.ID,
+	})
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("teacher submitted another user's question: %d %s", forbidden.Code, forbidden.Body)
+	}
+}
 
 func TestFiveRoundPersonalReviewAndBulkShare(t *testing.T) {
 	s, store, cleanup := authHandlerTestServer(t)

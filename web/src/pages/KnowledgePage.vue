@@ -20,7 +20,7 @@ const deleteTarget = ref(null), detail = ref(null);
 let requestId = 0, treeRequestId = 0, noticeTimer;
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)));
 const selectedPath = computed(() => selectedNode.value?.path || []);
-const contextName = computed(() => selectedNode.value?.label || "全部知识点");
+const contextName = computed(() => selectedNode.value?.label || "全部大纲要点");
 const filteredTree = computed(() => {
   const q = treeQuery.value.trim().toLowerCase();
   if (!q) return tree.value;
@@ -71,7 +71,7 @@ async function removeVersion(v) {
     versions.value = versions.value.filter(item => item.id !== v.id);
     defaultId.value = versions.value.find(item => item.status === "published")?.id || "";
     if (versionId.value === v.id) { versionId.value = defaultId.value || versions.value[0]?.id || ""; await changeVersion(); }
-    versionDialog.value.deleted(v.name); flash(`已删除“${v.name}”及其全部知识点，历史题目和任务记录保留`);
+    versionDialog.value.deleted(v.name); flash(`已删除“${v.name}”及其全部大纲要点，历史题目和任务记录保留`);
     notifyKnowledgeVersionChange();
     await loadVersions(versionId.value);
   } catch (e) {
@@ -133,7 +133,7 @@ async function savePoint() {
   try {
     const { keywordsText, ...body } = pointForm.value; body.keywords = keywordsText.split(/[,，;；]/).map(s => s.trim()).filter(Boolean);
     if (body.id) await api.updateKP(body.id, body); else await api.createKP(body);
-    busy.value = false; closeModal(); flash(body.id ? "知识点已更新" : "知识点已新增"); await refresh();
+    busy.value = false; closeModal(); flash(body.id ? "大纲要点已更新" : "大纲要点已新增"); await refresh();
   } catch (e) { formError.value = e.message; } finally { busy.value = false; }
 }
 async function saveVersion() {
@@ -161,23 +161,23 @@ async function exportKnowledgePoints() {
     const url = URL.createObjectURL(result.blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = result.filename || `知识点-${currentVersion.value?.year || "导出"}.xlsx`;
+    anchor.download = result.filename || `考试大纲-${currentVersion.value?.year || "导出"}.xlsx`;
     anchor.click();
     URL.revokeObjectURL(url);
-    flash(`已导出当前版本 ${currentVersion.value?.point_count || 0} 个知识点`);
+    flash(`已导出当前版本 ${currentVersion.value?.point_count || 0} 个大纲要点`);
   } catch (e) { error.value = "导出失败：" + e.message; }
   finally { exporting.value = false; }
 }
 function askDelete(p) { deleteTarget.value = p; openModal("delete"); }
 async function removePoint() {
   busy.value = true; formError.value = "";
-  try { await api.deleteKP(deleteTarget.value.id); busy.value = false; closeModal(); flash("知识点已删除，已有题目的知识点记录保留"); await refresh(); }
+  try { await api.deleteKP(deleteTarget.value.id); busy.value = false; closeModal(); flash("大纲要点已删除，已有题目的快照记录保留"); await refresh(); }
   catch (e) { formError.value = e.message; } finally { busy.value = false; }
 }
 function showDetail(p) { detail.value = p; openModal("detail"); }
 function downloadTemplate() {
   const csv = '\ufeff分类,专业/系统,单元,细目,要点,大纲代码,关键词\r\n临床综合,呼吸系统,肺部感染,肺炎,社区获得性肺炎的诊断,示例代码-请替换,肺炎\r\n';
-  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })); const a = document.createElement('a'); a.href = url; a.download = '知识点导入模板.csv'; a.click(); URL.revokeObjectURL(url);
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })); const a = document.createElement('a'); a.href = url; a.download = '考试大纲导入模板.csv'; a.click(); URL.revokeObjectURL(url);
 }
 onMounted(async () => {
   try { await loadVersions(); await changeVersion(); } catch (e) { error.value = e.message; loading.value = false; }
@@ -192,7 +192,7 @@ onBeforeUnmount(() => { disposed = true; requestId++; treeRequestId++; versionsR
       <div class="version-heading"><span class="eyebrow">当前大纲版本</span><div class="version-control"><h2>{{ currentVersion?.name || '尚未创建大纲版本' }}</h2><span v-if="currentVersion" class="state-tag" :class="{ draft: currentVersion.status === 'draft' }">{{ currentVersion.status === 'draft' ? '整理中' : versionId === defaultId ? '默认出题' : '已启用' }}</span></div></div>
       <div class="version-actions"><button class="k-btn version-switch" :disabled="busy" @click="versionDialog.open()"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h14m-3-3 3 3-3 3M17 14H3m3-3-3 3 3 3"/></svg>切换 / 管理版本<span>{{ versions.length }}</span></button><template v-if="canManage"><button class="k-btn" :disabled="busy" @click="newVersion">＋ 新建版本</button><button v-if="currentVersion?.status === 'draft'" class="k-btn primary" :disabled="!currentVersion.point_count || busy" @click="openModal('publish')">启用此版本</button></template></div>
     </div>
-    <div class="version-caption"><span>{{ currentVersion?.description || '按考试年度维护整套大纲；不同版本的知识点独立管理。' }}</span><span>{{ currentVersion?.point_count || 0 }} 个知识点 · {{ versions.length }} 个版本</span></div>
+    <div class="version-caption"><span>{{ currentVersion?.description || '按考试年度维护整套大纲；不同版本的大纲要点独立管理。' }}</span><span>{{ currentVersion?.point_count || 0 }} 个大纲要点 · {{ versions.length }} 个版本</span></div>
     <div v-if="notice" class="notice" role="status">{{ notice }}<button aria-label="关闭提示" @click="notice = ''">×</button></div>
     <div v-if="error" class="error-banner" role="alert">{{ error }}<button @click="refresh">重新加载</button></div>
     <div v-if="!currentVersion && !loading && !versionsLoading" class="no-syllabus"><span>年度大纲</span><h2>从一套考试大纲开始</h2><p>新建版本并导入知识点，整理完成后启用，即可用于出题。</p><button v-if="canManage" class="k-btn primary" @click="newVersion">＋ 新建大纲版本</button><p v-else>请等待管理员创建大纲。</p></div>
@@ -200,21 +200,21 @@ onBeforeUnmount(() => { disposed = true; requestId++; treeRequestId++; versionsR
       <aside class="catalog-nav" aria-label="大纲目录">
         <div class="nav-heading"><strong>大纲目录</strong><div><button @click="expandAll" title="展开全部目录">展开</button><span>/</span><button @click="expanded = new Set()" title="收起全部目录">收起</button></div></div>
         <div class="directory-search"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg><input v-model="treeQuery" aria-label="查找目录" placeholder="查找专业、系统或单元" type="search" /></div>
-        <button class="all-node" :class="{ active: !selectedNode }" @click="select(null)"><span>全部知识点</span><small>{{ currentVersion?.point_count || 0 }}</small></button>
+        <button class="all-node" :class="{ active: !selectedNode }" @click="select(null)"><span>全部大纲要点</span><small>{{ currentVersion?.point_count || 0 }}</small></button>
         <div class="tree-scroll">
           <div v-if="treeLoading" class="tree-placeholder">正在加载目录…</div>
-          <ul v-else class="tree" role="tree" aria-label="知识点分类树"><KnowledgeTreeNode v-for="node in filteredTree" :key="node.id" :node="node" :selected="selectedNode?.id" :expanded="visibleExpanded" @toggle="toggle" @select="select" /></ul>
-          <p v-if="!treeLoading && !filteredTree.length" class="tree-placeholder">{{ treeQuery ? '没有匹配的目录' : '导入知识点后生成目录' }}</p>
+          <ul v-else class="tree" role="tree" aria-label="考试大纲目录树"><KnowledgeTreeNode v-for="node in filteredTree" :key="node.id" :node="node" :selected="selectedNode?.id" :expanded="visibleExpanded" @toggle="toggle" @select="select" /></ul>
+          <p v-if="!treeLoading && !filteredTree.length" class="tree-placeholder">{{ treeQuery ? '没有匹配的目录' : '导入大纲要点后生成目录' }}</p>
         </div>
         <div class="nav-foot">分类 / 专业系统 / 单元 / 细目</div>
       </aside>
       <div class="catalog-content">
-        <div class="content-heading"><nav class="breadcrumbs" aria-label="当前目录"><button @click="select(null)">大纲</button><template v-for="(part, i) in selectedPath" :key="i"><span>/</span><span>{{ part || '未分类' }}</span></template><span v-if="!selectedPath.length">/ 全部知识点</span></nav><div class="content-title"><div><h2>{{ contextName }}</h2><span>{{ total }} 个知识点{{ selectedNode ? ' · 含下级目录' : '' }}</span></div><div v-if="canManage" class="content-actions"><button class="k-btn" :disabled="!currentVersion || busy || exporting" @click="openImport"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 13V3m-4 4 4-4 4 4M4 12v5h12v-5"/></svg>批量导入</button><button class="k-btn" :disabled="!currentVersion || !currentVersion.point_count || busy || exporting" @click="exportKnowledgePoints"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v10m-4-4 4 4 4-4M4 17h12"/></svg>{{ exporting ? '导出中…' : '导出当前版本' }}</button><button class="k-btn primary" :disabled="!currentVersion || busy || exporting" @click="editPoint(null)">＋ 新增知识点</button></div></div></div>
-        <form class="content-toolbar" @submit.prevent="search"><div class="search-field"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg><input v-model="query" aria-label="搜索知识点" placeholder="在当前目录搜索知识点、代码或关键词" type="search" /></div><button class="k-btn" :disabled="loading">搜索</button><button v-if="appliedQuery" class="text-btn" type="button" @click="query = ''; search()">清除搜索</button><span class="scope-hint">{{ currentVersion?.status === 'draft' ? '整理完成后启用，即可用于出题' : '当前版本内检索' }}</span></form>
+        <div class="content-heading"><nav class="breadcrumbs" aria-label="当前目录"><button @click="select(null)">大纲</button><template v-for="(part, i) in selectedPath" :key="i"><span>/</span><span>{{ part || '未设置目录' }}</span></template><span v-if="!selectedPath.length">/ 全部大纲要点</span></nav><div class="content-title"><div><h2>{{ contextName }}</h2><span>{{ total }} 个大纲要点{{ selectedNode ? ' · 含下级目录' : '' }}</span></div><div v-if="canManage" class="content-actions"><button class="k-btn" :disabled="!currentVersion || busy || exporting" @click="openImport"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 13V3m-4 4 4-4 4 4M4 12v5h12v-5"/></svg>批量导入</button><button class="k-btn" :disabled="!currentVersion || !currentVersion.point_count || busy || exporting" @click="exportKnowledgePoints"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v10m-4-4 4 4 4-4M4 17h12"/></svg>{{ exporting ? '导出中…' : '导出当前版本' }}</button><button class="k-btn primary" :disabled="!currentVersion || busy || exporting" @click="editPoint(null)">＋ 新增大纲要点</button></div></div></div>
+        <form class="content-toolbar" @submit.prevent="search"><div class="search-field"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg><input v-model="query" aria-label="搜索大纲要点" placeholder="在当前目录搜索大纲要点、代码或关键词" type="search" /></div><button class="k-btn" :disabled="loading">搜索</button><button v-if="appliedQuery" class="text-btn" type="button" @click="query = ''; search()">清除搜索</button><span class="scope-hint">{{ currentVersion?.status === 'draft' ? '整理完成后启用，即可用于出题' : '当前版本内检索' }}</span></form>
         <div ref="tableScroll" class="table-scroll" :aria-busy="loading">
-          <table class="knowledge-table"><thead><tr><th class="number-column">序号</th><th>知识点 / 所属目录</th><th class="code-column">大纲代码</th><th class="action-column">操作</th></tr></thead><tbody>
-            <tr v-if="loading"><td colspan="4" class="empty-state">正在加载知识点…</td></tr>
-            <tr v-else-if="!points.length"><td colspan="4" class="empty-state"><strong>{{ appliedQuery ? '未找到匹配的知识点' : '当前目录还没有知识点' }}</strong><p>{{ appliedQuery ? '试试其他关键词，或切换左侧目录。' : currentVersion?.status === 'draft' ? '导入整套年度大纲，或在当前目录新增知识点。' : '可以切换大纲版本或新增知识点。' }}</p><button v-if="canManage && !appliedQuery" class="k-btn" @click="openImport">导入大纲文件</button></td></tr>
+          <table class="knowledge-table"><thead><tr><th class="number-column">序号</th><th>大纲要点 / 所属目录</th><th class="code-column">大纲代码</th><th class="action-column">操作</th></tr></thead><tbody>
+            <tr v-if="loading"><td colspan="4" class="empty-state">正在加载大纲要点…</td></tr>
+            <tr v-else-if="!points.length"><td colspan="4" class="empty-state"><strong>{{ appliedQuery ? '未找到匹配的大纲要点' : '当前目录还没有大纲要点' }}</strong><p>{{ appliedQuery ? '试试其他关键词，或切换左侧目录。' : currentVersion?.status === 'draft' ? '导入整套年度大纲，或在当前目录新增大纲要点。' : '可以切换大纲版本或新增大纲要点。' }}</p><button v-if="canManage && !appliedQuery" class="k-btn" @click="openImport">导入大纲文件</button></td></tr>
             <tr v-else v-for="(p, i) in points" :key="p.id"><td class="row-number">{{ String((page - 1) * pageSize + i + 1).padStart(2, '0') }}</td><td class="topic-cell"><button class="topic-title" @click="showDetail(p)">{{ p.topic }}</button><div class="point-path">{{ [p.category, p.subject, p.unit, p.sub_item].filter(Boolean).join(' / ') }}</div><div v-if="p.keywords?.length" class="keywords"><span v-for="k in p.keywords.slice(0, 5)" :key="k">{{ k }}</span></div></td><td><code>{{ p.outline_code || '—' }}</code></td><td><div class="row-actions"><template v-if="canManage"><button @click="editPoint(p)">编辑</button><button class="delete-link" @click="askDelete(p)">删除</button></template><button v-else @click="showDetail(p)">查看</button></div></td></tr>
           </tbody></table>
         </div>
@@ -224,12 +224,12 @@ onBeforeUnmount(() => { disposed = true; requestId++; treeRequestId++; versionsR
 
     <KnowledgeVersionDialog ref="versionDialog" :versions="versions" :current-id="versionId" :default-id="defaultId" :can-manage="canManage" :loading="versionsLoading" :busy="busy" :error="versionsError" @refresh="reloadVersions" @select="chooseVersion" @create="newVersion" @delete="removeVersion" />
     <dialog ref="modal" class="knowledge-dialog" :class="{ wide: modalKind === 'import' }" @cancel="busy ? $event.preventDefault() : modalKind = ''">
-      <div class="dialog-heading"><div><span class="eyebrow">{{ modalKind === 'version' ? '年度大纲' : currentVersion?.name }}</span><h2>{{ ({ point: pointForm.id ? '编辑知识点' : '新增知识点', version: '新建大纲版本', import: '批量导入知识点', delete: '删除知识点', publish: '启用大纲版本', detail: '知识点详情' })[modalKind] }}</h2></div><button class="close-dialog" aria-label="关闭弹窗" :disabled="busy" @click="closeModal">×</button></div>
+      <div class="dialog-heading"><div><span class="eyebrow">{{ modalKind === 'version' ? '年度大纲' : currentVersion?.name }}</span><h2>{{ ({ point: pointForm.id ? '编辑大纲要点' : '新增大纲要点', version: '新建大纲版本', import: '批量导入大纲要点', delete: '删除大纲要点', publish: '启用大纲版本', detail: '大纲要点详情' })[modalKind] }}</h2></div><button class="close-dialog" aria-label="关闭弹窗" :disabled="busy" @click="closeModal">×</button></div>
       <div v-if="formError" class="form-error" role="alert">{{ formError }}</div>
-      <form v-if="modalKind === 'point'" @submit.prevent="savePoint"><div class="form-grid"><label>分类 <em>*</em><input v-model="pointForm.category" list="kp-category-options" required maxlength="250" placeholder="如：临床综合" /></label><label>专业 / 系统 <em>*</em><input v-model="pointForm.subject" list="kp-subject-options" required maxlength="250" placeholder="如：呼吸系统" /></label><label>单元<input v-model="pointForm.unit" list="kp-unit-options" maxlength="250" placeholder="如：肺部感染" /></label><label>细目<input v-model="pointForm.sub_item" list="kp-sub_item-options" maxlength="250" placeholder="如：肺炎" /></label><label class="full">知识点内容 <em>*</em><textarea v-model="pointForm.topic" required maxlength="5000" rows="4" placeholder="填写可独立命题的具体考核要点" /></label><label class="full">大纲代码<input v-model="pointForm.outline_code" maxlength="250" placeholder="同一版本内唯一；临时补充的知识点可留空" /></label><label class="full">关键词<input v-model="pointForm.keywordsText" placeholder="多个关键词用逗号分隔" /></label></div><datalist v-for="(options, field) in directoryOptions" :id="`kp-${field}-options`" :key="field"><option v-for="value in options" :key="value" :value="value" /></datalist><p class="form-note">保存到当前版本。已有题目保留出题时的知识点内容。</p><div class="dialog-footer"><button type="button" class="k-btn" :disabled="busy" @click="closeModal">取消</button><button class="k-btn primary" :disabled="busy">{{ busy ? '保存中…' : '保存知识点' }}</button></div></form>
+      <form v-if="modalKind === 'point'" @submit.prevent="savePoint"><div class="form-grid"><label>分类 <em>*</em><input v-model="pointForm.category" list="kp-category-options" required maxlength="250" placeholder="如：临床综合" /></label><label>专业 / 系统 <em>*</em><input v-model="pointForm.subject" list="kp-subject-options" required maxlength="250" placeholder="如：呼吸系统" /></label><label>单元<input v-model="pointForm.unit" list="kp-unit-options" maxlength="250" placeholder="如：肺部感染" /></label><label>细目<input v-model="pointForm.sub_item" list="kp-sub_item-options" maxlength="250" placeholder="如：肺炎" /></label><label class="full">大纲要点内容 <em>*</em><textarea v-model="pointForm.topic" required maxlength="5000" rows="4" placeholder="填写可独立命题的具体考核要点" /></label><label class="full">大纲代码<input v-model="pointForm.outline_code" maxlength="250" placeholder="同一版本内唯一；临时补充的大纲要点可留空" /></label><label class="full">关键词<input v-model="pointForm.keywordsText" placeholder="多个关键词用逗号分隔" /></label></div><datalist v-for="(options, field) in directoryOptions" :id="`kp-${field}-options`" :key="field"><option v-for="value in options" :key="value" :value="value" /></datalist><p class="form-note">保存到当前版本。已有题目保留出题时的大纲快照。</p><div class="dialog-footer"><button type="button" class="k-btn" :disabled="busy" @click="closeModal">取消</button><button class="k-btn primary" :disabled="busy">{{ busy ? '保存中…' : '保存大纲要点' }}</button></div></form>
       <form v-if="modalKind === 'version'" @submit.prevent="saveVersion"><div class="form-grid"><label>考试年份 <em>*</em><input v-model.number="versionForm.year" type="number" min="1900" max="2200" required /></label><label>版本名称 <em>*</em><input v-model="versionForm.name" required maxlength="100" placeholder="如：2026 年临床执业医师大纲" /></label><label class="full">版本说明<textarea v-model="versionForm.description" rows="3" maxlength="2000" placeholder="适用考试、调整依据或版本备注" /></label></div><p class="form-note">新版本从空白开始，与其他年度独立。导入并启用后，系统默认展示年份最新的已启用版本。</p><div class="dialog-footer"><button class="k-btn" type="button" :disabled="busy" @click="closeModal">取消</button><button class="k-btn primary" :disabled="busy">{{ busy ? '创建中…' : '创建版本' }}</button></div></form>
       <div v-if="modalKind === 'import'">
-        <div v-if="importResult" class="import-success" role="status"><strong>导入完成</strong><p>新增 {{ importResult.imported }} 条，更新 {{ importResult.updated }} 条，重复跳过 {{ importResult.duplicated }} 条。</p><p>当前版本共 {{ importResult.total }} 个知识点。</p></div>
+        <div v-if="importResult" class="import-success" role="status"><strong>导入完成</strong><p>新增 {{ importResult.imported }} 条，更新 {{ importResult.updated }} 条，重复跳过 {{ importResult.duplicated }} 条。</p><p>当前版本共 {{ importResult.total }} 个大纲要点。</p></div>
         <template v-else><p class="form-note import-intro">文件中的知识点将写入 <strong>{{ currentVersion?.name }}</strong>。</p><label class="file-drop"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M19 4H8v24h16V9l-5-5Zm0 0v6h5M11 18h10m-5-5v10"/></svg><strong>选择大纲文件</strong><span>Excel .xlsx / CSV / Word .docx 表格</span><small>支持多选，最多 20 个文件，合计不超过 32 MB</small><input type="file" accept=".xlsx,.csv,.docx" multiple :disabled="busy" aria-label="选择大纲文件" @change="pickFiles" /></label><ul v-if="importFiles.length" class="file-list"><li v-for="(file, i) in importFiles" :key="i"><span>{{ file.name }}</span><small>{{ Math.ceil(file.size / 1024) }} KB</small></li></ul><div class="import-format"><div><strong>表格格式</strong><button class="text-btn" @click="downloadTemplate">下载 CSV 模板 ↓</button></div><p>分类 · 专业/系统 · 单元 · 细目 · 要点 · 大纲代码 · 关键词（可选）</p><p>支持多工作表和合并目录单元格；Word 需使用有表头的普通表格。无考核内容的“暂存”占位行会跳过。</p></div><fieldset class="import-modes"><legend>导入方式</legend><label><input type="radio" v-model="importMode" value="merge" :disabled="busy" /><span><strong>追加 / 更新</strong><small>相同代码更新内容，其他知识点保留。</small></span></label><label><input type="radio" v-model="importMode" value="replace" :disabled="busy" /><span><strong>替换此版本整套大纲</strong><small>仅保留本批文件中的知识点，其他版本及已有题目不受影响。</small></span></label></fieldset><p v-if="importMode === 'replace'" class="replace-note">当前版本的 {{ currentVersion?.point_count || 0 }} 条知识点将以本次文件为准，请确认已选择完整大纲。</p></template><div class="dialog-footer"><button class="k-btn" :disabled="busy" @click="closeModal">{{ importResult ? '完成' : '取消' }}</button><button v-if="!importResult" class="k-btn primary" :disabled="busy || !importFiles.length" @click="runImport">{{ busy ? '正在校验并导入…' : importMode === 'replace' ? '确认替换并导入' : '开始导入' }}</button></div>
       </div>
       <div v-if="modalKind === 'delete'"><p class="delete-topic">{{ deleteTarget?.topic }}</p><p class="form-note">删除后将从当前版本的目录和出题选项中移除。其他版本及已生成题目的记录保留。</p><div class="dialog-footer"><button class="k-btn" :disabled="busy" @click="closeModal">取消</button><button class="k-btn danger" :disabled="busy" @click="removePoint">{{ busy ? '删除中…' : '确认删除' }}</button></div></div>

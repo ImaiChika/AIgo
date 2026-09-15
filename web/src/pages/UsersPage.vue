@@ -17,6 +17,7 @@ const newUser = ref({
   password: "",
   display_name: "",
   role: "",
+  roles: [],
   permissions: [],
   bank_ids: [],
 });
@@ -60,17 +61,23 @@ function roleOptions() {
   return [{ id: "", name: "无角色" }, ...available];
 }
 
+function roleIDs(u) {
+  return (u?.roles && u.roles.length) ? u.roles : (u?.role ? [u.role] : []);
+}
+
 function roleOptionsFor(u) {
-  if (u?.role === "super_admin") return roleOptions();
+  if (roleIDs(u).includes("super_admin")) return roleOptions();
   const options = roleOptions();
-  if (!u?.role || options.some((r) => r.id === u.role)) return options;
-  const current = roles.value.find((r) => r.id === u.role);
-  return current ? [current, ...options] : options;
+  const missing = roleIDs(u).filter((id) => !options.some((r) => r.id === id));
+  if (!missing.length) return options;
+  const current = roles.value.filter((r) => missing.includes(r.id));
+  return [...current, ...options];
 }
 
 function isProtectedUser(u) {
-  return u?.id === currentUser.value?.id || u?.role === "super_admin" ||
-    (u?.role === "admin" && currentUser.value?.role !== "super_admin");
+  const assigned = roleIDs(u);
+  return u?.id === currentUser.value?.id || assigned.includes("super_admin") ||
+    (assigned.includes("admin") && currentUser.value?.role !== "super_admin");
 }
 
 function canAssignPermission(u, permission) {
@@ -87,7 +94,7 @@ async function createUser() {
     await api.createUser(newUser.value);
     showToast("创建成功");
     showCreate.value = false;
-    newUser.value = { username: "", password: "", display_name: "", role: "", permissions: [], bank_ids: [] };
+    newUser.value = { username: "", password: "", display_name: "", role: "", roles: [], permissions: [], bank_ids: [] };
     loadAll();
   } catch (e) {
     showToast("创建失败: " + e.message);
@@ -115,7 +122,14 @@ async function toggleBank(u, bankId) {
 
 async function changeRole(u, role) {
   if (isProtectedUser(u)) return;
-  await saveUser(u, { role });
+  await saveUser(u, { role, roles: role ? [role] : [] });
+}
+
+async function changeRoles(u, event) {
+  if (isProtectedUser(u)) return;
+  const selected = [...(event.target.selectedOptions || [])].map((option) => option.value).filter(Boolean);
+  const role = selected.includes(u.role) ? u.role : (selected[0] || "");
+  await saveUser(u, { role, roles: selected });
 }
 
 async function toggleEnabled(u) {
@@ -128,6 +142,7 @@ async function saveUser(u, patch) {
     const updated = await api.updateUser(u.id, {
       display_name: u.display_name,
       role: u.role,
+      roles: roleIDs(u),
       permissions: u.direct_permissions,
       bank_ids: u.bank_ids,
       ...patch,
@@ -172,7 +187,7 @@ onMounted(loadAll);
         </button>
       </div>
       <p class="permission-summary">
-        超级管理员仅保留一名，负责角色模板和最高权限；管理员由超级管理员分配，可按题库范围管理人员、题库、审核流程并参与审核决断；审题专家只通过任务进行审核。命题权限已拆分为“单题出题”和“批量推理”两个独立权限，批量推理默认仅超级管理员拥有，其他账号需在下方权限矩阵中单独勾选。
+        超级管理员仅保留一名；管理员负责业务管理。命题教师和审题老师是互斥岗位，但同一账号可以同时挂载两个岗位并在左下角切换当前身份。命题教师负责出题和提交审核，审题老师只处理分配到的审核任务；“单题出题”和“批量推理”仍是两个独立权限。
       </p>
 
       <!-- 新建用户表单 -->
@@ -192,7 +207,7 @@ onMounted(loadAll);
           </div>
           <div class="field">
             <label>角色模板</label>
-            <select v-model="newUser.role">
+            <select v-model="newUser.roles" multiple size="2" @change="newUser.role = newUser.roles[0] || ''">
               <option v-for="r in roleOptions()" :key="r.id" :value="r.id">{{ r.name }}</option>
             </select>
           </div>
@@ -223,8 +238,8 @@ onMounted(loadAll);
               </td>
               <td>{{ u.display_name }}</td>
               <td>
-                <span v-if="u.role === 'super_admin'" class="protected-role">超级管理员（系统唯一）</span>
-                <select v-else :value="u.role" :disabled="isProtectedUser(u)" @change="changeRole(u, $event.target.value)">
+                <span v-if="roleIDs(u).includes('super_admin')" class="protected-role">超级管理员（系统唯一）</span>
+                <select v-else multiple size="2" :value="roleIDs(u)" :disabled="isProtectedUser(u)" @change="changeRoles(u, $event)">
                   <option v-for="r in roleOptionsFor(u)" :key="r.id" :value="r.id">{{ r.name }}</option>
                 </select>
               </td>

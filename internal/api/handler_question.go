@@ -651,7 +651,7 @@ func (s *Server) handlePublishQuestion(w http.ResponseWriter, r *http.Request) {
 // 准确筛选：status（状态）、tier（题库分层，需对应查看权限；未指定时收敛到可见分层并集）、
 //
 //	profession（专业，逗号多选）、difficulty（难度）、outline_code（大纲代码前缀）、
-//	bank_id（题库，__unclassified__=未分类）
+//	bank_id（分类子题库，__unclassified__=待归类）
 //
 // 模糊搜索：q（题干、选项、解析、专业、系统、知识点、大纲代码、ID 等；多词 AND）
 func (s *Server) handleSearchQuestions(w http.ResponseWriter, r *http.Request) {
@@ -686,6 +686,18 @@ func (s *Server) handleSearchQuestions(w http.ResponseWriter, r *http.Request) {
 	filter, ok := s.applyTierScope(w, r, filter)
 	if !ok {
 		return
+	}
+	s.respondPagedQuestions(w, r, filter)
+}
+
+// handleMyNewQuestions 返回当前账号刚生成且 AI 检查通过、尚未送审的题目。
+// 该接口始终按 owner_id 过滤，不受 question:view_all 等管理员范围权限影响，
+// 用于“新题修改与提交审核”工作区避免误提交他人题目。
+func (s *Server) handleMyNewQuestions(w http.ResponseWriter, r *http.Request) {
+	filter := storage.QuestionFilter{
+		OwnerID: auth.GetUserID(r.Context()),
+		Status:  string(domain.StatusAIReviewed),
+		Tiers:   []string{string(domain.TierWorking)},
 	}
 	s.respondPagedQuestions(w, r, filter)
 }
@@ -884,7 +896,7 @@ func (s *Server) handleMoveQuestionsBankBatch(w http.ResponseWriter, r *http.Req
 
 func bankIDLabel(bankID string) string {
 	if bankID == "" {
-		return "未分类"
+		return "待归类"
 	}
 	return bankID
 }

@@ -19,7 +19,7 @@ var baselineSchemaSQL string
 
 const (
 	// LatestSchemaVersion 是当前程序能够使用的最新数据库版本。
-	LatestSchemaVersion int64 = 24
+	LatestSchemaVersion int64 = 26
 	// migrationLockKey 在同一 PostgreSQL 数据库内串行化所有 AIgo Schema 迁移。
 	migrationLockKey int64 = 0x4149474f5f4d4947 // "AIGO_MIG"
 )
@@ -320,6 +320,25 @@ func configuredMigrations(schemaSQL string) []migration {
 			 END $$;`,
 			`ALTER TABLE generation_runs ADD CONSTRAINT generation_runs_status_check CHECK (status IN ('pending','running','succeeded','failed'))`,
 			`CREATE INDEX IF NOT EXISTS idx_generation_runs_status_lease ON generation_runs(status, leased_until)`,
+		}},
+		{Version: 25, Name: "multi_identity_teacher_roles", Statements: []string{
+			// 保留旧 role 字段作为默认角色，新增 roles 供同一账号在命题老师/审题老师
+			// 两个身份之间切换。历史账号按原角色回填，不改变既有账号归属。
+			`ALTER TABLE users ADD COLUMN IF NOT EXISTS roles TEXT[] DEFAULT '{}'`,
+			`UPDATE users SET roles = CASE WHEN NULLIF(role, '') IS NULL THEN '{}' ELSE ARRAY[role] END
+			 WHERE roles IS NULL OR cardinality(roles) = 0`,
+			`CREATE INDEX IF NOT EXISTS idx_users_roles ON users USING GIN (roles)`,
+			// 角色模板从“审题专家可同时出题”收敛为互斥岗位：审题老师只审题，
+			// 命题教师负责出题并可把本人题目送入管理员配置的流程。直接授权不在此改写。
+			`UPDATE roles SET name='审题老师', description='只处理分配给自己的审核任务，不承担出题职责',
+			 permissions=ARRAY['question:view','review:do']
+			 WHERE id='expert' AND is_builtin=TRUE`,
+			`UPDATE roles SET name='命题教师', description='负责 AI 出题、处理退回修改并提交本人题目进入审核流程',
+			 permissions=array_append(array_remove(permissions, 'review:do'), 'review:submit')
+			 WHERE id='teacher' AND is_builtin=TRUE`,
+		}},
+		{Version: 26, Name: "local_batch_output_snapshot", Statements: []string{
+			`ALTER TABLE batch_jobs ADD COLUMN IF NOT EXISTS output_json JSONB NOT NULL DEFAULT '[]'`,
 		}},
 	}
 }

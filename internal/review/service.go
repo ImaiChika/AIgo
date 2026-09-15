@@ -30,6 +30,13 @@ type UserResolver interface {
 	ListReviewCandidates(ctx context.Context) ([]Candidate, error)
 }
 
+// displayNameResolver 是可选的用户显示名解析能力。最终把关人可以只有
+// review:final 权限、没有 review:do 权限，因此不会出现在审题人候选列表中；
+// 评语快照仍应保存其中文显示名。
+type displayNameResolver interface {
+	GetUserDisplayName(ctx context.Context, userID string) (string, error)
+}
+
 type Service struct {
 	expertStore   storage.ExpertStore
 	reviewStore   storage.ReviewStore
@@ -318,6 +325,18 @@ func (s *Service) SubmitQuestion(ctx context.Context, questionID string, flowID 
 	return s.SubmitQuestionForBank(ctx, questionID, flowID, "")
 }
 
+// SubmitQuestionForOwner 供命题老师提交本人题目。新工作流不要求出题人选择
+// 分类子题库；审核流程若绑定了分类仍由流程本身校验，未绑定时任务保留空分类快照。
+func (s *Service) SubmitQuestionForOwner(ctx context.Context, questionID, flowID string) (*domain.ReviewTask, error) {
+	var task *domain.ReviewTask
+	err := s.withReviewMutation(ctx, func(txCtx context.Context) error {
+		var submitErr error
+		task, submitErr = s.submitQuestionLocked(txCtx, questionID, flowID, "", true)
+		return submitErr
+	})
+	return task, err
+}
+
 // SubmitQuestionForBank 将题目按明确的分类子题库提交到审核流程。
 // submissionBankID 会固化到任务，后续分类变化不会改变本批次的专家路由。
 // 为空时仅对“流程已绑定题库”或“题目只属于一个子题库”的情况做安全推导。
@@ -325,13 +344,13 @@ func (s *Service) SubmitQuestionForBank(ctx context.Context, questionID, flowID,
 	var task *domain.ReviewTask
 	err := s.withReviewMutation(ctx, func(txCtx context.Context) error {
 		var submitErr error
-		task, submitErr = s.submitQuestionLocked(txCtx, questionID, flowID, submissionBankID)
+		task, submitErr = s.submitQuestionLocked(txCtx, questionID, flowID, submissionBankID, false)
 		return submitErr
 	})
 	return task, err
 }
 
-func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, requestedBankID string) (*domain.ReviewTask, error) {
+func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, requestedBankID string, allowNoBank bool) (*domain.ReviewTask, error) {
 	q, err := s.questionStore.GetQuestion(ctx, questionID)
 	if err != nil {
 		return nil, err
@@ -363,7 +382,7 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 	if flow == nil {
 		return nil, fmt.Errorf("审核流程 %s 不存在", flowID)
 	}
-	submissionBankID, err := resolveSubmissionBank(q, flow, requestedBankID)
+	submissionBankID, err := resolveSubmissionBank(q, flow, requestedBankID, allowNoBank)
 	if err != nil {
 		return nil, err
 	}
@@ -372,16 +391,13 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 	if existing != nil {
 		// 如果是"需修改"状态，恢复为审核中（保持原轮，清空本轮投票重新审核，进入新一批次）
 		if existing.Status == domain.StatusRevisionRequired {
-			flowChanged := existing.FlowID != flowID
-			roundIdx := existing.CurrentRound - 1
-			if flowChanged {
-				existing.CurrentRound = 1
-				roundIdx = 0
-				existing.RoundResults = make([]domain.RoundResult, len(flow.Rounds))
-				for i := range existing.RoundResults {
-					existing.RoundResults[i].RoundNumber = i + 1
-				}
+			if q.Version <= existing.QuestionVersion {
+				return nil, fmt.Errorf("%w: 题目已退回修改，但当前仍是送审版本 %d；请先在「待我修改」中提交新版本后再送审", domain.ErrReviewNotSubmittable, existing.QuestionVersion)
 			}
+			if existing.FlowID != flowID {
+				return nil, fmt.Errorf("%w: 题目已按审核流程 %s 退回修改，修改后需沿用原流程重新送审；如需更换流程，请先撤销原审核任务", domain.ErrReviewNotSubmittable, existing.FlowID)
+			}
+			roundIdx := existing.CurrentRound - 1
 			if roundIdx < 0 || roundIdx >= len(flow.Rounds) {
 				return nil, fmt.Errorf("审核流程 %s 不包含第 %d 轮", flowID, existing.CurrentRound)
 			}
@@ -486,7 +502,7 @@ func (s *Service) resolveReviewers(ctx context.Context, bankID string, configure
 	return reviewers, nil
 }
 
-func resolveSubmissionBank(q *domain.A2Question, flow *domain.ReviewFlowConfig, requested string) (string, error) {
+func resolveSubmissionBank(q *domain.A2Question, flow *domain.ReviewFlowConfig, requested string, allowNoBank bool) (string, error) {
 	bankID := strings.TrimSpace(requested)
 	if bankID == "" && flow != nil {
 		bankID = strings.TrimSpace(flow.BankID)
@@ -495,6 +511,9 @@ func resolveSubmissionBank(q *domain.A2Question, flow *domain.ReviewFlowConfig, 
 		bankID = q.BankIDs[0]
 	}
 	if bankID == "" {
+		if allowNoBank && (flow == nil || flow.BankID == "") {
+			return "", nil
+		}
 		return "", fmt.Errorf("%w: 题目必须先归入一个分类子题库；通用流程送审时也必须明确选择本次提交题库", domain.ErrReviewBadRequest)
 	}
 	if flow != nil && flow.BankID != "" && flow.BankID != bankID {
@@ -513,7 +532,7 @@ func resolveSubmissionBank(q *domain.A2Question, flow *domain.ReviewFlowConfig, 
 
 func bankNameOrAll(bankID string) string {
 	if bankID == "" {
-		return "未分类"
+		return "待归类题目"
 	}
 	return bankID
 }
@@ -574,14 +593,19 @@ func (s *Service) revokeFlowLocked(ctx context.Context, flowID string) (*RevokeF
 			if prev == "" {
 				prev = domain.StatusAIDraft
 			}
-			if q.Status == domain.StatusReviewing || q.Status == domain.StatusRevisionRequired || q.Status == domain.StatusConflict || q.Status == prev {
-				q.Status = prev
-				q.UpdatedAt = time.Now()
-				if err := s.questionStore.SaveQuestion(ctx, *q); err != nil {
-					return result, fmt.Errorf("恢复题目 %s 状态失败: %w", t.QuestionID, err)
-				}
-				result.Restored++
+			restorable := q.Status == domain.StatusReviewing ||
+				q.Status == domain.StatusRevisionRequired ||
+				q.Status == domain.StatusConflict ||
+				q.Status == prev
+			if !restorable {
+				return result, fmt.Errorf("撤销流程 %s 时题目 %s 状态为 %s，与未完成任务状态 %s 不一致；已取消撤销", flowID, t.QuestionID, q.Status, t.Status)
 			}
+			q.Status = prev
+			q.UpdatedAt = time.Now()
+			if err := s.questionStore.SaveQuestion(ctx, *q); err != nil {
+				return result, fmt.Errorf("恢复题目 %s 状态失败: %w", t.QuestionID, err)
+			}
+			result.Restored++
 		}
 		// 删除任务（级联删审核记录）
 		if err := s.reviewStore.DeleteTask(ctx, t.ID); err != nil {
@@ -599,6 +623,7 @@ type SubmitBankResult struct {
 	SkippedReviewing  int      `json:"skipped_reviewing"`   // 已在审核中/待决断，跳过
 	SkippedFinished   int      `json:"skipped_finished"`    // 已通过/已归档，跳过
 	SkippedNotChecked int      `json:"skipped_not_checked"` // 未通过 AI 检查的草稿，跳过（强制前置开启时）
+	SkippedNeedsEdit  int      `json:"skipped_needs_edit"`  // 已退回修改但尚未提交新版本，跳过
 }
 
 // SubmitBank 按题库批量提交审核：把题库内所有可提交状态的题目统一提交到流程。
@@ -649,6 +674,15 @@ func (s *Service) SubmitBank(ctx context.Context, bankID, flowID string) (*Submi
 			default:
 				result.SkippedFinished++
 			}
+			continue
+		}
+		existing, taskErr := s.reviewStore.GetTaskByQuestionID(ctx, q.ID)
+		if taskErr != nil {
+			result.Failed = append(result.Failed, fmt.Sprintf("%s: 查询已有审核任务失败: %s", q.ID, taskErr.Error()))
+			continue
+		}
+		if existing != nil && existing.Status == domain.StatusRevisionRequired && q.Version <= existing.QuestionVersion {
+			result.SkippedNeedsEdit++
 			continue
 		}
 		if _, err := s.SubmitQuestionForBank(ctx, q.ID, flowID, bankID); err != nil {
@@ -1330,10 +1364,13 @@ func (s *Service) reviewLocked(ctx context.Context, req ReviewRequest) error {
 		return fmt.Errorf("审核流程 %s 不存在（可能已被删除）", task.FlowID)
 	}
 
-	// 只有进行中的任务允许审核，终态/冲突态不可再投票
-	if task.Status != domain.StatusReviewing && task.Status != domain.StatusRevisionRequired {
+	// 只有审核中的任务允许投票；需修改必须先提交新版本并由管理员重新送审。
+	if task.Status != domain.StatusReviewing {
 		if task.Status == domain.StatusConflict {
 			return fmt.Errorf("本轮审核票数冲突，请等待最终把关人决断，不能再投票")
+		}
+		if task.Status == domain.StatusRevisionRequired {
+			return fmt.Errorf("题目已退回修改，需提交新版本后由管理员重新送审，不能继续本轮投票")
 		}
 		return fmt.Errorf("审核任务已结束，当前状态为 %s，不能再审核", task.Status)
 	}
@@ -1850,6 +1887,11 @@ func (s *Service) ListRecords(ctx context.Context, taskID string) ([]domain.Revi
 	return s.reviewStore.ListRecordsByTaskID(ctx, taskID)
 }
 
+// ListAllTasks 返回审核任务摘要，供个人累计指标和后台管理使用。
+func (s *Service) ListAllTasks(ctx context.Context) ([]domain.ReviewTask, error) {
+	return s.reviewStore.ListAllTasks(ctx)
+}
+
 // PublishQuestion 是旧客户端兼容接口。当前 published 已是唯一“已通过”终态，调用保持幂等。
 func (s *Service) PublishQuestion(ctx context.Context, questionID string) error {
 	return s.withReviewMutation(ctx, func(txCtx context.Context) error {
@@ -1968,6 +2010,11 @@ func sanitizeTaskForReviewer(task *domain.ReviewTask) *domain.ReviewTask {
 func (s *Service) resolveExpertName(ctx context.Context, userID string) string {
 	if s.users == nil || userID == "" {
 		return ""
+	}
+	if resolver, ok := s.users.(displayNameResolver); ok {
+		if name, err := resolver.GetUserDisplayName(ctx, userID); err == nil && strings.TrimSpace(name) != "" {
+			return strings.TrimSpace(name)
+		}
 	}
 	candidates, err := s.users.ListReviewCandidates(ctx)
 	if err != nil {

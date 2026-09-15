@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -165,6 +166,33 @@ func testFlow() domain.ReviewFlowConfig {
 				RequiredCount: 0,          // 全部通过
 			},
 		},
+	}
+}
+
+func TestSubmitQuestionForOwnerAllowsUnclassifiedQuestion(t *testing.T) {
+	svc, reviewStore, questionStore := newTestService(nil, nil)
+	ctx := context.Background()
+	q := testQuestion("")
+	q.Status = domain.StatusAIReviewed
+	if err := questionStore.SaveQuestion(ctx, *q); err != nil {
+		t.Fatal(err)
+	}
+	flow := testFlow()
+	flow.Rounds[0].ExpertIDs = []string{"reviewer-1"}
+	if err := reviewStore.SaveFlowConfig(ctx, flow); err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := svc.SubmitQuestionForOwner(ctx, q.ID, flow.ID)
+	if err != nil {
+		t.Fatalf("命题老师提交未归类题目失败: %v", err)
+	}
+	if task.SubmissionBankID != "" || task.Status != domain.StatusReviewing {
+		t.Fatalf("新送审任务不应强制分类子题库: %+v", task)
+	}
+	stored, _ := questionStore.GetQuestion(ctx, q.ID)
+	if stored.Status != domain.StatusReviewing {
+		t.Fatalf("送审后题目应进入审核中，实际 %s", stored.Status)
 	}
 }
 
@@ -461,8 +489,14 @@ func TestResubmitRollsBackTaskWhenQuestionSaveFails(t *testing.T) {
 	task.RoundResults[0].RevisionCount = 1
 	reviewStore.UpdateTask(ctx, *task)
 	q, _ := questionStore.GetQuestion(ctx, "q1")
-	q.Status = domain.StatusRevisionRequired
-	questionStore.SaveQuestion(ctx, *q)
+	// 模拟把关人退回修改后的状态切换；实际生产路径由 Finalize 负责写回 ai_reviewed。
+	q.Status = domain.StatusAIReviewed
+	questionStore.ForceQuestionForTest(*q)
+	q.ClinicalStem += "（修改后保存）"
+	q.Version++
+	if err := questionStore.SaveQuestion(ctx, *q); err != nil {
+		t.Fatal(err)
+	}
 	questionStore.FailNextSaveQuestion(errors.New("injected resubmit question failure"))
 
 	if _, err := svc.SubmitQuestion(ctx, "q1", "flow-test"); err == nil {
@@ -473,8 +507,8 @@ func TestResubmitRollsBackTaskWhenQuestionSaveFails(t *testing.T) {
 		t.Fatalf("重提回滚后任务应保持退修票，status=%s revision=%d reviews=%d", storedTask.Status, storedTask.RoundResults[0].RevisionCount, len(storedTask.RoundResults[0].Reviews))
 	}
 	storedQuestion, _ := questionStore.GetQuestion(ctx, "q1")
-	if storedQuestion.Status != domain.StatusRevisionRequired {
-		t.Fatalf("重提回滚后题目应保持需修改，实际 %s", storedQuestion.Status)
+	if storedQuestion.Status != domain.StatusAIReviewed || storedQuestion.Version != 2 {
+		t.Fatalf("重提回滚后题目应保持已检查的新版本，实际 status=%s version=%d", storedQuestion.Status, storedQuestion.Version)
 	}
 }
 
@@ -1146,6 +1180,156 @@ func TestRevokeFlowKeepsTerminal(t *testing.T) {
 	// 非终态任务删除
 	if gone, _ := svc.reviewStore.GetTask(ctx, tb.ID); gone != nil {
 		t.Fatal("非终态任务应被删除")
+	}
+}
+
+// 撤销应按提交前状态恢复，不受当前处于第几轮、是否待决断或退回修改影响。
+func TestRevokeFlowRestoresInFlightStatesAcrossRounds(t *testing.T) {
+	svc, reviewStore, questionStore := newTestService(
+		map[string][]string{"bank-neike": {"r1"}},
+		map[string]bool{"admin1": true},
+	)
+	ctx := context.Background()
+	flow := testFlow()
+	flow.Rounds = []domain.RoundConfig{
+		{RoundNumber: 1, Name: "初审"},
+		{RoundNumber: 2, Name: "复审"},
+		{RoundNumber: 3, Name: "终审"},
+	}
+	if err := reviewStore.SaveFlowConfig(ctx, flow); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name           string
+		taskStatus     domain.QuestionStatus
+		questionStatus domain.QuestionStatus
+		previous       domain.QuestionStatus
+		round          int
+	}{
+		{name: "审核中第一轮", taskStatus: domain.StatusReviewing, questionStatus: domain.StatusReviewing, previous: domain.StatusAIDraft, round: 1},
+		{name: "第二轮待决断", taskStatus: domain.StatusConflict, questionStatus: domain.StatusReviewing, previous: domain.StatusAutoChecked, round: 2},
+		{name: "第三轮待修改", taskStatus: domain.StatusRevisionRequired, questionStatus: domain.StatusAIReviewed, previous: domain.StatusAIReviewed, round: 3},
+		{name: "历史需修改状态", taskStatus: domain.StatusRevisionRequired, questionStatus: domain.StatusRevisionRequired, previous: domain.StatusAIReviewed, round: 2},
+	}
+	for i, tc := range cases {
+		q := testQuestion("bank-neike")
+		q.ID = fmt.Sprintf("q-revoke-%d", i)
+		q.Status = tc.questionStatus
+		if err := questionStore.SaveQuestion(ctx, *q); err != nil {
+			t.Fatal(err)
+		}
+		task := domain.ReviewTask{
+			ID:                 fmt.Sprintf("task-revoke-%d", i),
+			QuestionID:         q.ID,
+			FlowID:             flow.ID,
+			SubmissionBankID:   "bank-neike",
+			CurrentRound:       tc.round,
+			Status:             tc.taskStatus,
+			QuestionPrevStatus: tc.previous,
+			QuestionVersion:    q.Version,
+			RoundResults:       []domain.RoundResult{{RoundNumber: 1}, {RoundNumber: 2}, {RoundNumber: 3}},
+		}
+		if err := reviewStore.SaveTask(ctx, task); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := svc.RevokeFlow(ctx, flow.ID)
+	if err != nil {
+		t.Fatalf("跨轮次撤销失败: %v", err)
+	}
+	if result.Revoked != len(cases) || result.Restored != len(cases) || result.Kept != 0 {
+		t.Fatalf("跨轮次撤销统计错误: %+v", result)
+	}
+	for i, tc := range cases {
+		id := fmt.Sprintf("q-revoke-%d", i)
+		q, _ := questionStore.GetQuestion(ctx, id)
+		if q.Status != tc.previous {
+			t.Fatalf("%s 恢复状态错误: want=%s got=%s", tc.name, tc.previous, q.Status)
+		}
+		task, _ := reviewStore.GetTaskByQuestionID(ctx, id)
+		if task != nil {
+			t.Fatalf("%s 的审核任务应已撤销", tc.name)
+		}
+	}
+}
+
+// 通过、驳回和归档均为终态，撤销流程不能修改题目或删除历史任务。
+func TestRevokeFlowKeepsAllTerminalStates(t *testing.T) {
+	svc, reviewStore, questionStore := newTestService(nil, nil)
+	ctx := context.Background()
+	flow := testFlow()
+	if err := reviewStore.SaveFlowConfig(ctx, flow); err != nil {
+		t.Fatal(err)
+	}
+	terminal := []domain.QuestionStatus{domain.StatusPublished, domain.StatusRejected, domain.StatusArchived}
+	for i, status := range terminal {
+		q := testQuestion("bank-neike")
+		q.ID = fmt.Sprintf("q-terminal-%d", i)
+		q.Status = status
+		questionStore.SaveQuestion(ctx, *q)
+		if err := reviewStore.SaveTask(ctx, domain.ReviewTask{
+			ID:                 fmt.Sprintf("task-terminal-%d", i),
+			QuestionID:         q.ID,
+			FlowID:             flow.ID,
+			Status:             status,
+			QuestionPrevStatus: domain.StatusAIReviewed,
+			QuestionVersion:    q.Version,
+			RoundResults:       []domain.RoundResult{{RoundNumber: 1}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := svc.RevokeFlow(ctx, flow.ID)
+	if err != nil {
+		t.Fatalf("终态撤销失败: %v", err)
+	}
+	if result.Revoked != 0 || result.Restored != 0 || result.Kept != len(terminal) {
+		t.Fatalf("终态撤销统计错误: %+v", result)
+	}
+	for i, status := range terminal {
+		q, _ := questionStore.GetQuestion(ctx, fmt.Sprintf("q-terminal-%d", i))
+		if q.Status != status {
+			t.Fatalf("终态题目被错误修改: want=%s got=%s", status, q.Status)
+		}
+		task, _ := reviewStore.GetTask(ctx, fmt.Sprintf("task-terminal-%d", i))
+		if task == nil || task.Status != status {
+			t.Fatalf("终态任务应保留: %+v", task)
+		}
+	}
+}
+
+// 任务未完成但题目已进入终态属于数据冲突，撤销必须整体失败，不能静默删除任务。
+func TestRevokeFlowRejectsQuestionStateConflict(t *testing.T) {
+	svc, reviewStore, questionStore := newTestService(nil, nil)
+	ctx := context.Background()
+	flow := testFlow()
+	reviewStore.SaveFlowConfig(ctx, flow)
+	q := testQuestion("bank-neike")
+	q.Status = domain.StatusPublished
+	questionStore.SaveQuestion(ctx, *q)
+	task := domain.ReviewTask{
+		ID:                 "task-revoke-conflict",
+		QuestionID:         q.ID,
+		FlowID:             flow.ID,
+		Status:             domain.StatusReviewing,
+		QuestionPrevStatus: domain.StatusAIReviewed,
+		QuestionVersion:    q.Version,
+		RoundResults:       []domain.RoundResult{{RoundNumber: 1}},
+	}
+	reviewStore.SaveTask(ctx, task)
+
+	if _, err := svc.RevokeFlow(ctx, flow.ID); err == nil {
+		t.Fatal("题目状态与未完成任务冲突时撤销应失败")
+	}
+	storedQuestion, _ := questionStore.GetQuestion(ctx, q.ID)
+	if storedQuestion.Status != domain.StatusPublished {
+		t.Fatalf("撤销失败后题目状态不应变化: %s", storedQuestion.Status)
+	}
+	storedTask, _ := reviewStore.GetTask(ctx, task.ID)
+	if storedTask == nil || storedTask.Status != domain.StatusReviewing {
+		t.Fatalf("撤销失败后任务必须保留: %+v", storedTask)
 	}
 }
 

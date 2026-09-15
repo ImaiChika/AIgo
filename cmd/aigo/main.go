@@ -139,9 +139,9 @@ func run(ctx context.Context, args []string) error {
 	genSvc := generator.NewService(client)
 	// genSvc.Brief = true  // 精简模式：解析限制200字，节省token
 
-	// Web 服务当前使用本地模拟批量执行器：它读取当前活动 AI 配置用于展示，
-	// 但不调用外部 Files/Batches API，也不生成真实题目。CLI 的 batch-run 仍保留
-	// 原有 DashScope 执行器，避免改变既有命令行为。
+	// Web 服务批量任务复用单题生成 API：每道题独立调用 generator，结果和进度
+	// 落库，不再绑定 Qwen Files/Batches。CLI 的 batch-run 仍保留历史 DashScope
+	// 执行器，避免改变既有命令行为。
 	batchCfg := batch.DashScopeConfig{
 		APIKey:         cfg.Batch.APIKey,
 		BaseURL:        cfg.Batch.BaseURL,
@@ -151,7 +151,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	var batchSvc batch.Executor
 	if args[1] == "serve" {
-		batchSvc = batch.NewSimulatedExecutor(qwenResolver, batchCfg, pgStore)
+		batchSvc = batch.NewLocalExecutor(genSvc, pgStore, pgStore, cfg.Qwen.Model)
 	} else {
 		batchSvc, err = batch.NewExecutor(cfg.Batch.Backend, batchCfg, pgStore, pgStore)
 	}

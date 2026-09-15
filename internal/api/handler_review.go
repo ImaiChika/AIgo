@@ -28,6 +28,8 @@ type myTaskItemDetail struct {
 	AIReview *domain.AIReviewResult `json:"ai_review,omitempty"`
 }
 
+var errReviewSubmitForbidden = errors.New("只能提交本人生成的题目")
+
 // aiReviewsForQuestions 批量查询多题最新 AI 检查结果；服务不可用时返回空 map。
 func (s *Server) aiReviewsForQuestions(ctx context.Context, questionIDs []string) map[string]domain.AIReviewResult {
 	if s.aiCheckSvc == nil || len(questionIDs) == 0 {
@@ -78,8 +80,12 @@ func (s *Server) handleSubmitReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := s.reviewSvc.SubmitQuestionForBank(r.Context(), req.QuestionID, req.FlowID, req.BankID)
+	task, err := s.submitReviewForActor(r, req.QuestionID, req.FlowID, req.BankID)
 	if err != nil {
+		if errors.Is(err, auth.ErrPermissionDenied) || errors.Is(err, errReviewSubmitForbidden) {
+			writeError(w, http.StatusForbidden, "提交审核失败: "+err.Error())
+			return
+		}
 		if errors.Is(err, domain.ErrInvalidQuestion) {
 			writeError(w, 400, "提交审核失败: "+err.Error())
 			return
@@ -108,6 +114,102 @@ func (s *Server) handleSubmitReview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, 200, task)
+}
+
+// submitReviewForActor 区分管理员兼容路径与命题教师新路径：命题教师只能
+// 提交本人题目，且不再从提交界面选择分类子题库；管理员仍保留旧接口能力。
+func (s *Server) submitReviewForActor(r *http.Request, questionID, flowID, bankID string) (*domain.ReviewTask, error) {
+	userID := auth.GetUserID(r.Context())
+	if s.hasPermission(r, domain.PermUserManage) {
+		return s.reviewSvc.SubmitQuestionForBank(r.Context(), questionID, flowID, bankID)
+	}
+	if !s.hasPermission(r, domain.PermReviewSubmit) {
+		return nil, auth.ErrPermissionDenied
+	}
+	question, err := s.questionStore.GetQuestion(r.Context(), questionID)
+	if err != nil {
+		return nil, err
+	}
+	if question == nil {
+		return nil, fmt.Errorf("题目不存在")
+	}
+	if question.OwnerID != userID {
+		return nil, errReviewSubmitForbidden
+	}
+	if strings.TrimSpace(bankID) != "" {
+		return nil, fmt.Errorf("命题教师提交审核时不需要选择分类子题库")
+	}
+	return s.reviewSvc.SubmitQuestionForOwner(r.Context(), questionID, flowID)
+}
+
+// handleSubmitReviewBatch 逐题提交本人题目，单题失败不会回滚已经成功的题目。
+// 请求：{"question_ids":["q-1","q-2"],"flow_id":"flow-a2"}
+func (s *Server) handleSubmitReviewBatch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		QuestionIDs []string `json:"question_ids"`
+		FlowID      string   `json:"flow_id"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.FlowID) == "" {
+		writeError(w, http.StatusBadRequest, "请指定审核流程")
+		return
+	}
+	if len(req.QuestionIDs) == 0 || len(req.QuestionIDs) > 500 {
+		writeError(w, http.StatusBadRequest, "一次最多选择 500 道题目")
+		return
+	}
+	type failedItem struct {
+		QuestionID string `json:"question_id"`
+		Error      string `json:"error"`
+	}
+	seen := make(map[string]bool, len(req.QuestionIDs))
+	failed := make([]failedItem, 0)
+	submitted := 0
+	for _, questionID := range req.QuestionIDs {
+		questionID = strings.TrimSpace(questionID)
+		if questionID == "" || seen[questionID] {
+			continue
+		}
+		seen[questionID] = true
+		if _, err := s.submitReviewForActor(r, questionID, req.FlowID, ""); err != nil {
+			failed = append(failed, failedItem{QuestionID: questionID, Error: err.Error()})
+			continue
+		}
+		submitted++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"submitted": submitted,
+		"failed":    failed,
+		"total":     submitted + len(failed),
+	})
+}
+
+// handleAvailableReviewFlows 只向命题教师暴露可选择的流程摘要，不泄露每轮
+// 审核人 ID；完整流程配置仍只由管理员查看和维护。
+func (s *Server) handleAvailableReviewFlows(w http.ResponseWriter, r *http.Request) {
+	flows, err := s.reviewSvc.ListFlows(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	type flowSummary struct {
+		ID          string `json:"id"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Subject     string `json:"subject"`
+		RoundCount  int    `json:"round_count"`
+	}
+	result := make([]flowSummary, 0, len(flows))
+	for _, flow := range flows {
+		result = append(result, flowSummary{
+			ID: flow.ID, Name: flow.Name, Description: flow.Description,
+			Subject: flow.Subject, RoundCount: len(flow.Rounds),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"flows": result, "total": len(result)})
 }
 
 // handleReviewAction 执行审核投票（通过/驳回/需修改）。
@@ -223,7 +325,7 @@ func (s *Server) handleReviewFinalize(w http.ResponseWriter, r *http.Request) {
 // handleSubmitBankReview 按题库统一提交审核：把题库内所有可提交状态的题目
 // 批量提交到审核流程（不再需要在审核页一题一题点击提交）。
 // 已在审核中/已审核结束的题目自动跳过并在结果中统计（提示题库状态冲突）。
-// 请求：{"bank_id": "xxx", "flow_id": "xxx"}（bank_id 为空=提交未分类题目）
+// 请求：{"bank_id": "xxx", "flow_id": "xxx"}（bank_id 为空将被拒绝，必须指定分类子题库）
 func (s *Server) handleSubmitBankReview(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		BankID string `json:"bank_id"`
@@ -358,9 +460,50 @@ func (s *Server) handleMyRevisions(w http.ResponseWriter, r *http.Request) {
 
 func bankLabel(bankID string) string {
 	if bankID == "" {
-		return "未分类"
+		return "待归类"
 	}
 	return bankID
+}
+
+func isTechnicalUserID(name string) bool {
+	return strings.HasPrefix(strings.TrimSpace(name), "user-")
+}
+
+// enrichReviewDisplayNames 兼容历史记录中因最终把关人没有 review:do
+// 权限而保存的 user-... 技术 ID；只对调用者已经有权看到的记录补齐名称。
+func (s *Server) enrichReviewDisplayNames(ctx context.Context, records []domain.ReviewRecord) {
+	for i := range records {
+		if strings.TrimSpace(records[i].ExpertName) != "" && !isTechnicalUserID(records[i].ExpertName) {
+			continue
+		}
+		user, err := s.authSvc.GetUserByID(records[i].ExpertID)
+		if err != nil || user == nil {
+			continue
+		}
+		if strings.TrimSpace(user.DisplayName) != "" {
+			records[i].ExpertName = strings.TrimSpace(user.DisplayName)
+		} else {
+			records[i].ExpertName = user.Username
+		}
+	}
+}
+
+func (s *Server) enrichReviewTaskDisplayName(ctx context.Context, task *domain.ReviewTask) {
+	if task == nil || task.FinalDecision == nil {
+		return
+	}
+	if strings.TrimSpace(task.FinalDecision.ExpertName) != "" && !isTechnicalUserID(task.FinalDecision.ExpertName) {
+		return
+	}
+	user, err := s.authSvc.GetUserByID(task.FinalDecision.ExpertID)
+	if err != nil || user == nil {
+		return
+	}
+	if strings.TrimSpace(user.DisplayName) != "" {
+		task.FinalDecision.ExpertName = strings.TrimSpace(user.DisplayName)
+	} else {
+		task.FinalDecision.ExpertName = user.Username
+	}
 }
 
 // reviewFullAccess 仅表示跨任务的全量评语权限。
@@ -466,6 +609,10 @@ func (s *Server) handleReviewResults(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
+	for i := range pageItems {
+		s.enrichReviewTaskDisplayName(r.Context(), pageItems[i].Task)
+		s.enrichReviewDisplayNames(r.Context(), pageItems[i].Records)
+	}
 
 	writeJSON(w, 200, map[string]any{
 		"items":     pageItems,
@@ -538,6 +685,7 @@ func (s *Server) handleGetReviewTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
+	s.enrichReviewTaskDisplayName(r.Context(), task)
 	detail := reviewTaskDetail{ReviewTask: *task}
 	if s.aiCheckSvc != nil {
 		if result, err := s.aiCheckSvc.GetResult(r.Context(), task.QuestionID); err == nil && result != nil {
@@ -576,6 +724,7 @@ func (s *Server) handleGetTaskByQuestion(w http.ResponseWriter, r *http.Request)
 		writeError(w, 500, err.Error())
 		return
 	}
+	s.enrichReviewTaskDisplayName(r.Context(), task)
 	detail := reviewTaskDetail{ReviewTask: *task}
 	if s.aiCheckSvc != nil {
 		if result, err := s.aiCheckSvc.GetResult(r.Context(), questionID); err == nil && result != nil {
@@ -715,5 +864,6 @@ func (s *Server) handleReviewRecords(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
+	s.enrichReviewDisplayNames(r.Context(), records)
 	writeJSON(w, 200, map[string]any{"records": records, "total": len(records)})
 }

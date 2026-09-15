@@ -45,6 +45,7 @@ const (
 	PermQuestionViewGlobal  = "question:view_global"  // 查看全局题库三层逻辑视图
 	PermQuestionShareReview = "question:share_review" // 审批个人题目分享至全局题库
 	PermReviewDo            = "review:do"             // 执行审核（题库范围仅用于自动分配任务）
+	PermReviewSubmit        = "review:submit"         // 出题老师提交本人题目进入审核流程
 	PermReviewFinal         = "review:final"          // 最终把关（按任务/把关人名单授权，不授予题库浏览）
 	PermReviewResults       = "review:view_results"   // 查看审核记录汇总（不等同于个人题库查看）
 	PermStatsView           = "stats:view"            // 统计分析
@@ -88,6 +89,7 @@ func AllPermissions() []PermissionMeta {
 		{PermQuestionViewEliminated, "查看淘汰题库", "题库", true},
 		{PermQuestionViewAll, "查看全部题库", "题库", false},
 		{PermReviewDo, "审题", "审核", true},
+		{PermReviewSubmit, "提交审核", "审核", false},
 		{PermReviewFinal, "最终把关", "审核", false},
 		{PermReviewResults, "查看审核记录", "审核", false},
 		{PermStatsView, "数据统计", "题库", true},

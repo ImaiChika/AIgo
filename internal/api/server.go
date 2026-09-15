@@ -4,8 +4,8 @@
 package api
 
 import (
-	"log/slog"
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -98,8 +98,10 @@ func (s *Server) Handler() http.Handler {
 
 	// === 认证（需登录） ===
 	mux.HandleFunc("GET /api/auth/me", s.requireAuth("", s.handleMe))
+	mux.HandleFunc("POST /api/auth/switch-role", s.requireAuth("", s.handleSwitchRole))
 	mux.HandleFunc("PUT /api/auth/profile", s.requireAuth("", s.handleUpdateProfile))
 	mux.HandleFunc("POST /api/auth/change-password", s.requireAuth("", s.handleChangePassword))
+	mux.HandleFunc("GET /api/my/summary", s.requireAuth("", s.handleMySummary))
 
 	// === 权限元数据（登录即可，供前端渲染权限矩阵） ===
 	mux.HandleFunc("GET /api/permissions", s.requireAuth("", s.handleListPermissions))
@@ -145,6 +147,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/generation-runs/{id}", s.requireAuth(domain.PermQuestionGenerate, s.handleGetGenerationRun))
 	mux.HandleFunc("GET /api/questions", s.requireAuth("", s.handleListQuestions))
 	mux.HandleFunc("GET /api/questions/search", s.requireAuth("", s.handleSearchQuestions))
+	mux.HandleFunc("GET /api/questions/my-new", s.requireAuthAny([]string{domain.PermReviewSubmit, domain.PermQuestionGenerate}, s.handleMyNewQuestions))
 	mux.HandleFunc("GET /api/questions/{id}/versions", s.requireAuth("", s.handleListQuestionVersions))
 	mux.HandleFunc("POST /api/questions/{id}/restore", s.requireAuth(domain.PermQuestionEdit, s.handleRestoreQuestionVersion))
 	mux.HandleFunc("POST /api/questions/{id}/unpublish", s.requireAuth(domain.PermUserManage, s.handleUnpublishQuestion))
@@ -213,7 +216,8 @@ func (s *Server) Handler() http.Handler {
 
 	// === 审核流程 ===
 	// 提交审核仅系统管理员（user:manage）可操作；审核人员只负责投票
-	mux.HandleFunc("POST /api/review/submit", s.requireAuth(domain.PermUserManage, s.handleSubmitReview))
+	mux.HandleFunc("POST /api/review/submit", s.requireAuthAny([]string{domain.PermReviewSubmit, domain.PermUserManage}, s.handleSubmitReview))
+	mux.HandleFunc("POST /api/review/submit-batch", s.requireAuthAny([]string{domain.PermReviewSubmit, domain.PermUserManage}, s.handleSubmitReviewBatch))
 	mux.HandleFunc("POST /api/review/submit-bank", s.requireAuth(domain.PermUserManage, s.handleSubmitBankReview))
 	mux.HandleFunc("POST /api/review/action", s.requireAuth(domain.PermReviewDo, s.handleReviewAction))
 	mux.HandleFunc("POST /api/review/finalize", s.requireAuth(domain.PermReviewFinal, s.handleReviewFinalize))
@@ -226,6 +230,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/review/my-decisions", s.requireAuth("", s.handleMyDecisions))
 	mux.HandleFunc("GET /api/review/my-revisions", s.requireAuth("", s.handleMyRevisions))
 	mux.HandleFunc("GET /api/review/reviewers", s.requireAuth("", s.handleListReviewers))
+	mux.HandleFunc("GET /api/review/available-flows", s.requireAuthAny([]string{domain.PermReviewSubmit, domain.PermUserManage}, s.handleAvailableReviewFlows))
 	mux.HandleFunc("GET /api/review/flows", s.requireAuth(domain.PermFlowManage, s.handleListFlows))
 	mux.HandleFunc("POST /api/review/flows", s.requireAuth(domain.PermFlowManage, s.handleCreateFlow))
 	mux.HandleFunc("PUT /api/review/flows/{id}", s.requireAuth(domain.PermFlowManage, s.handleUpdateFlow))
@@ -314,7 +319,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			}
 			bankDist = agg.ByBank
 			if agg.Unclassified > 0 {
-				bankDist["未分类"] = agg.Unclassified
+				bankDist["待归类"] = agg.Unclassified
 			}
 			if ids, err := s.questionStore.CoveredKnowledgePointIDs(ctx, *workingFilter); err == nil {
 				kpCovered = len(ids)
@@ -459,6 +464,19 @@ func (s *Server) requireAuth(action string, handler http.HandlerFunc) http.Handl
 		if !user.Enabled {
 			writeError(w, 401, "账号已被禁用")
 			return
+		}
+		if claims.Role != "" {
+			assigned := false
+			for _, roleID := range user.Roles {
+				if roleID == claims.Role {
+					assigned = true
+					break
+				}
+			}
+			if !assigned {
+				writeError(w, 401, "当前身份已被管理员撤销，请重新选择身份")
+				return
+			}
 		}
 
 		// 将用户信息注入 context，后续 handler 可通过 auth.GetUserID(ctx) 等方法获取

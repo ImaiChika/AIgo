@@ -11,7 +11,7 @@ export const currentUser = computed(() => user.value);
 export const roleNames = {
   super_admin: "超级管理员",
   admin: "管理员",
-  expert: "审题专家",
+  expert: "审题老师",
   teacher: "命题教师",
 };
 

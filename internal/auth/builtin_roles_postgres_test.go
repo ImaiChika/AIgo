@@ -13,7 +13,7 @@ import (
 // InitBuiltinRoles 对已存在角色的自愈行为：
 //   - super_admin 始终恢复完整权限；
 //   - admin 自动补齐业务权限并移除角色模板管理权限；
-//   - 医学专家恢复个人命题/题库/退修/审核记录能力，但不默认获得批量推理、汇总统计或管理权限；
+//   - 审题老师恢复仅审核任务能力，不继承命题权限；
 //   - 其他内置角色保留管理员的有效自定义修改。
 func TestInitBuiltinRolesHealsAdminRole(t *testing.T) {
 	service, cleanup := loginLimitTestService(t)
@@ -36,10 +36,7 @@ func TestInitBuiltinRolesHealsAdminRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, permission := range []string{
-		domain.PermQuestionView, domain.PermQuestionEdit,
-		domain.PermQuestionGenerate, domain.PermQuestionShare, domain.PermReviewDo,
-	} {
+	for _, permission := range []string{domain.PermQuestionView, domain.PermReviewDo} {
 		if !slices.Contains(expert.Permissions, permission) {
 			t.Fatalf("新建医学专家角色缺少 %s: %v", permission, expert.Permissions)
 		}
@@ -70,14 +67,10 @@ func TestInitBuiltinRolesHealsAdminRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(expertAfter.Permissions) != 6 {
-		t.Fatalf("expert 角色应固定为 6 个个人工作/审核权限: %v", expertAfter.Permissions)
+	if len(expertAfter.Permissions) != 2 {
+		t.Fatalf("expert 角色应固定为 2 个审核权限: %v", expertAfter.Permissions)
 	}
-	for _, permission := range []string{
-		domain.PermQuestionView, domain.PermQuestionEdit,
-		domain.PermQuestionGenerate, domain.PermQuestionShare, domain.PermReviewDo,
-		domain.PermReviewResults,
-	} {
+	for _, permission := range []string{domain.PermQuestionView, domain.PermReviewDo} {
 		if !slices.Contains(expertAfter.Permissions, permission) {
 			t.Fatalf("expert 角色自愈后缺少个人工作权限 %s: %v", permission, expertAfter.Permissions)
 		}
@@ -182,8 +175,14 @@ func TestBuiltinAuthoringPermissionsAreSeparated(t *testing.T) {
 		if slices.Contains(role.Permissions, domain.PermBatchRun) {
 			t.Fatalf("内置角色 %s 默认不应拥有批量推理权限: %v", roleID, role.Permissions)
 		}
-		if !slices.Contains(role.Permissions, domain.PermQuestionGenerate) {
+		if roleID == domain.RoleExpert && slices.Contains(role.Permissions, domain.PermQuestionGenerate) {
+			t.Fatalf("审题老师不应拥有单题出题权限: %v", role.Permissions)
+		}
+		if roleID != domain.RoleExpert && !slices.Contains(role.Permissions, domain.PermQuestionGenerate) {
 			t.Fatalf("内置角色 %s 应保留单题出题权限: %v", roleID, role.Permissions)
+		}
+		if roleID == domain.RoleTeacher && !slices.Contains(role.Permissions, domain.PermReviewSubmit) {
+			t.Fatalf("命题教师应拥有提交审核权限: %v", role.Permissions)
 		}
 	}
 
@@ -210,7 +209,7 @@ func TestBuiltinAuthoringPermissionsAreSeparated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(expertAfter.Permissions, domain.PermBatchRun) {
-		t.Fatalf("专家角色被明确授予批量权限后，启动自愈不应清除: %v", expertAfter.Permissions)
+	if slices.Contains(expertAfter.Permissions, domain.PermBatchRun) {
+		t.Fatalf("审题老师角色不应通过模板获得批量权限: %v", expertAfter.Permissions)
 	}
 }

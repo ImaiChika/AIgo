@@ -7,7 +7,7 @@ const flows = ref([]);
 const reviewers = ref([]); // 有审题权限的用户（流程选审核人用）
 const users = ref([]); // 用户账号列表（把关人名映射）
 const banks = ref([]); // 题库列表
-const submissionBankByFlow = ref({}); // 通用流程每次送审必须明确选择本次分类子题库
+const unboundSubbankLabel = "未限定分类范围（命题老师提交时不选择）";
 const loading = ref(false);
 const showCreate = ref(false);
 const editingFlowId = ref(""); // 非空表示编辑模式
@@ -191,25 +191,6 @@ async function submitFlow() {
   }
 }
 
-// 撤销流程提交：删除该流程下所有未完成的审核任务，题目恢复提交前状态（管理员防误提交/卡死用）
-const revokingFlowId = ref("");
-
-async function revokeFlow(flow) {
-  if (!confirm(`撤销「${flow.name}」的提交？\n\n将删除该流程下所有未完成审核的任务（审核中/需修改/待决断），这些题目恢复到提交前状态；\n已审核结束（已通过/已驳回）的题目不受影响。\n\n此操作用于误提交或卡死时撤回，请确认。`)) return;
-  revokingFlowId.value = flow.id;
-  try {
-    const data = await api.revokeFlow(flow.id);
-    let msg = `已撤销 ${data.revoked} 个未完成审核任务，恢复题目 ${data.restored} 道`;
-    if (data.kept) msg += `，保留终态任务 ${data.kept} 个（审核已结束，不受影响）`;
-    showToast(msg);
-    loadFlows();
-  } catch (e) {
-    showToast("撤销失败: " + e.message);
-  } finally {
-    revokingFlowId.value = "";
-  }
-}
-
 const deletingFlowId = ref("");
 
 async function deleteFlow(flow) {
@@ -227,67 +208,6 @@ async function deleteFlow(flow) {
   }
 }
 
-// 批量提交审核：把流程适用题库内所有可提交题目统一提交
-const submittingFlowId = ref("");
-
-async function submitFlowBank(flow) {
-  const submissionBankId = flow.bank_id || submissionBankByFlow.value[flow.id] || "";
-  if (!submissionBankId) {
-    showToast("通用流程送审前必须选择本次提交的分类子题库");
-    return;
-  }
-  const bn = bankName(submissionBankId);
-  const bank = banks.value.find((b) => b.id === submissionBankId);
-  let conflictHint = "";
-  if (bank && bank.status_counts) {
-    const c = bank.status_counts;
-    const reviewing = (c.reviewing || 0) + (c.conflict || 0);
-    const finished = (c.published || 0) + (c.archived || 0);
-    if (reviewing > 0 || finished > 0) {
-      conflictHint = `\n\n${reviewing} 道已在审核中或待决断，将被跳过；${finished} 道已结束，不会重复处理。`;
-    }
-  }
-  if (!confirm(`将「${bn}」中所有已通过 AI 检查、可送审的题目统一提交到流程「${flow.name}」？\n已在审核中、已完成或已驳回的题目会自动跳过。${conflictHint}`)) return;
-  submittingFlowId.value = flow.id;
-  try {
-    const data = await api.submitBankReview(submissionBankId, flow.id);
-    const notes = [];
-    if (data.skipped_reviewing) notes.push(`已在审核中 ${data.skipped_reviewing}`);
-    if (data.skipped_finished) notes.push(`已审核结束 ${data.skipped_finished}`);
-    if (data.skipped_not_checked) notes.push(`等待 AI 检查 ${data.skipped_not_checked}`);
-
-    // 失败明细分类：「无需重复提交」属于后端幂等拦截的重复提交，按已提交处理而非失败
-    const failed = data.failed || [];
-    const duplicates = failed.filter((f) => f.includes("无需重复提交"));
-    const realFailed = failed.filter((f) => !f.includes("无需重复提交"));
-    const firstReason = (list) => (list[0] || "").split(": ").slice(1).join(": ") || list[0];
-
-    if (data.submitted > 0) {
-      let msg = `批量提交完成：成功提交 ${data.submitted} 道`;
-      if (notes.length) msg += `，${notes.join("，")}`;
-      if (duplicates.length) msg += `，${duplicates.length} 道已提交过，无需重复提交`;
-      if (realFailed.length) msg += `，失败 ${realFailed.length} 道（示例原因：${firstReason(realFailed)}）`;
-      showToast(msg);
-      if (realFailed.length) console.error("批量提交失败列表:", realFailed);
-    } else if (duplicates.length && !realFailed.length) {
-      // 全部是重复提交：明确提示无需重复操作
-      showToast(`题目已成功提交过审核，无需重复提交（${duplicates.length} 道均在审核流程中）`);
-    } else if (realFailed.length) {
-      showToast(`提交失败 ${realFailed.length} 道。示例失败原因：${firstReason(realFailed)}`);
-      console.error("批量提交失败列表:", realFailed);
-    } else if (notes.length) {
-      // 0 道提交且无失败：题库内题目均处于不可重复提交的状态
-      showToast(`无需重复提交：题库「${bn}」内没有新可送的题目（${notes.join("，")}），题目均已提交过或已结束审核。`);
-    } else {
-      showToast(`题库「${bn}」内没有可提交的题目：共 ${bank?.question_count || 0} 道，请确认题目已归属本库并通过 AI 检查（可点「重新归纳」）。`);
-    }
-  } catch (e) {
-    showToast("批量提交失败: " + e.message);
-  } finally {
-    submittingFlowId.value = "";
-  }
-}
-
 function expertName(id) {
   const u = users.value.find((x) => x.id === id);
   if (u) return u.display_name || u.username;
@@ -295,21 +215,14 @@ function expertName(id) {
   return r ? r.display_name || r.username : id;
 }
 
-// 该流程自动匹配到的审题人（轮次未显式指定审核人时，批量提交后由这些人审核）
+// 该流程自动匹配到的审题人摘要
 function matchedReviewers(flow) {
   const firstRound = (flow.rounds || [])[0];
   if (firstRound && (firstRound.expert_ids || []).length) {
     return firstRound.expert_ids.map(expertName).join("、");
   }
-  const bankId = flow.bank_id || submissionBankByFlow.value[flow.id] || "";
-  if (!bankId) return "送审时选择题库后自动匹配";
-  return "按该分类子题库范围自动匹配（直接分配优先）";
-}
-
-function bankName(id) {
-  if (!id) return "通用（全部题库）";
-  const b = banks.value.find((x) => x.id === id);
-  return b ? b.name : id;
+  if (!flow.bank_id) return "按审核流程自动匹配审题老师";
+  return "按流程绑定的分类范围自动匹配";
 }
 
 // 题库下拉选项：附带可提交/审核中数量提示
@@ -365,9 +278,9 @@ onMounted(() => {
             <input v-model="form.description" placeholder="可选" />
           </div>
           <div class="field">
-            <label>适用题库（空 = 通用流程）</label>
+            <label>可选分类范围（仅用于流程路由）</label>
             <select v-model="form.bank_id">
-              <option value="">通用（全部题库）</option>
+              <option value="">{{ unboundSubbankLabel }}</option>
               <option v-for="b in banks" :key="b.id" :value="b.id">{{ bankOptionLabel(b) }}</option>
             </select>
           </div>
@@ -466,40 +379,13 @@ onMounted(() => {
               <strong>{{ flow.name }}</strong>
             </div>
             <div class="flow-actions">
-              <select
-                v-if="!flow.bank_id"
-                v-model="submissionBankByFlow[flow.id]"
-                class="submit-bank-select"
-                title="通用流程本次要提交的分类子题库"
-              >
-                <option value="">选择送审题库...</option>
-                <option v-for="b in banks" :key="b.id" :value="b.id">{{ bankOptionLabel(b) }}</option>
-              </select>
-              <button
-                class="submit-bank-btn"
-                type="button"
-                :disabled="submittingFlowId === flow.id || (!flow.bank_id && !submissionBankByFlow[flow.id])"
-                @click="submitFlowBank(flow)"
-                title="批量提交该流程适用题库内的所有可提交题目"
-              >
-                {{ submittingFlowId === flow.id ? "提交中..." : "批量提交审核" }}
-              </button>
-              <button
-                class="revoke-btn"
-                type="button"
-                :disabled="revokingFlowId === flow.id"
-                @click="revokeFlow(flow)"
-                title="撤销该流程下所有未完成的审核任务，题目恢复提交前状态"
-              >
-                {{ revokingFlowId === flow.id ? "撤销中..." : "撤销提交" }}
-              </button>
               <button class="edit-btn" type="button" @click="startEditFlow(flow)" title="编辑">编辑</button>
               <button class="delete-btn" type="button" :disabled="deletingFlowId === flow.id" @click="deleteFlow(flow)" title="删除">×</button>
             </div>
           </div>
           <p v-if="flow.description" class="flow-desc">{{ flow.description }}</p>
           <p class="flow-meta">
-            适用题库：{{ bankName(flow.bank_id) }}
+            适用分类子题库：{{ flow.bank_id || "未限定（由命题老师提交）" }}
             <span v-if="flow.vote_rule === 'veto'" class="rule-tag veto">一票否决</span>
             <span v-else class="rule-tag">通过票数推进</span>
             <span v-if="(flow.final_reviewer_ids || []).length">

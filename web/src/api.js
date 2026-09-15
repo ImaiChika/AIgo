@@ -39,6 +39,8 @@ export const api = {
       body: JSON.stringify({ username, password, display_name }),
     }),
   me: () => request("/auth/me"),
+  mySummary: () => request("/my/summary"),
+  switchRole: (role) => request("/auth/switch-role", { method: "POST", body: JSON.stringify({ role }) }),
   changePassword: (old_password, new_password) =>
     request("/auth/change-password", {
       method: "POST",
@@ -152,6 +154,7 @@ export const api = {
     params.set("page_size", String(pageSize));
     return request(`/questions/search?${params}`);
   },
+  myNewQuestions: (page = 1, pageSize = 20) => request(`/questions/my-new?page=${page}&page_size=${pageSize}`),
   addQuestionBank: (id, bankId) =>
     request(`/questions/${id}/bank`, {
       method: "POST",
@@ -338,6 +341,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ question_id: questionId, flow_id: flowId, bank_id: bankId }),
     }),
+  submitReviewBatch: (questionIds, flowId) =>
+    request("/review/submit-batch", {
+      method: "POST",
+      body: JSON.stringify({ question_ids: questionIds, flow_id: flowId }),
+    }),
   submitBankReview: (bankId, flowId) =>
     request("/review/submit-bank", {
       method: "POST",
@@ -351,6 +359,7 @@ export const api = {
     return request(`/review/results?${qs}`);
   },
   listReviewers: () => request("/review/reviewers"),
+  availableReviewFlows: () => request("/review/available-flows"),
   myTasks: (page = 1, pageSize = 20) => request(`/review/my-tasks?page=${page}&page_size=${pageSize}`),
   myDecisions: (page = 1, pageSize = 20) => request(`/review/my-decisions?page=${page}&page_size=${pageSize}`),
   // 待我修改（退回修改的题目；提交修改=保存回库，送审由管理员负责）

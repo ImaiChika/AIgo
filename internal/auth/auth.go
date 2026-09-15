@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -49,6 +50,7 @@ type User struct {
 	Username          string    `json:"username"`
 	DisplayName       string    `json:"display_name"`
 	Role              string    `json:"role"`               // 角色模板 ID（空=未分配角色）
+	Roles             []string  `json:"roles"`              // 可切换的角色模板；Role 为当前/默认角色
 	Permissions       []string  `json:"permissions"`        // 有效权限点列表
 	DirectPermissions []string  `json:"direct_permissions"` // 直接分配的权限点
 	BankIDs           []string  `json:"bank_ids"`           // 用户级题库范围（空=全部）
@@ -107,16 +109,12 @@ func builtinRoles() []domain.Role {
 		},
 		{
 			ID:          domain.RoleExpert,
-			Name:        "审题专家",
-			Description: "可使用个人题库命题、处理退回修改，并审核分配给自己的任务",
+			Name:        "审题老师",
+			Description: "只处理分配给自己的审核任务，不承担出题职责",
 			IsBuiltin:   true,
 			Permissions: []string{
-				domain.PermQuestionView, domain.PermQuestionEdit,
-				domain.PermQuestionGenerate,
-				domain.PermQuestionShare,
+				domain.PermQuestionView,
 				domain.PermReviewDo,
-				// 出题人需要跟踪本人题目的审核结论与评语（个人范围审核记录页）。
-				domain.PermReviewResults,
 			},
 		},
 		{
@@ -127,6 +125,7 @@ func builtinRoles() []domain.Role {
 				domain.PermQuestionView, domain.PermQuestionEdit,
 				domain.PermQuestionGenerate,
 				domain.PermQuestionShare,
+				domain.PermReviewSubmit,
 				domain.PermStatsView,
 			},
 		},
@@ -207,29 +206,22 @@ func (s *Service) InitBuiltinRoles(ctx context.Context) error {
 					}
 				}
 			}
-			// 医学专家同时是个人题库用户和审核人：可单题命题、查看自己的三层题库、
-			// 处理待修改、分享正式题并查看本人审核记录；不包含全局库、汇总统计或管理权限。
-			// 专家是岗位型内置角色：启动自愈把权限恢复为模板集，防止旧库残留缺漏；
-			// 批量推理是可按需授予的例外：超级管理员若明确勾选，自愈必须保留这项调整。
+			// 审题老师是岗位型内置角色：启动自愈把权限恢复为模板集，防止旧库残留
+			// 出题权限；批量推理等直接授权不属于角色模板，仍由用户单独保留。
 			if r.ID == domain.RoleExpert {
-				keepBatch := containsPermission(valid, domain.PermBatchRun)
 				restored := append([]string(nil), r.Permissions...)
-				if keepBatch {
-					restored = append(restored, domain.PermBatchRun)
-				}
 				if !samePermissions(valid, restored) {
 					valid = restored
 					changed = true
 				}
 			}
-			// 命题教师需要能把本人已通过审核的正式题目提交分享申请；
-			// 仅补齐这一新增能力，不覆盖管理员对教师其他权限的调整。
+			// 命题教师可以把本人题目送入管理员配置的审核流程，并申请分享正式题。
 			if r.ID == domain.RoleTeacher {
 				have := make(map[string]bool, len(valid))
 				for _, p := range valid {
 					have[p] = true
 				}
-				for _, p := range []string{domain.PermQuestionShare} {
+				for _, p := range []string{domain.PermQuestionShare, domain.PermReviewSubmit} {
 					if !have[p] {
 						valid = append(valid, p)
 						changed = true
@@ -293,7 +285,7 @@ func (s *Service) InitAdmin(username, password, displayName string) (bool, strin
 					return false, "", err
 				}
 				if superCount == 0 {
-					if _, err := s.db.Exec(`UPDATE users SET role=$1, permissions='{}', bank_ids='{}', updated_at=NOW() WHERE username=$2`, domain.RoleSuperAdmin, username); err != nil {
+					if _, err := s.db.Exec(`UPDATE users SET role=$1, roles=$3, permissions='{}', bank_ids='{}', updated_at=NOW() WHERE username=$2`, domain.RoleSuperAdmin, username, pqArray([]string{domain.RoleSuperAdmin})); err != nil {
 						return false, "", err
 					}
 				}
@@ -317,9 +309,9 @@ func (s *Service) InitAdmin(username, password, displayName string) (bool, strin
 
 	id := fmt.Sprintf("user-%d", time.Now().UnixNano())
 	_, err = s.db.Exec(`
-		INSERT INTO users (id, username, password_hash, display_name, role, permissions, bank_ids, enabled)
-		VALUES ($1, $2, $3, $4, $5, '{}', '{}', true)
-	`, id, username, string(hash), displayName, domain.RoleSuperAdmin)
+		INSERT INTO users (id, username, password_hash, display_name, role, roles, permissions, bank_ids, enabled)
+		VALUES ($1, $2, $3, $4, $5, $6, '{}', '{}', true)
+	`, id, username, string(hash), displayName, domain.RoleSuperAdmin, pqArray([]string{domain.RoleSuperAdmin}))
 	if err != nil {
 		return false, "", err
 	}
@@ -331,15 +323,17 @@ func (s *Service) GetUserByUsername(username string) (*User, error) {
 	var user User
 	var passwordHash string
 	err := s.db.QueryRow(`
-		SELECT id, username, password_hash, display_name, role, enabled, created_at, updated_at
+		SELECT id, username, password_hash, display_name, role, roles, enabled, created_at, updated_at
 		FROM users WHERE username=$1
-	`, username).Scan(&user.ID, &user.Username, &passwordHash, &user.DisplayName, &user.Role, &user.Enabled, &user.CreatedAt, &user.UpdatedAt)
+	`, username).Scan(&user.ID, &user.Username, &passwordHash, &user.DisplayName, &user.Role, (*pqArrayScanner)(&user.Roles), &user.Enabled, &user.CreatedAt, &user.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	user.Roles = normalizeRoleIDs(user.Role, user.Roles)
+	user.Role = defaultRoleID(user.Role, user.Roles)
 	user.Permissions, user.DirectPermissions, user.BankIDs, err = s.effectivePermissions(user.ID)
 	if err != nil {
 		return nil, err
@@ -353,9 +347,9 @@ func (s *Service) Login(username, password string) (string, *User, error) {
 	var passwordHash string
 
 	err := s.db.QueryRow(`
-		SELECT id, username, password_hash, display_name, role, enabled, created_at, updated_at
+		SELECT id, username, password_hash, display_name, role, roles, enabled, created_at, updated_at
 		FROM users WHERE username=$1
-	`, username).Scan(&user.ID, &user.Username, &passwordHash, &user.DisplayName, &user.Role, &user.Enabled, &user.CreatedAt, &user.UpdatedAt)
+	`, username).Scan(&user.ID, &user.Username, &passwordHash, &user.DisplayName, &user.Role, (*pqArrayScanner)(&user.Roles), &user.Enabled, &user.CreatedAt, &user.UpdatedAt)
 	if err == sql.ErrNoRows {
 		_ = bcrypt.CompareHashAndPassword(s.dummyPasswordHash, []byte(password))
 		return "", nil, ErrInvalidCredentials
@@ -371,7 +365,10 @@ func (s *Service) Login(username, password string) (string, *User, error) {
 		return "", nil, ErrUserDisabled
 	}
 
-	user.Permissions, user.DirectPermissions, user.BankIDs, err = s.effectivePermissions(user.ID)
+	user.Roles = normalizeRoleIDs(user.Role, user.Roles)
+	user.Role = defaultRoleID(user.Role, user.Roles)
+	loginCtx := context.WithValue(context.Background(), RoleKey, user.Role)
+	user.Permissions, user.DirectPermissions, user.BankIDs, err = s.effectivePermissionsForRole(loginCtx, user.ID, user.Role)
 	if err != nil {
 		return "", nil, err
 	}
@@ -408,7 +405,7 @@ func (s *Service) Register(username, password, displayName string) (*User, error
 		return nil, err
 	}
 	id := fmt.Sprintf("user-%d", time.Now().UnixNano())
-	_, err = s.db.Exec(`INSERT INTO users (id, username, password_hash, display_name, role, permissions, bank_ids, enabled) VALUES ($1,$2,$3,$4,'','{}','{}',true)`,
+	_, err = s.db.Exec(`INSERT INTO users (id, username, password_hash, display_name, role, roles, permissions, bank_ids, enabled) VALUES ($1,$2,$3,$4,'','{}','{}','{}',true)`,
 		id, username, string(hash), displayName)
 	if err != nil {
 		return nil, err
@@ -451,15 +448,17 @@ func (s *Service) ValidateToken(token string) (*Claims, error) {
 func (s *Service) GetUserByID(id string) (*User, error) {
 	var user User
 	err := s.db.QueryRow(`
-		SELECT id, username, display_name, role, enabled, created_at, updated_at
+		SELECT id, username, display_name, role, roles, enabled, created_at, updated_at
 		FROM users WHERE id=$1
-	`, id).Scan(&user.ID, &user.Username, &user.DisplayName, &user.Role, &user.Enabled, &user.CreatedAt, &user.UpdatedAt)
+	`, id).Scan(&user.ID, &user.Username, &user.DisplayName, &user.Role, (*pqArrayScanner)(&user.Roles), &user.Enabled, &user.CreatedAt, &user.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	user.Roles = normalizeRoleIDs(user.Role, user.Roles)
+	user.Role = defaultRoleID(user.Role, user.Roles)
 	user.Permissions, user.DirectPermissions, user.BankIDs, err = s.effectivePermissions(user.ID)
 	if err != nil {
 		return nil, err
@@ -467,9 +466,63 @@ func (s *Service) GetUserByID(id string) (*User, error) {
 	return &user, nil
 }
 
+// GetUserByIDForRole 返回指定当前身份下的有效权限。身份必须已经由管理员
+// 挂载到账号，不能通过请求参数临时伪造。
+func (s *Service) GetUserByIDForRole(ctx context.Context, id, roleID string) (*User, error) {
+	user, err := s.GetUserByID(id)
+	if err != nil || user == nil {
+		return user, err
+	}
+	roleID = strings.TrimSpace(roleID)
+	if roleID == "" {
+		roleID = defaultRoleID(user.Role, user.Roles)
+	} else if !containsString(user.Roles, roleID) {
+		return nil, fmt.Errorf("用户未分配角色模板 %s", roleID)
+	}
+	if roleID == "" {
+		return user, nil
+	}
+	roleCtx := context.WithValue(ctx, RoleKey, roleID)
+	user.Role = roleID
+	user.Permissions, user.DirectPermissions, user.BankIDs, err = s.effectivePermissionsForRole(roleCtx, id, roleID)
+	if err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+// SwitchRole 校验并切换当前身份，通过新 JWT 让后续每个请求都使用该身份的权限。
+func (s *Service) SwitchRole(ctx context.Context, userID, roleID string) (string, *User, error) {
+	user, err := s.GetUserByIDForRole(ctx, userID, roleID)
+	if err != nil {
+		return "", nil, err
+	}
+	if user == nil || !user.Enabled {
+		return "", nil, ErrUserDisabled
+	}
+	token, err := s.generateToken(user)
+	if err != nil {
+		return "", nil, err
+	}
+	return token, user, nil
+}
+
+// GetUserDisplayName 返回用户在审核记录中的显示名。该方法供审核服务内部
+// 解析最终把关人使用，不改变任何权限判断；找不到昵称时回退到登录名。
+func (s *Service) GetUserDisplayName(_ context.Context, id string) (string, error) {
+	user, err := s.GetUserByID(id)
+	if err != nil || user == nil {
+		return "", err
+	}
+	if strings.TrimSpace(user.DisplayName) != "" {
+		return strings.TrimSpace(user.DisplayName), nil
+	}
+	return user.Username, nil
+}
+
 // ListUsers 列出所有用户（含有效权限）。
 func (s *Service) ListUsers() ([]User, error) {
-	rows, err := s.db.Query(`SELECT id, username, display_name, role, enabled, created_at, updated_at FROM users ORDER BY created_at`)
+	rows, err := s.db.Query(`SELECT id, username, display_name, role, roles, enabled, created_at, updated_at FROM users ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -477,9 +530,11 @@ func (s *Service) ListUsers() ([]User, error) {
 	var result []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.Enabled, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, (*pqArrayScanner)(&u.Roles), &u.Enabled, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
+		u.Roles = normalizeRoleIDs(u.Role, u.Roles)
+		u.Role = defaultRoleID(u.Role, u.Roles)
 		u.Permissions, u.DirectPermissions, u.BankIDs, err = s.effectivePermissions(u.ID)
 		if err != nil {
 			return nil, err
@@ -491,6 +546,12 @@ func (s *Service) ListUsers() ([]User, error) {
 
 // CreateUser 管理员创建新用户，可指定角色模板、权限点和题库范围。
 func (s *Service) CreateUser(username, password, displayName, role string, permissions, bankIDs []string) (*User, error) {
+	return s.CreateUserWithRoles(username, password, displayName, role, []string{role}, permissions, bankIDs)
+}
+
+// CreateUserWithRoles 创建可在多个岗位身份间切换的用户。role 仍作为默认身份
+// 写入旧字段，roles 保存完整身份集合，兼容历史调用方与旧数据。
+func (s *Service) CreateUserWithRoles(username, password, displayName, role string, roles, permissions, bankIDs []string) (*User, error) {
 	username = strings.TrimSpace(username)
 	if username == "" {
 		return nil, fmt.Errorf("用户名不能为空")
@@ -498,14 +559,16 @@ func (s *Service) CreateUser(username, password, displayName, role string, permi
 	if len(password) < 8 {
 		return nil, fmt.Errorf("密码至少8位")
 	}
+	roles = normalizeRoleIDs(role, roles)
+	role = defaultRoleID(role, roles)
 	// 校验角色模板存在
-	if role != "" {
-		r, err := s.GetRole(context.Background(), role)
+	for _, roleID := range roles {
+		r, err := s.GetRole(context.Background(), roleID)
 		if err != nil {
 			return nil, err
 		}
 		if r == nil {
-			return nil, fmt.Errorf("角色模板 %s 不存在", role)
+			return nil, fmt.Errorf("角色模板 %s 不存在", roleID)
 		}
 	}
 	// 校验权限点合法
@@ -529,8 +592,8 @@ func (s *Service) CreateUser(username, password, displayName, role string, permi
 		return nil, err
 	}
 	id := fmt.Sprintf("user-%d", time.Now().UnixNano())
-	_, err = s.db.Exec(`INSERT INTO users (id, username, password_hash, display_name, role, permissions, bank_ids, enabled) VALUES ($1,$2,$3,$4,$5,$6,$7,true)`,
-		id, username, string(hash), displayName, role, pqArray(permissions), pqArray(bankIDs))
+	_, err = s.db.Exec(`INSERT INTO users (id, username, password_hash, display_name, role, roles, permissions, bank_ids, enabled) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true)`,
+		id, username, string(hash), displayName, role, pqArray(roles), pqArray(permissions), pqArray(bankIDs))
 	if err != nil {
 		return nil, err
 	}
@@ -539,13 +602,20 @@ func (s *Service) CreateUser(username, password, displayName, role string, permi
 
 // UpdateUser 更新用户的角色模板、直接权限、题库范围和启用状态。
 func (s *Service) UpdateUser(userID, displayName, role string, permissions, bankIDs []string, enabled *bool) (*User, error) {
-	if role != "" {
-		r, err := s.GetRole(context.Background(), role)
+	return s.UpdateUserWithRoles(userID, displayName, role, []string{role}, permissions, bankIDs, enabled)
+}
+
+// UpdateUserWithRoles 更新用户身份集合、直接权限、题库范围和启用状态。
+func (s *Service) UpdateUserWithRoles(userID, displayName, role string, roles, permissions, bankIDs []string, enabled *bool) (*User, error) {
+	roles = normalizeRoleIDs(role, roles)
+	role = defaultRoleID(role, roles)
+	for _, roleID := range roles {
+		r, err := s.GetRole(context.Background(), roleID)
 		if err != nil {
 			return nil, err
 		}
 		if r == nil {
-			return nil, fmt.Errorf("角色模板 %s 不存在", role)
+			return nil, fmt.Errorf("角色模板 %s 不存在", roleID)
 		}
 	}
 	for _, p := range permissions {
@@ -562,9 +632,9 @@ func (s *Service) UpdateUser(userID, displayName, role string, permissions, bank
 		return nil, fmt.Errorf("显示名不能为空")
 	}
 	_, err := s.db.Exec(`
-		UPDATE users SET display_name=$1, role=$2, permissions=$3, bank_ids=$4, updated_at=NOW()
-		WHERE id=$5
-	`, displayName, role, pqArray(permissions), pqArray(bankIDs), userID)
+		UPDATE users SET display_name=$1, role=$2, roles=$3, permissions=$4, bank_ids=$5, updated_at=NOW()
+		WHERE id=$6
+	`, displayName, role, pqArray(roles), pqArray(permissions), pqArray(bankIDs), userID)
 	if err != nil {
 		return nil, err
 	}
@@ -580,10 +650,16 @@ func (s *Service) UpdateUser(userID, displayName, role string, permissions, bank
 // CreateUserAs 在调用者权限范围内创建用户。
 // 普通管理员只能创建/授权不超过自身能力的业务账号，且不能分配 admin 或 super_admin。
 func (s *Service) CreateUserAs(ctx context.Context, actorID, username, password, displayName, role string, permissions, bankIDs []string) (*User, error) {
-	if err := s.validateUserMutation(ctx, actorID, "", role, permissions, bankIDs); err != nil {
+	return s.CreateUserAsWithRoles(ctx, actorID, username, password, displayName, role, []string{role}, permissions, bankIDs)
+}
+
+func (s *Service) CreateUserAsWithRoles(ctx context.Context, actorID, username, password, displayName, role string, roles, permissions, bankIDs []string) (*User, error) {
+	roles = normalizeRoleIDs(role, roles)
+	role = defaultRoleID(role, roles)
+	if err := s.validateUserMutation(ctx, actorID, "", role, roles, permissions, bankIDs); err != nil {
 		return nil, err
 	}
-	user, err := s.CreateUser(username, password, displayName, role, permissions, bankIDs)
+	user, err := s.CreateUserWithRoles(username, password, displayName, role, roles, permissions, bankIDs)
 	if err != nil && role == domain.RoleSuperAdmin {
 		// 数据库唯一索引负责处理并发创建，这里转换为稳定的业务错误。
 		var count int
@@ -596,10 +672,16 @@ func (s *Service) CreateUserAs(ctx context.Context, actorID, username, password,
 
 // UpdateUserAs 在调用者权限范围内更新用户。
 func (s *Service) UpdateUserAs(ctx context.Context, actorID, userID, displayName, role string, permissions, bankIDs []string, enabled *bool) (*User, error) {
-	if err := s.validateUserMutation(ctx, actorID, userID, role, permissions, bankIDs); err != nil {
+	return s.UpdateUserAsWithRoles(ctx, actorID, userID, displayName, role, []string{role}, permissions, bankIDs, enabled)
+}
+
+func (s *Service) UpdateUserAsWithRoles(ctx context.Context, actorID, userID, displayName, role string, roles, permissions, bankIDs []string, enabled *bool) (*User, error) {
+	roles = normalizeRoleIDs(role, roles)
+	role = defaultRoleID(role, roles)
+	if err := s.validateUserMutation(ctx, actorID, userID, role, roles, permissions, bankIDs); err != nil {
 		return nil, err
 	}
-	return s.UpdateUser(userID, displayName, role, permissions, bankIDs, enabled)
+	return s.UpdateUserWithRoles(userID, displayName, role, roles, permissions, bankIDs, enabled)
 }
 
 // DeleteUserAs 删除普通用户。超级管理员账号和当前登录账号都不能被删除。
@@ -615,14 +697,14 @@ func (s *Service) DeleteUserAs(ctx context.Context, actorID, userID string) (*Us
 	if target == nil {
 		return nil, fmt.Errorf("用户不存在")
 	}
-	if target.ID == actorID || target.Role == domain.RoleSuperAdmin {
+	if target.ID == actorID || containsString(target.Roles, domain.RoleSuperAdmin) {
 		return nil, ErrProtectedAccount
 	}
 	isSuper, err := s.IsSuperAdmin(ctx, actorID)
 	if err != nil {
 		return nil, err
 	}
-	if target.Role == domain.RoleAdmin && !isSuper {
+	if containsString(target.Roles, domain.RoleAdmin) && !isSuper {
 		return nil, ErrSuperAdminOnly
 	}
 	if _, err := s.db.Exec(`DELETE FROM users WHERE id=$1`, userID); err != nil {
@@ -633,12 +715,15 @@ func (s *Service) DeleteUserAs(ctx context.Context, actorID, userID string) (*Us
 
 // validateUserMutation 校验“谁可以给谁授予什么”。权限管理不能只依赖前端
 // 隐藏选项，否则普通管理员可构造请求把最高权限授予新账号。
-func (s *Service) validateUserMutation(ctx context.Context, actorID, targetID, role string, permissions, bankIDs []string) error {
+
+func (s *Service) validateUserMutation(ctx context.Context, actorID, targetID, role string, roles, permissions, bankIDs []string) error {
 	actor, err := s.GetUserByID(actorID)
-	if err != nil || actor == nil || !actor.Enabled || !containsPermission(actor.Permissions, domain.PermUserManage) {
+	canManage, permErr := s.HasPermission(ctx, actorID, domain.PermUserManage)
+	if err != nil || permErr != nil || actor == nil || !actor.Enabled || !canManage {
 		return ErrPermissionDenied
 	}
-	targetRole := ""
+	roles = normalizeRoleIDs(role, roles)
+	role = defaultRoleID(role, roles)
 	if targetID != "" {
 		target, err := s.GetUserByID(targetID)
 		if err != nil {
@@ -647,8 +732,7 @@ func (s *Service) validateUserMutation(ctx context.Context, actorID, targetID, r
 		if target == nil {
 			return fmt.Errorf("用户不存在")
 		}
-		targetRole = target.Role
-		if target.ID == actorID || target.Role == domain.RoleSuperAdmin {
+		if target.ID == actorID || containsString(target.Roles, domain.RoleSuperAdmin) {
 			return ErrProtectedAccount
 		}
 	}
@@ -657,32 +741,44 @@ func (s *Service) validateUserMutation(ctx context.Context, actorID, targetID, r
 	if err != nil {
 		return err
 	}
-	if targetRole == domain.RoleAdmin && !isSuper {
-		return ErrSuperAdminOnly
+	if targetID != "" {
+		target, targetErr := s.GetUserByID(targetID)
+		if targetErr != nil {
+			return targetErr
+		}
+		if target != nil && containsString(target.Roles, domain.RoleAdmin) && !isSuper {
+			return ErrSuperAdminOnly
+		}
 	}
-	if role == domain.RoleSuperAdmin {
+	if containsString(roles, domain.RoleSuperAdmin) {
 		if !isSuper {
 			return ErrSuperAdminOnly
 		}
 		return ErrSuperAdminRoleNotAssignable
 	}
-	if role == domain.RoleAdmin && !isSuper {
+	if containsString(roles, domain.RoleAdmin) && !isSuper {
 		return ErrSuperAdminOnly
 	}
-
+	if (containsString(roles, domain.RoleAdmin) || containsString(roles, domain.RoleSuperAdmin)) && len(roles) > 1 {
+		return fmt.Errorf("管理员身份不能与命题老师或审题老师同时挂载")
+	}
 	for _, p := range permissions {
 		if !domain.IsValidPermission(p) {
 			return fmt.Errorf("无效的权限点: %s", p)
 		}
-		if p == domain.PermRoleManage && role != domain.RoleSuperAdmin {
+		if p == domain.PermRoleManage && !containsString(roles, domain.RoleSuperAdmin) {
 			return ErrSuperAdminOnly
 		}
 	}
-	rolePerms, err := s.permissionsForRole(role)
-	if err != nil {
-		return err
+	var rolePerms []string
+	for _, roleID := range roles {
+		perms, roleErr := s.permissionsForRole(roleID)
+		if roleErr != nil {
+			return roleErr
+		}
+		rolePerms = append(rolePerms, perms...)
 	}
-	if role != "" && role != domain.RoleSuperAdmin && containsPermission(rolePerms, domain.PermRoleManage) {
+	if !containsString(roles, domain.RoleSuperAdmin) && containsPermission(rolePerms, domain.PermRoleManage) {
 		return ErrSuperAdminOnly
 	}
 	if !isSuper {
@@ -756,23 +852,37 @@ func (s *Service) UpdateDisplayName(userID, displayName string) error {
 
 // ===== 权限 =====
 
-// effectivePermissions 计算用户有效权限：角色模板权限 ∪ 直接分配权限。
-// 同时返回直接分配的权限点和题库范围。
+// effectivePermissions 计算用户所有已分配身份的权限并集，供用户管理、审核人
+// 候选和登录响应展示使用。HTTP 请求会通过 context 中的当前角色调用
+// effectivePermissionsForRole，避免切换身份后仍继承另一岗位的菜单与写权限。
 func (s *Service) effectivePermissions(userID string) (perms, directPerms, bankIDs []string, err error) {
+	return s.effectivePermissionsForRole(context.Background(), userID, "")
+}
+
+func (s *Service) effectivePermissionsForRole(ctx context.Context, userID, activeRole string) (perms, directPerms, bankIDs []string, err error) {
 	permSet := make(map[string]bool)
-	var roleID string
-	err = s.db.QueryRow(`SELECT role, permissions, bank_ids FROM users WHERE id=$1`, userID).Scan(&roleID, (*pqArrayScanner)(&directPerms), (*pqArrayScanner)(&bankIDs))
+	var defaultRole string
+	var roleIDs []string
+	err = s.db.QueryRowContext(ctx, `SELECT role, roles, permissions, bank_ids FROM users WHERE id=$1`, userID).
+		Scan(&defaultRole, (*pqArrayScanner)(&roleIDs), (*pqArrayScanner)(&directPerms), (*pqArrayScanner)(&bankIDs))
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil, nil, nil
 		}
 		return nil, nil, nil, err
 	}
-	if roleID != "" {
+	roleIDs = normalizeRoleIDs(defaultRole, roleIDs)
+	if activeRole != "" {
+		if !containsString(roleIDs, activeRole) {
+			return nil, nil, nil, fmt.Errorf("用户未分配角色模板 %s", activeRole)
+		}
+		roleIDs = []string{activeRole}
+	}
+	for _, roleID := range roleIDs {
 		var rolePerms []string
-		err := s.db.QueryRow(`SELECT permissions FROM roles WHERE id=$1`, roleID).Scan((*pqArrayScanner)(&rolePerms))
-		if err != nil && err != sql.ErrNoRows {
-			return nil, nil, nil, err
+		roleErr := s.db.QueryRowContext(ctx, `SELECT permissions FROM roles WHERE id=$1`, roleID).Scan((*pqArrayScanner)(&rolePerms))
+		if roleErr != nil && roleErr != sql.ErrNoRows {
+			return nil, nil, nil, roleErr
 		}
 		for _, p := range rolePerms {
 			permSet[p] = true
@@ -782,28 +892,66 @@ func (s *Service) effectivePermissions(userID string) (perms, directPerms, bankI
 		permSet[p] = true
 	}
 	// 角色模板管理是超级管理员专属能力。即使旧库或历史直接授权中残留
-	// role:manage，非 super_admin 也不能通过有效权限或前端菜单获得它。
-	if roleID != domain.RoleSuperAdmin {
+	// role:manage，非当前 super_admin 身份也不能通过有效权限获得它。
+	if !containsString(roleIDs, domain.RoleSuperAdmin) {
 		delete(permSet, domain.PermRoleManage)
 	}
 	perms = make([]string, 0, len(permSet))
 	for p := range permSet {
 		perms = append(perms, p)
 	}
+	sort.Strings(perms)
 	return perms, directPerms, bankIDs, nil
+}
+
+func normalizeRoleIDs(defaultRole string, roles []string) []string {
+	seen := make(map[string]bool, len(roles)+1)
+	result := make([]string, 0, len(roles)+1)
+	for _, roleID := range append([]string{strings.TrimSpace(defaultRole)}, roles...) {
+		roleID = strings.TrimSpace(roleID)
+		if roleID == "" || seen[roleID] {
+			continue
+		}
+		seen[roleID] = true
+		result = append(result, roleID)
+	}
+	return result
+}
+
+func defaultRoleID(defaultRole string, roles []string) string {
+	if roleID := strings.TrimSpace(defaultRole); roleID != "" && containsString(roles, roleID) {
+		return roleID
+	}
+	if len(roles) > 0 {
+		return roles[0]
+	}
+	return ""
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 // IsSuperAdmin 判断用户当前是否挂载唯一的超级管理员角色。
 // 不依据权限并集判断，防止普通角色或直接权限伪造最高身份。
 func (s *Service) IsSuperAdmin(ctx context.Context, userID string) (bool, error) {
+	if activeRole := GetRole(ctx); activeRole != "" {
+		return activeRole == domain.RoleSuperAdmin, nil
+	}
 	var role string
-	if err := s.db.QueryRowContext(ctx, `SELECT role FROM users WHERE id=$1`, userID).Scan(&role); err != nil {
+	var roles []string
+	if err := s.db.QueryRowContext(ctx, `SELECT role, roles FROM users WHERE id=$1`, userID).Scan(&role, (*pqArrayScanner)(&roles)); err != nil {
 		if err == sql.ErrNoRows {
 			return false, nil
 		}
 		return false, err
 	}
-	return domain.IsSuperAdminRole(role), nil
+	return containsString(normalizeRoleIDs(role, roles), domain.RoleSuperAdmin), nil
 }
 
 // HasPermission 检查用户是否拥有指定权限（不区分题库范围）。
@@ -811,7 +959,7 @@ func (s *Service) HasPermission(ctx context.Context, userID, perm string) (bool,
 	if perm == domain.PermRoleManage {
 		return s.IsSuperAdmin(ctx, userID)
 	}
-	perms, _, _, err := s.effectivePermissions(userID)
+	perms, _, _, err := s.effectivePermissionsForRole(ctx, userID, GetRole(ctx))
 	if err != nil {
 		return false, err
 	}
@@ -828,43 +976,14 @@ func (s *Service) HasPermission(ctx context.Context, userID, perm string) (bool,
 // bank_ids 是用户级安全边界，对角色继承权限和直接权限一并生效，避免“角色有权限”
 // 绕过管理员给该用户设置的专业题库范围。
 func (s *Service) HasPermissionInBank(ctx context.Context, userID, perm, bankID string) (bool, error) {
-	var directPerms, bankIDs []string
-	var roleID string
-	if err := s.db.QueryRow(`SELECT role, permissions, bank_ids FROM users WHERE id=$1`, userID).Scan(&roleID, (*pqArrayScanner)(&directPerms), (*pqArrayScanner)(&bankIDs)); err != nil {
-		if err == sql.ErrNoRows {
-			return false, nil
-		}
+	scope, fullScope, hasPerm, err := s.GetBankScope(ctx, userID, perm)
+	if err != nil || !hasPerm {
 		return false, err
 	}
-	if perm == domain.PermRoleManage && roleID != domain.RoleSuperAdmin {
-		return false, nil
-	}
-	hasPerm := false
-	// 角色模板与直接权限先合并判断动作权限。
-	if roleID != "" {
-		var rolePerms []string
-		if err := s.db.QueryRow(`SELECT permissions FROM roles WHERE id=$1`, roleID).Scan((*pqArrayScanner)(&rolePerms)); err == nil {
-			for _, p := range rolePerms {
-				if p == perm {
-					hasPerm = true
-					break
-				}
-			}
-		}
-	}
-	for _, p := range directPerms {
-		if p == perm {
-			hasPerm = true
-			break
-		}
-	}
-	if !hasPerm {
-		return false, nil
-	}
-	if len(bankIDs) == 0 {
+	if fullScope {
 		return true, nil
 	}
-	for _, b := range bankIDs {
+	for _, b := range scope {
 		if b == bankID {
 			return true, nil
 		}
@@ -875,37 +994,14 @@ func (s *Service) HasPermissionInBank(ctx context.Context, userID, perm, bankID 
 // GetBankScope 获取用户对某权限的题库范围。
 // 返回：scope=题库ID列表（fullScope=true 表示全部题库）；hasPerm 表示是否拥有该权限。
 func (s *Service) GetBankScope(ctx context.Context, userID, perm string) (scope []string, fullScope bool, hasPerm bool, err error) {
-	var directPerms, bankIDs []string
-	var roleID string
-	if err := s.db.QueryRow(`SELECT role, permissions, bank_ids FROM users WHERE id=$1`, userID).Scan(&roleID, (*pqArrayScanner)(&directPerms), (*pqArrayScanner)(&bankIDs)); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, false, false, nil
-		}
-		return nil, false, false, err
-	}
-	if perm == domain.PermRoleManage && roleID != domain.RoleSuperAdmin {
+	if perm == domain.PermRoleManage && GetRole(ctx) != "" && GetRole(ctx) != domain.RoleSuperAdmin {
 		return nil, false, false, nil
 	}
-	hasPerm = false
-	// 角色模板与直接权限先合并；用户级 bank_ids 随后作为统一资源边界。
-	if roleID != "" {
-		var rolePerms []string
-		if err := s.db.QueryRow(`SELECT permissions FROM roles WHERE id=$1`, roleID).Scan((*pqArrayScanner)(&rolePerms)); err == nil {
-			for _, p := range rolePerms {
-				if p == perm {
-					hasPerm = true
-					break
-				}
-			}
-		}
+	perms, _, bankIDs, permissionErr := s.effectivePermissionsForRole(ctx, userID, GetRole(ctx))
+	if permissionErr != nil {
+		return nil, false, false, permissionErr
 	}
-	for _, p := range directPerms {
-		if p == perm {
-			hasPerm = true
-			break
-		}
-	}
-	if !hasPerm {
+	if !containsString(perms, perm) {
 		return nil, false, false, nil
 	}
 	if len(bankIDs) == 0 {
@@ -1063,7 +1159,11 @@ func (s *Service) requireActiveSuperAdmin(ctx context.Context, actorID string) e
 	if err != nil {
 		return err
 	}
-	if user == nil || !user.Enabled || !domain.IsSuperAdminRole(user.Role) {
+	isSuper, superErr := s.IsSuperAdmin(ctx, actorID)
+	if superErr != nil {
+		return superErr
+	}
+	if user == nil || !user.Enabled || !isSuper {
 		return ErrSuperAdminOnly
 	}
 	return nil
@@ -1111,7 +1211,7 @@ func (s *Service) DeleteRole(ctx context.Context, id string) error {
 		return ErrProtectedRole
 	}
 	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE role=$1`, id).Scan(&count); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE role=$1 OR $1=ANY(roles)`, id).Scan(&count); err != nil {
 		return err
 	}
 	if count > 0 {

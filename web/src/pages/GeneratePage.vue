@@ -27,6 +27,7 @@ const accessNotice = ref("");
 const loading = ref(false);
 const progressMsg = ref("");
 const stats = ref({ question_count: 0, knowledge_count: 0 });
+const selectedKnowledgeVersion = ref(null);
 const generationRunId = ref("");
 const generationQuestionIds = ref([]);
 const generationStartedAt = ref(0);
@@ -39,6 +40,42 @@ let clockTimer = null;
 let recoveryTimer = null;
 let recoveringRun = false;
 let workspaceReady = false;
+
+// 生成设置中的数量必须和当前用户能看到的范围一致：
+// tier_counts 是正式/待审核/淘汰三层的独立计数，question_count 仅是旧的待审核层字段。
+const personalQuestionCount = computed(() => {
+  const counts = stats.value?.tier_counts;
+  if (counts && Object.keys(counts).length) {
+    return Object.values(counts).reduce((sum, value) => sum + (Number(value) || 0), 0);
+  }
+  return Number(stats.value?.question_count) || 0;
+});
+
+const personalTierSummary = computed(() => {
+  const counts = stats.value?.tier_counts || {};
+  return [
+    ["formal", "正式"],
+    ["working", "待审核"],
+    ["eliminated", "淘汰"],
+  ]
+    .filter(([key]) => Object.prototype.hasOwnProperty.call(counts, key))
+    .map(([key, label]) => `${label} ${Number(counts[key]) || 0}`)
+    .join(" · ");
+});
+
+const currentKnowledgeCount = computed(() => {
+  const versionCount = Number(selectedKnowledgeVersion.value?.point_count);
+  if (Number.isFinite(versionCount)) return versionCount;
+  return Number(stats.value?.kp_version?.total ?? stats.value?.knowledge_count) || 0;
+});
+
+const currentKnowledgeVersionName = computed(() => (
+  selectedKnowledgeVersion.value?.name || stats.value?.kp_version?.version_name || ""
+));
+
+function handleKnowledgeVersionChange(payload) {
+  selectedKnowledgeVersion.value = payload?.version || null;
+}
 
 // 生成结果
 const generatedQuestions = ref([]);
@@ -493,6 +530,7 @@ onBeforeUnmount(() => {
           <h2>题目预览</h2>
           <small v-if="answer">正确答案：{{ answer }}</small>
           <AICheckScoreButton v-if="currentQuestionId" class="preview-ai-score" :question-id="currentQuestionId" />
+          <RouterLink class="ghost-button preview-submit-link" to="/new-questions">进入新题提交审核</RouterLink>
         </div>
         <template v-if="stem">
           <p class="readonly-stem">{{ stem }}</p>
@@ -577,21 +615,23 @@ onBeforeUnmount(() => {
       <section class="panel sticky-panel">
         <h2>生成设置</h2>
 
-        <div v-if="hasPerm('stats:view')" class="metric-row">
+        <div v-if="hasPerm('stats:view')" class="metric-row generation-metrics">
           <div>
-            <span>题库题量</span>
-            <strong>{{ stats.question_count }}道</strong>
+            <span>个人题库</span>
+            <strong>{{ personalQuestionCount }}道</strong>
+            <small v-if="personalTierSummary">{{ personalTierSummary }}</small>
           </div>
           <div>
-            <span>知识点数</span>
-            <strong>{{ stats.knowledge_count }}个</strong>
+            <span>当前大纲知识点</span>
+            <strong>{{ currentKnowledgeCount }}个</strong>
+            <small v-if="currentKnowledgeVersionName" :title="currentKnowledgeVersionName">{{ currentKnowledgeVersionName }}</small>
           </div>
         </div>
 
         <!-- 知识点选择器（精确+模糊搜索，单选） -->
         <div class="kp-selector">
           <label class="field-label">选择知识点</label>
-          <KnowledgePointPicker v-model="selectedKPs" :multiple="false" placeholder="搜索知识点、大纲代码、专业...（支持精确筛选与模糊搜索）" />
+          <KnowledgePointPicker v-model="selectedKPs" :multiple="false" placeholder="搜索知识点、大纲代码、专业...（支持精确筛选与模糊搜索）" @version-change="handleKnowledgeVersionChange" />
         </div>
 
         <label class="field">
@@ -687,6 +727,25 @@ onBeforeUnmount(() => {
   font-size: 18px;
   line-height: 1;
   cursor: pointer;
+}
+
+.generation-metrics {
+  align-items: start;
+}
+
+.generation-metrics > div {
+  min-width: 0;
+}
+
+.generation-metrics small {
+  display: block;
+  overflow: hidden;
+  margin-top: 4px;
+  color: #8a98a8;
+  font-size: 10px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 知识点选择器 */

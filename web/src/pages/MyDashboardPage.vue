@@ -16,9 +16,13 @@ const counts = ref({
   working: 0,
   eliminated: 0,
   myPendingShares: 0,
+  generated: 0,
+  reviewed: 0,
+  newQuestions: 0,
 });
 
 const todoEntries = computed(() => [
+  { key: "newQuestions", label: "待提交审核", count: counts.value.newQuestions, to: "/new-questions", visible: hasPerm("review:submit") || hasPerm("question:generate") },
   { key: "review", label: "待我审核", count: counts.value.review, to: "/review", visible: hasPerm("review:do") },
   { key: "decisions", label: "待我决断", count: counts.value.decisions, to: "/review-decisions", visible: hasPerm("review:final") },
   { key: "revisions", label: "待我修改", count: counts.value.revisions, to: "/my-revisions", visible: hasPerm("question:edit") },
@@ -47,6 +51,9 @@ async function loadDashboard() {
     working: 0,
     eliminated: 0,
     myPendingShares: 0,
+    generated: 0,
+    reviewed: 0,
+    newQuestions: 0,
   };
 
   const jobs = [];
@@ -57,6 +64,12 @@ async function loadDashboard() {
       if (ticket === loadTicket) partialError.value = true;
     }),
   );
+
+  addJob(api.mySummary, (data) => {
+    counts.value.generated = data.generated_count || 0;
+    counts.value.reviewed = data.reviewed_count || 0;
+    counts.value.newQuestions = data.new_questions_count || 0;
+  });
 
   if (hasPerm("review:do")) {
     addJob(() => api.myTasks(1, 1), (data) => { counts.value.review = data.total ?? (data.tasks || []).length; });
@@ -111,7 +124,7 @@ onMounted(loadDashboard);
       <section class="panel todo-panel">
         <div class="section-heading">
           <span class="dot blue"></span>
-          <h2>我的待办</h2>
+          <h2>任务提醒</h2>
           <small>{{ todoTotal }} 项</small>
           <button class="refresh-button" type="button" :disabled="loading" @click="loadDashboard">
             {{ loading ? "刷新中" : "刷新" }}
@@ -153,6 +166,15 @@ onMounted(loadDashboard);
         <div v-else class="compact-empty">暂无题库权限</div>
       </section>
     </div>
+
+    <section class="panel achievement-panel">
+      <div class="section-heading"><span class="dot teal"></span><h2>我的累计数据</h2><small>当前账号</small></div>
+      <div class="achievement-grid">
+        <div class="achievement-card generated"><span>我已出题</span><strong>{{ loading ? "—" : counts.generated }}</strong><small>累计生成题目</small></div>
+        <div class="achievement-card reviewed"><span>我已审核</span><strong>{{ loading ? "—" : counts.reviewed }}</strong><small>累计提交审核意见</small></div>
+        <RouterLink class="achievement-card pending" to="/new-questions"><span>待提交审核</span><strong>{{ loading ? "—" : counts.newQuestions }}</strong><small>进入新题提交页 →</small></RouterLink>
+      </div>
+    </section>
 
     <p v-if="partialError" class="load-notice" role="status">部分数据暂不可用</p>
   </div>
@@ -356,6 +378,17 @@ onMounted(loadDashboard);
   font-weight: 650;
 }
 
+.achievement-panel { border-color: #d7e8e0; background: linear-gradient(135deg, #ffffff, #f5fbf8); }
+.achievement-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.achievement-card { display: grid; gap: 7px; min-width: 0; padding: 14px; border: 1px solid #e0e9e4; border-radius: 8px; color: #3d5149; background: rgba(255, 255, 255, .85); text-decoration: none; }
+.achievement-card:hover { border-color: #9fc4b2; box-shadow: 0 5px 16px rgba(35, 61, 51, .08); }
+.achievement-card span { font-size: 12px; font-weight: 650; }
+.achievement-card strong { color: #234b3b; font-size: 28px; line-height: 1; }
+.achievement-card small { color: #87958e; font-size: 11px; }
+.achievement-card.generated { border-top: 3px solid #4c8a70; }
+.achievement-card.reviewed { border-top: 3px solid #5485ae; }
+.achievement-card.pending { border-top: 3px solid #d58b32; }
+
 .compact-empty {
   display: grid;
   min-height: 112px;
@@ -387,6 +420,10 @@ onMounted(loadDashboard);
   }
 
   .bank-metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .achievement-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 

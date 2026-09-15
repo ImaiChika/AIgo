@@ -102,11 +102,7 @@ func TestExpertReadsKnowledgeAndOwnReviewResultsButNotStats(t *testing.T) {
 	if err := json.Unmarshal(me.Body.Bytes(), &profile); err != nil {
 		t.Fatal(err)
 	}
-	for _, permission := range []string{
-		domain.PermQuestionView, domain.PermQuestionEdit,
-		domain.PermQuestionGenerate, domain.PermQuestionShare, domain.PermReviewDo,
-		domain.PermReviewResults,
-	} {
+	for _, permission := range []string{domain.PermQuestionView, domain.PermReviewDo} {
 		if !slices.Contains(profile.Permissions, permission) {
 			t.Fatalf("expert missing personal workspace permission %s: %v", permission, profile.Permissions)
 		}
@@ -114,9 +110,9 @@ func TestExpertReadsKnowledgeAndOwnReviewResultsButNotStats(t *testing.T) {
 	if slices.Contains(profile.Permissions, domain.PermBatchRun) {
 		t.Fatalf("expert 默认不应拥有批量推理权限: %v", profile.Permissions)
 	}
-	// 个人范围审核记录是出题人跟踪本人题目结论与评语的基础能力，应可访问（空列表）。
-	if response := serveAuthJSON(t, handler, http.MethodGet, "/api/review/results?scope=personal", expert, "198.51.100.21", nil); response.Code != http.StatusOK {
-		t.Fatalf("expert should access personal review results: status=%d body=%s", response.Code, response.Body.String())
+	// 审核记录汇总属于独立管理能力，审题老师只处理分配到自己的任务。
+	if response := serveAuthJSON(t, handler, http.MethodGet, "/api/review/results?scope=personal", expert, "198.51.100.21", nil); response.Code != http.StatusForbidden {
+		t.Fatalf("expert should not access review results summary: status=%d body=%s", response.Code, response.Body.String())
 	}
 	if response := serveAuthJSON(t, handler, http.MethodGet, "/api/review/results?scope=global", expert, "198.51.100.21", nil); response.Code != http.StatusForbidden {
 		t.Fatalf("expert should not access global review results: status=%d body=%s", response.Code, response.Body.String())

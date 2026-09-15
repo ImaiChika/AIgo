@@ -21,20 +21,22 @@ import ShareRequestsPage from "./pages/ShareRequestsPage.vue";
 import AIProviderPage from "./pages/AIProviderPage.vue";
 import MyDashboardPage from "./pages/MyDashboardPage.vue";
 import PersonalSettingsPage from "./pages/PersonalSettingsPage.vue";
+import NewQuestionsPage from "./pages/NewQuestionsPage.vue";
 
 const routes = [
   { path: "/login", component: LoginPage, meta: { public: true } },
   { path: "/", redirect: "/my" },
-  { path: "/my", component: MyDashboardPage, meta: { title: "我的工作台" } },
+  { path: "/my", component: MyDashboardPage, meta: { title: "我的数据" } },
   { path: "/settings", component: PersonalSettingsPage, meta: { title: "个人设置" } },
   { path: "/generate", name: "generation", component: GenerationWorkspace, children: [
     { path: "", name: "generation-single", component: GeneratePage, meta: { title: "试题生成", perm: "question:generate" } },
     { path: "batch", name: "generation-batch", component: BatchPage, meta: { title: "批量推理", perm: "batch:run" } },
   ] },
-  { path: "/knowledge", component: KnowledgePage, meta: { title: "知识点" } },
+  { path: "/new-questions", component: NewQuestionsPage, meta: { title: "新题修改与提交审核", perm: ["review:submit", "question:generate"] } },
+  { path: "/knowledge", component: KnowledgePage, meta: { title: "考试大纲" } },
   { path: "/review", component: ReviewPage, meta: { title: "待审任务", perm: "review:do" } },
   { path: "/my-revisions", component: MyRevisionsPage, meta: { title: "待我修改", perm: "question:edit" } },
-  { path: "/share-requests", component: ShareRequestsPage, meta: { title: "全局库分享", perm: ["question:share", "question:share_review"] } },
+  { path: "/share-requests", component: ShareRequestsPage, meta: { title: "全局库分享审核", perm: ["question:share", "question:share_review"] } },
   { path: "/review-decisions", component: ReviewDecisionsPage, meta: { title: "最终决断", perm: "review:final" } },
   { path: "/review-results", component: ReviewResultsPage, meta: { title: "审核记录", perm: "review:view_results" } },
   { path: "/bank", component: BankPage, meta: { title: "题库", perm: ["question:view", "question:view_formal", "question:view_eliminated"] } },
@@ -64,7 +66,7 @@ router.beforeEach((to, from, next) => {
       return;
     }
     if (!permissionAllowed(to.meta.perm, hasPerm)) {
-      next("/my"); // 无权限重定向到所有登录用户都可访问的个人工作台
+      next("/my"); // 无权限重定向到所有登录用户都可访问的个人数据页
       return;
     }
     next();

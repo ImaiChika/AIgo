@@ -73,12 +73,76 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // 需要 Bearer token，从 token 中解析用户 ID 后查询数据库。
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	userID := auth.GetUserID(r.Context()) // 从 context 获取中间件注入的用户 ID
-	user, err := s.authSvc.GetUserByID(userID)
+	user, err := s.authSvc.GetUserByIDForRole(r.Context(), userID, auth.GetRole(r.Context()))
 	if err != nil || user == nil {
 		writeError(w, 401, "用户不存在")
 		return
 	}
 	writeJSON(w, 200, user)
+}
+
+// handleMySummary 返回个人中心需要的轻量累计指标，不暴露题目内容或他人数据。
+func (s *Server) handleMySummary(w http.ResponseWriter, r *http.Request) {
+	userID := auth.GetUserID(r.Context())
+	questions, err := s.questionStore.ListQuestions(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取个人数据失败")
+		return
+	}
+	generated, newQuestions := 0, 0
+	for _, question := range questions {
+		if question.OwnerID != userID {
+			continue
+		}
+		generated++
+		if question.Status == domain.StatusAIReviewed {
+			newQuestions++
+		}
+	}
+	reviewed := 0
+	if s.reviewSvc != nil {
+		if tasks, taskErr := s.reviewSvc.ListAllTasks(r.Context()); taskErr == nil {
+			for _, task := range tasks {
+				records, recordErr := s.reviewSvc.ListRecords(r.Context(), task.ID)
+				if recordErr != nil {
+					continue
+				}
+				for _, record := range records {
+					if record.ExpertID == userID {
+						reviewed++
+					}
+				}
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]int{
+		"generated_count":     generated,
+		"reviewed_count":      reviewed,
+		"new_questions_count": newQuestions,
+	})
+}
+
+// handleSwitchRole 切换当前账号的工作身份。角色集合由管理员维护，服务端
+// 重新签发 JWT，后续接口的权限只取所选身份及用户直接授权。
+func (s *Server) handleSwitchRole(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Role string `json:"role"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	role := strings.TrimSpace(req.Role)
+	if role == "" {
+		writeError(w, http.StatusBadRequest, "请选择要切换的身份")
+		return
+	}
+	token, user, err := s.authSvc.SwitchRole(r.Context(), auth.GetUserID(r.Context()), role)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"token": token, "user": user})
 }
 
 // handleUpdateProfile 修改当前用户的昵称。
@@ -102,7 +166,7 @@ func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 返回更新后的完整用户信息
-	user, _ := s.authSvc.GetUserByID(userID)
+	user, _ := s.authSvc.GetUserByIDForRole(r.Context(), userID, auth.GetRole(r.Context()))
 	writeJSON(w, 200, user)
 }
 
@@ -222,6 +286,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		Password    string   `json:"password"`
 		DisplayName string   `json:"display_name"`
 		Role        string   `json:"role"`
+		Roles       []string `json:"roles"`
 		Permissions []string `json:"permissions"`
 		BankIDs     []string `json:"bank_ids"`
 	}
@@ -229,7 +294,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "请求格式错误")
 		return
 	}
-	user, err := s.authSvc.CreateUserAs(r.Context(), auth.GetUserID(r.Context()), req.Username, req.Password, req.DisplayName, req.Role, req.Permissions, req.BankIDs)
+	user, err := s.authSvc.CreateUserAsWithRoles(r.Context(), auth.GetUserID(r.Context()), req.Username, req.Password, req.DisplayName, req.Role, req.Roles, req.Permissions, req.BankIDs)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, auth.ErrSuperAdminOnly) || errors.Is(err, auth.ErrSuperAdminExists) || errors.Is(err, auth.ErrSuperAdminRoleNotAssignable) {
@@ -250,6 +315,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DisplayName string   `json:"display_name"`
 		Role        string   `json:"role"`
+		Roles       []string `json:"roles"`
 		Permissions []string `json:"permissions"`
 		BankIDs     []string `json:"bank_ids"`
 		Enabled     *bool    `json:"enabled"`
@@ -258,7 +324,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "请求格式错误")
 		return
 	}
-	user, err := s.authSvc.UpdateUserAs(r.Context(), auth.GetUserID(r.Context()), userID, req.DisplayName, req.Role, req.Permissions, req.BankIDs, req.Enabled)
+	user, err := s.authSvc.UpdateUserAsWithRoles(r.Context(), auth.GetUserID(r.Context()), userID, req.DisplayName, req.Role, req.Roles, req.Permissions, req.BankIDs, req.Enabled)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, auth.ErrSuperAdminOnly) || errors.Is(err, auth.ErrProtectedAccount) || errors.Is(err, auth.ErrSuperAdminRoleNotAssignable) {
@@ -463,7 +529,7 @@ func (s *Server) handleListBanks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"banks": result, "total": len(result)})
 }
 
-// handleCreateBank 创建题库。指定专业范围时自动归纳存量未分类题目。
+// handleCreateBank 创建题库。指定专业范围时自动归纳存量待归类题目。
 func (s *Server) handleCreateBank(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID          string   `json:"id"`
@@ -534,7 +600,7 @@ func (s *Server) handleUpdateBank(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, bank)
 }
 
-// handleDeleteBank 删除题库（题目保留为未分类）。
+// handleDeleteBank 删除题库（题目解除分类子题库归属，进入待归类状态）。
 func (s *Server) handleDeleteBank(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	users, err := s.authSvc.ListUsers()
@@ -580,7 +646,7 @@ func (s *Server) handleDeleteBank(w http.ResponseWriter, r *http.Request) {
 			return nil
 		},
 		func(txCtx context.Context) error {
-			return s.auditSvc.Log(txCtx, "", "bank_delete", actor, "删除题库（题目自动归未分类）")
+			return s.auditSvc.Log(txCtx, "", "bank_delete", actor, "删除题库（题目解除分类子题库归属，进入待归类状态）")
 		})
 	if !ok {
 		return
@@ -595,7 +661,7 @@ func (s *Server) handleListBankQuestions(w http.ResponseWriter, r *http.Request)
 	s.respondPagedQuestions(w, r, filter)
 }
 
-// handleCollectBank 重新归纳：把未分类且专业匹配的题目自动归入题库。
+// handleCollectBank 重新归纳：把待归类且专业匹配的题目自动归入题库。
 func (s *Server) handleCollectBank(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	bank, err := s.bankSvc.GetBank(r.Context(), id)

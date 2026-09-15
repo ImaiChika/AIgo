@@ -101,7 +101,7 @@ onMounted(load);
     <section class="panel share-hero">
       <div>
         <span class="eyebrow">PERSONAL → GLOBAL</span>
-        <h2>{{ canReview ? "全局题库分享审批" : "我的全局库申请" }}</h2>
+        <h2>{{ canReview ? "全局库分享审核" : "我的全局库分享申请" }}</h2>
         <p v-if="canReview">个人正式题目先在所属用户的审核流程中定稿，再由管理员一次审批进入全局正式题库。待审批申请构成全局待审核库，被拒绝的申请留在全局淘汰库。</p>
         <p v-else>只有本人已通过专家审核的正式题目可以申请分享。每道题只能提交一次，审批结果会进入全局题库对应分层。</p>
       </div>

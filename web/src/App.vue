@@ -1,7 +1,8 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { useRouter, useRoute } from "vue-router";
-import { currentUser, hasPerm, roleName, clearAuth } from "./auth.js";
+import { currentUser, hasPerm, roleName, clearAuth, setAuth } from "./auth.js";
+import { api } from "./api.js";
 import SidebarNavigation from "./components/SidebarNavigation.vue";
 import { visibleNavigation, navigationItemActive } from "./navigation.js";
 import "./navigation-shell.css";
@@ -46,6 +47,24 @@ function logout() {
 }
 
 const isLoginPage = computed(() => route.path === "/login");
+const switchRoleBusy = ref(false);
+const switchRoleError = ref("");
+const availableRoles = computed(() => (currentUser.value?.roles || []).map((id) => ({ id, name: roleName(id) })));
+
+async function switchRole(role) {
+  if (!role || role === currentUser.value?.role || switchRoleBusy.value) return;
+  switchRoleBusy.value = true;
+  switchRoleError.value = "";
+  try {
+    const data = await api.switchRole(role);
+    setAuth(data.token, data.user);
+    await router.push("/my");
+  } catch (error) {
+    switchRoleError.value = error.message || "身份切换失败";
+  } finally {
+    switchRoleBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -69,8 +88,15 @@ const isLoginPage = computed(() => route.path === "/login");
           <strong>{{ currentUser.display_name || currentUser.username }}</strong>
           <span>{{ roleName(currentUser.role) }}</span>
         </div>
+        <label v-if="availableRoles.length > 1" class="role-switch" title="切换工作身份">
+          <span class="sr-only">切换工作身份</span>
+          <select :value="currentUser.role" :disabled="switchRoleBusy" @change="switchRole($event.target.value)">
+            <option v-for="role in availableRoles" :key="role.id" :value="role.id">{{ role.name }}</option>
+          </select>
+        </label>
         <button class="logout-btn" type="button" @click="logout" title="退出登录">退出</button>
       </div>
+      <p v-if="switchRoleError" class="role-switch-error" role="alert">{{ switchRoleError }}</p>
     </aside>
 
     <main class="workspace" :inert="mobileNavigationOpen">
@@ -97,6 +123,7 @@ const isLoginPage = computed(() => route.path === "/login");
   padding: 12px;
   border-top: 1px solid #e5ebf3;
   margin-top: auto;
+  position: relative;
 }
 
 .user-avatar {
@@ -145,5 +172,37 @@ const isLoginPage = computed(() => route.path === "/login");
 
 .logout-btn:hover {
   background: #fff0f0;
+}
+
+.role-switch select {
+  width: 76px;
+  height: 30px;
+  border: 1px solid #d8e3f0;
+  border-radius: 6px;
+  background: #fff;
+  color: #35506a;
+  font-size: 11px;
+}
+
+.role-switch-error {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 4px;
+  margin: 0;
+  color: #b53d52;
+  font-size: 11px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 </style>

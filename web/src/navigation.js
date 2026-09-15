@@ -8,7 +8,7 @@ export function permissionAllowed(permission, hasPermission) {
 // 命题工作区的两个子页面分别受各自权限保护：
 // - 只有单题权限：进入单题页；误打开批量地址时回到单题页并提示原因。
 // - 只有批量权限：保留命题工作区入口，直接进入批量页。
-// - 两者都没有：回到登录后所有用户可访问的个人工作台。
+// - 两者都没有：回到登录后所有用户可访问的个人数据页。
 export function generationRouteRedirect(routeName, hasPermission) {
   const canGenerate = hasPermission("question:generate");
   const canBatch = hasPermission("batch:run");
@@ -26,16 +26,17 @@ export function generationRouteRedirect(routeName, hasPermission) {
 
 export const navigationGroups = [
   { id: "personal", label: "个人中心", icon: "M10 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z M3 21a7 7 0 0 1 14 0", items: [
-    { id: "my-dashboard", label: "我的工作台", path: "/my" },
+    { id: "my-dashboard", label: "我的数据", path: "/my" },
     { id: "personal-settings", label: "个人设置", path: "/settings" },
   ] },
   { id: "data", label: "基础数据", icon: "M3 4h6l2 2h10v14H3Z M3 10h18", items: [
-    { id: "knowledge", label: "知识点", path: "/knowledge" },
+    { id: "knowledge", label: "考试大纲", path: "/knowledge" },
   ] },
   { id: "authoring", label: "命题管理", icon: "M14 4l6 6M4 20l4-1L20 7l-3-3L5 16Z M13 20h7", items: [
     { id: "generate", label: "试题生成", path: "/generate", activePaths: ["/generate", "/generate/batch", "/batch"], permission: ["question:generate", "batch:run"] },
+    { id: "new-questions", label: "新题修改与提交审核", path: "/new-questions", permission: ["review:submit", "question:generate"] },
     { id: "my-revisions", label: "待我修改", path: "/my-revisions", permission: "question:edit" },
-    { id: "share-requests", label: "全局库分享", path: "/share-requests", permission: ["question:share", "question:share_review"] },
+    { id: "share-requests", label: "全局库分享审核", path: "/share-requests", permission: ["question:share", "question:share_review"] },
   ] },
   { id: "review", label: "审核管理", icon: "M8 4H5v17h14V4h-3 M8 3h8v4H8Z M8 14l3 3 5-6", items: [
     { id: "review", label: "待审任务", path: "/review", permission: "review:do" },

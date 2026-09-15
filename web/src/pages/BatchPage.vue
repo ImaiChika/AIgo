@@ -236,7 +236,7 @@ async function downloadResult(jobId) {
     importResult.value = data;
     markJobImported(jobId);
     if (data.simulated) {
-      showToast(data.message || "模拟批量流程已完成，未写入真实题目");
+      showToast(data.message || "旧批量任务已完成");
       return;
     }
     if (data.failed > 0) {
@@ -413,10 +413,10 @@ onMounted(() => {
       </div>
 
       <div class="config-form">
-        <div class="batch-runtime-note" :class="{ simulated: batchRuntime.execution_mode === 'simulated', unavailable: !batchRuntime.available }">
-          <span class="runtime-badge">{{ batchRuntime.execution_mode === 'simulated' ? '模拟流程' : batchRuntime.available ? '已配置' : '不可用' }}</span>
+        <div class="batch-runtime-note" :class="{ local: batchRuntime.execution_mode === 'local_single_api', unavailable: !batchRuntime.available }">
+          <span class="runtime-badge">{{ batchRuntime.execution_mode === 'local_single_api' ? '单题 API 队列' : batchRuntime.available ? '已配置' : '不可用' }}</span>
           <div>
-            <strong>批量 API 配置随系统 AI 配置生效</strong>
+            <strong>批量任务逐题调用单题生成 API</strong>
             <p>当前模型：{{ batchRuntime.model || '未配置' }} · {{ batchRuntime.message }}</p>
           </div>
         </div>
@@ -675,7 +675,7 @@ onMounted(() => {
   color: #52657c;
 }
 
-.batch-runtime-note.simulated {
+.batch-runtime-note.local {
   border-color: #c6e7dc;
   border-left-color: #12b981;
   background: #f3fcf8;
@@ -690,7 +690,7 @@ onMounted(() => {
 .batch-runtime-note strong { display: block; color: #33475f; font-size: 12px; }
 .batch-runtime-note p { margin: 3px 0 0; color: #718197; font-size: 11px; line-height: 1.5; }
 .runtime-badge { flex: none; border-radius: 12px; padding: 3px 8px; color: #1268ae; background: #eaf5ff; font-size: 11px; font-weight: 700; }
-.simulated .runtime-badge { color: #16724f; background: #e3f7ef; }
+.local .runtime-badge { color: #16724f; background: #e3f7ef; }
 .unavailable .runtime-badge { color: #a23b4b; background: #ffeaed; }
 
 .form-row {

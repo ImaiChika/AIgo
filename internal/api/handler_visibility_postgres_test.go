@@ -137,6 +137,9 @@ func TestQuestionVisibilityPersonalAxis(t *testing.T) {
 	if updated.Code != http.StatusOK {
 		t.Fatalf("assign scoped: status=%d", updated.Code)
 	}
+	// 管理员已撤销原 expert 身份，旧 JWT 的身份绑定应失效；重新登录后
+	// 直接授权题库范围继续生效。
+	expertToken = loginForAuthTest(t, handler, "vis-expert", "vis-expert-password", "203.0.113.10")
 	list = decodeQuestionPage(t, serveAuthJSON(t, handler, http.MethodGet, "/api/questions?scope=personal", expertToken, "203.0.113.10", nil).Body.String())
 	sawScoped := false
 	for _, q := range list.Questions {

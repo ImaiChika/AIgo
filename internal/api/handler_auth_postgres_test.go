@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -196,6 +197,49 @@ func TestSingleAndBatchGenerationPermissionsAreIndependent(t *testing.T) {
 	}
 }
 
+func TestTeacherAndReviewerIdentitySwitch(t *testing.T) {
+	server, _, cleanup := authHandlerTestServer(t)
+	defer cleanup()
+	handler := server.Handler()
+	adminToken := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.60")
+	created := serveAuthJSON(t, handler, http.MethodPost, "/api/users", adminToken, "198.51.100.60", map[string]any{
+		"username": "dual-identity-user", "password": "dual-identity-password", "display_name": "双身份老师",
+		"role": domain.RoleTeacher, "roles": []string{domain.RoleTeacher, domain.RoleExpert},
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create dual identity user: %d %s", created.Code, created.Body)
+	}
+	var user auth.User
+	if err := json.Unmarshal(created.Body.Bytes(), &user); err != nil || len(user.Roles) != 2 {
+		t.Fatalf("dual identity roles not returned: err=%v user=%+v", err, user)
+	}
+
+	login := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/login", "", "198.51.100.61", map[string]any{
+		"username": "dual-identity-user", "password": "dual-identity-password",
+	})
+	var loginPayload struct {
+		Token string    `json:"token"`
+		User  auth.User `json:"user"`
+	}
+	if login.Code != http.StatusOK || json.Unmarshal(login.Body.Bytes(), &loginPayload) != nil {
+		t.Fatalf("dual identity login failed: %d %s", login.Code, login.Body)
+	}
+	if loginPayload.User.Role != domain.RoleTeacher || !slices.Contains(loginPayload.User.Permissions, domain.PermQuestionGenerate) || slices.Contains(loginPayload.User.Permissions, domain.PermReviewDo) {
+		t.Fatalf("default teacher identity permissions incorrect: %+v", loginPayload.User)
+	}
+
+	switched := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/switch-role", loginPayload.Token, "198.51.100.61", map[string]any{"role": domain.RoleExpert})
+	if switched.Code != http.StatusOK {
+		t.Fatalf("switch to reviewer identity failed: %d %s", switched.Code, switched.Body)
+	}
+	if err := json.Unmarshal(switched.Body.Bytes(), &loginPayload); err != nil || loginPayload.User.Role != domain.RoleExpert || !slices.Contains(loginPayload.User.Permissions, domain.PermReviewDo) || slices.Contains(loginPayload.User.Permissions, domain.PermQuestionGenerate) {
+		t.Fatalf("reviewer identity permissions incorrect: err=%v user=%+v", err, loginPayload.User)
+	}
+	if response := serveAuthJSON(t, handler, http.MethodPost, "/api/questions/generate", loginPayload.Token, "198.51.100.61", map[string]any{"topic": "不应出题"}); response.Code != http.StatusForbidden {
+		t.Fatalf("reviewer identity retained authoring access: %d %s", response.Code, response.Body)
+	}
+}
+
 func authHandlerTestServer(t *testing.T) (*Server, *postgres.Store, func()) {
 	t.Helper()
 	dsn := os.Getenv("AIGO_TEST_POSTGRES_DSN")
@@ -238,7 +282,7 @@ func authHandlerTestServer(t *testing.T) (*Server, *postgres.Store, func()) {
 	}
 	server := &Server{
 		authSvc: authService, auditSvc: audit.NewService(store), questionStore: store, shareStore: store,
-		reviewSvc: review.NewService(store, store, store, authService),
+		reviewSvc:       review.NewService(store, store, store, authService),
 		registerEnabled: true, trustProxyHeaders: true, readinessTimeout: 2 * time.Second,
 	}
 	cleanup := func() {
