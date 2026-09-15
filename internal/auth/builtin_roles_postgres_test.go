@@ -188,6 +188,13 @@ func TestBuiltinAuthoringPermissionsAreSeparated(t *testing.T) {
 		if roleID == domain.RoleTeacher && !slices.Contains(role.Permissions, domain.PermReviewSubmit) {
 			t.Fatalf("命题教师应拥有提交审核权限: %v", role.Permissions)
 		}
+		if roleID == domain.RoleTeacher {
+			for _, permission := range []string{domain.PermQuestionViewFormal, domain.PermQuestionViewEliminated} {
+				if !slices.Contains(role.Permissions, permission) {
+					t.Fatalf("命题教师应能查看本人三层题库，缺少 %s: %v", permission, role.Permissions)
+				}
+			}
+		}
 	}
 
 	super, err := service.GetRole(ctx, domain.RoleSuperAdmin)

@@ -125,6 +125,7 @@ func builtinRoles() []domain.Role {
 				domain.PermQuestionView, domain.PermQuestionEdit,
 				domain.PermQuestionGenerate,
 				domain.PermBatchRun,
+				domain.PermQuestionViewFormal, domain.PermQuestionViewEliminated,
 				domain.PermQuestionShare,
 				domain.PermReviewSubmit,
 				domain.PermStatsView,
@@ -222,7 +223,7 @@ func (s *Service) InitBuiltinRoles(ctx context.Context) error {
 				for _, p := range valid {
 					have[p] = true
 				}
-				for _, p := range []string{domain.PermBatchRun, domain.PermQuestionShare, domain.PermReviewSubmit} {
+				for _, p := range []string{domain.PermBatchRun, domain.PermQuestionViewFormal, domain.PermQuestionViewEliminated, domain.PermQuestionShare, domain.PermReviewSubmit} {
 					if !have[p] {
 						valid = append(valid, p)
 						changed = true
