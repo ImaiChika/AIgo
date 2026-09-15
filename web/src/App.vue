@@ -49,7 +49,16 @@ function logout() {
 const isLoginPage = computed(() => route.path === "/login");
 const switchRoleBusy = ref(false);
 const switchRoleError = ref("");
-const availableRoles = computed(() => (currentUser.value?.roles || []).map((id) => ({ id, name: roleName(id) })));
+const availableRoles = computed(() => {
+  const currentRole = currentUser.value?.role || "";
+  const ids = [...new Set((currentUser.value?.roles || []).filter(Boolean))];
+  ids.sort((left, right) => {
+    if (left === currentRole) return -1;
+    if (right === currentRole) return 1;
+    return roleName(left).localeCompare(roleName(right), "zh-CN");
+  });
+  return ids.map((id) => ({ id, name: roleName(id) }));
+});
 
 async function switchRole(role) {
   if (!role || role === currentUser.value?.role || switchRoleBusy.value) return;
@@ -117,9 +126,12 @@ async function switchRole(role) {
 
 <style scoped>
 .user-info {
-  display: flex;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
   align-items: center;
-  gap: 10px;
+  column-gap: 10px;
+  row-gap: 6px;
   padding: 12px;
   border-top: 1px solid #e5ebf3;
   margin-top: auto;
@@ -137,23 +149,33 @@ async function switchRole(role) {
   font-size: 16px;
   font-weight: 700;
   cursor: pointer;
+  grid-row: 1 / span 2;
 }
 
 .user-detail {
   flex: 1;
   min-width: 0;
   cursor: pointer;
+  grid-column: 2;
+  grid-row: 1;
 }
 
 .user-detail strong {
   display: block;
   font-size: 13px;
   color: #172033;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .user-detail span {
+  display: block;
   font-size: 11px;
   color: #6e7b8f;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .logout-btn {
@@ -168,20 +190,46 @@ async function switchRole(role) {
   cursor: pointer;
   display: grid;
   place-items: center;
+  grid-column: 3;
+  grid-row: 1;
 }
 
 .logout-btn:hover {
   background: #fff0f0;
 }
 
+.role-switch {
+  grid-column: 2 / 4;
+  grid-row: 2;
+  min-width: 0;
+}
+
 .role-switch select {
-  width: 76px;
+  width: 100%;
+  min-width: 0;
   height: 30px;
-  border: 1px solid #d8e3f0;
+  padding: 0 7px;
+  border: 1px solid #41617d;
   border-radius: 6px;
-  background: #fff;
-  color: #35506a;
+  background: #173b59;
+  color: #e7f2fc;
   font-size: 11px;
+  font-family: inherit;
+  color-scheme: dark;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.role-switch select:hover {
+  background: #204967;
+  border-color: #6eaed4;
+}
+
+.role-switch select:focus-visible {
+  outline: 2px solid #90cdff;
+  outline-offset: 1px;
 }
 
 .role-switch-error {

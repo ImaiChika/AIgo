@@ -12,6 +12,7 @@ const batchPermission = computed(() => hasPerm("batch:run"));
 
 const toast = ref("");
 const stats = ref({ question_count: 0, knowledge_count: 0, knowledge_categories: {} });
+const selectedKnowledgeVersion = ref(null);
 const batchRuntime = ref({
   backend: "unknown",
   available: false,
@@ -19,6 +20,42 @@ const batchRuntime = ref({
   model: "",
   message: "正在读取批量执行器状态...",
 });
+
+// 与单题出题页使用同一统计口径：题库题量包含当前用户可见的正式、待审核、淘汰三层。
+// question_count 只代表待审核层，不能直接用于这里的“个人题库”展示。
+const personalQuestionCount = computed(() => {
+  const counts = stats.value?.tier_counts;
+  if (counts && Object.keys(counts).length) {
+    return Object.values(counts).reduce((sum, value) => sum + (Number(value) || 0), 0);
+  }
+  return Number(stats.value?.question_count) || 0;
+});
+
+const personalTierSummary = computed(() => {
+  const counts = stats.value?.tier_counts || {};
+  return [
+    ["formal", "正式"],
+    ["working", "待审核"],
+    ["eliminated", "淘汰"],
+  ]
+    .filter(([key]) => Object.prototype.hasOwnProperty.call(counts, key))
+    .map(([key, label]) => `${label} ${Number(counts[key]) || 0}`)
+    .join(" · ");
+});
+
+const currentKnowledgeCount = computed(() => {
+  const versionCount = Number(selectedKnowledgeVersion.value?.point_count);
+  if (Number.isFinite(versionCount)) return versionCount;
+  return Number(stats.value?.kp_version?.total ?? stats.value?.knowledge_count) || 0;
+});
+
+const currentKnowledgeVersionName = computed(() => (
+  selectedKnowledgeVersion.value?.name || stats.value?.kp_version?.version_name || ""
+));
+
+function handleKnowledgeVersionChange(payload) {
+  selectedKnowledgeVersion.value = payload?.version || null;
+}
 
 // 批量任务配置（大纲要点通过选择器多选；仅保留每要点题数与跳过已有）
 const selectedKPs = ref([]); // 选中的大纲要点（多选）
@@ -394,12 +431,14 @@ onMounted(() => {
 
       <div v-if="hasPerm('stats:view')" class="metric-row">
         <div>
-          <span>题库题量</span>
-          <strong>{{ stats.question_count }}道</strong>
+          <span>个人题库</span>
+          <strong>{{ personalQuestionCount }}道</strong>
+          <small v-if="personalTierSummary">{{ personalTierSummary }}</small>
         </div>
         <div>
-          <span>大纲要点数</span>
-          <strong>{{ stats.knowledge_count }}个</strong>
+          <span>当前大纲要点</span>
+          <strong>{{ currentKnowledgeCount }}个</strong>
+          <small v-if="currentKnowledgeVersionName" :title="currentKnowledgeVersionName">{{ currentKnowledgeVersionName }}</small>
         </div>
       </div>
 
@@ -423,7 +462,7 @@ onMounted(() => {
         <!-- 大纲要点选择（搜索勾选多选，也可按大纲代码逗号分隔加入） -->
         <div class="field">
           <label>选择大纲要点</label>
-          <KnowledgePointPicker v-model="selectedKPs" :multiple="true" placeholder="搜索大纲要点、大纲代码或专业" />
+          <KnowledgePointPicker v-model="selectedKPs" :multiple="true" placeholder="搜索大纲要点、大纲代码或专业" @version-change="handleKnowledgeVersionChange" />
           <span class="field-hint">已选 {{ selectedKPs.length }} 个大纲要点，每个要点将生成 {{ batchConfig.count }} 道题</span>
         </div>
 
