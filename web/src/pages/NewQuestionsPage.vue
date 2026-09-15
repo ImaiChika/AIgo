@@ -177,7 +177,6 @@ onMounted(() => {
         <div class="section-heading"><span class="dot blue"></span><h2>新题修改与提交审核</h2><small>{{ total }} 道待提交</small></div>
         <p class="intro-copy">这里集中处理本账号刚生成且 AI 检查通过的新题。提交后由管理员配置的审核流程继续处理。</p>
       </div>
-      <RouterLink class="ghost-button" to="/my-revisions">打开待我修改</RouterLink>
     </div>
 
     <div class="new-question-layout">

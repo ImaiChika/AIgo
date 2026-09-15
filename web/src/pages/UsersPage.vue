@@ -11,6 +11,7 @@ const permGroups = ref([]);
 const loading = ref(false);
 const showCreate = ref(false);
 const expandedRow = ref(""); // 展开权限矩阵的用户ID
+const rolePickerUserId = ref("");
 
 const newUser = ref({
   username: "",
@@ -132,6 +133,20 @@ async function changeRoles(u, event) {
   await saveUser(u, { role, roles: selected });
 }
 
+function toggleRolePicker(u) {
+  rolePickerUserId.value = rolePickerUserId.value === u.id ? "" : u.id;
+}
+
+async function toggleRoleAssignment(u, roleID) {
+  if (isProtectedUser(u)) return;
+  const assigned = new Set(roleIDs(u));
+  if (assigned.has(roleID)) assigned.delete(roleID);
+  else assigned.add(roleID);
+  const next = [...assigned];
+  const role = next.includes(u.role) ? u.role : (next[0] || "");
+  await saveUser(u, { role, roles: next });
+}
+
 async function toggleEnabled(u) {
   if (isProtectedUser(u)) return;
   await saveUser(u, { enabled: !u.enabled });
@@ -207,7 +222,7 @@ onMounted(loadAll);
           </div>
           <div class="field">
             <label>角色模板</label>
-            <select v-model="newUser.roles" multiple size="2" @change="newUser.role = newUser.roles[0] || ''">
+            <select v-model="newUser.role" @change="newUser.roles = newUser.role ? [newUser.role] : []">
               <option v-for="r in roleOptions()" :key="r.id" :value="r.id">{{ r.name }}</option>
             </select>
           </div>
@@ -239,9 +254,18 @@ onMounted(loadAll);
               <td>{{ u.display_name }}</td>
               <td>
                 <span v-if="roleIDs(u).includes('super_admin')" class="protected-role">超级管理员（系统唯一）</span>
-                <select v-else multiple size="2" :value="roleIDs(u)" :disabled="isProtectedUser(u)" @change="changeRoles(u, $event)">
-                  <option v-for="r in roleOptionsFor(u)" :key="r.id" :value="r.id">{{ r.name }}</option>
-                </select>
+                <div v-else class="role-picker-cell">
+                  <select :value="u.role" :disabled="isProtectedUser(u)" @change="changeRole(u, $event.target.value)">
+                    <option v-for="r in roleOptionsFor(u)" :key="r.id" :value="r.id">{{ r.name }}</option>
+                  </select>
+                  <button v-if="roleOptionsFor(u).length > 2" class="role-more-button" type="button" :disabled="isProtectedUser(u)" @click="toggleRolePicker(u)">附加身份</button>
+                  <div v-if="rolePickerUserId === u.id" class="role-popover">
+                    <label v-for="r in roleOptionsFor(u).filter((item) => item.id)" :key="r.id">
+                      <input type="checkbox" :checked="roleIDs(u).includes(r.id)" @change="toggleRoleAssignment(u, r.id)" />
+                      {{ r.name }}
+                    </label>
+                  </div>
+                </div>
               </td>
               <td>
                 <button class="toggle-btn" :class="u.enabled ? 'on' : 'off'" type="button" :disabled="isProtectedUser(u)" @click="toggleEnabled(u)">
@@ -418,6 +442,49 @@ onMounted(loadAll);
   border-radius: 6px;
   padding: 0 8px;
   font-size: 13px;
+}
+
+.role-picker-cell {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  min-width: 118px;
+}
+
+.role-more-button {
+  width: fit-content;
+  padding: 2px 6px;
+  border: 1px solid #dce8f7;
+  border-radius: 4px;
+  background: #f8fbff;
+  color: #1385f8;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.role-popover {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  display: grid;
+  gap: 7px;
+  min-width: 150px;
+  padding: 9px 10px;
+  border: 1px solid #dce8f7;
+  border-radius: 7px;
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(30, 60, 90, .16);
+  color: #3a4658;
+  font-size: 12px;
+}
+
+.role-popover label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
 .protected-role {
