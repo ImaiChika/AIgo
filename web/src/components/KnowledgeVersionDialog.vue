@@ -36,8 +36,8 @@ defineExpose({ open, deleted });
     <div v-if="error" class="dialog-error" role="alert">{{ error }}<button v-if="!deleteTarget" type="button" @click="emit('refresh')">重试</button></div>
     <template v-if="deleteTarget">
       <div class="delete-body">
-        <div class="delete-summary"><span class="year-box">{{ deleteTarget.year || '历史' }}</span><div><h3>{{ deleteTarget.name }}</h3><p>{{ deleteTarget.point_count }} 个知识点 · {{ deleteTarget.status === 'draft' ? '整理中' : '已启用' }}</p></div></div>
-        <p class="delete-explanation">此版本及其全部知识点将从管理列表和出题选项中移除，无法再用于新出题。</p>
+        <div class="delete-summary"><span class="year-box">{{ deleteTarget.year || '历史' }}</span><div><h3>{{ deleteTarget.name }}</h3><p>{{ deleteTarget.point_count }} 个大纲要点 · {{ deleteTarget.status === 'draft' ? '整理中' : '已启用' }}</p></div></div>
+        <p class="delete-explanation">此版本及其全部大纲要点将从管理列表和出题选项中移除，无法再用于新出题。</p>
         <div class="retained-note">已有题目、审核记录及已提交的批量任务保留原有内容和关联。</div>
         <p v-if="deleteTarget.id === defaultId" class="fallback-note">{{ fallback ? `删除后，默认出题大纲将切换为“${fallback.name}”。` : '删除后将没有已启用的大纲，启用其他版本后可继续出题。' }}</p>
         <p v-else-if="versions.length === 1" class="fallback-note">这是最后一个版本。删除后可从空白重新创建大纲。</p>
@@ -52,7 +52,7 @@ defineExpose({ open, deleted });
         <p v-if="loading" class="empty-versions">正在加载版本…</p>
         <div v-else-if="!filteredVersions.length" class="empty-versions"><strong>{{ versions.length ? '没有匹配的版本' : '暂无可选大纲版本' }}</strong><p>{{ versions.length ? '调整关键词或筛选条件再试。' : canManage ? '新建版本后，导入整套年度考试大纲。' : '请等待管理员导入并启用大纲。' }}</p></div>
         <article v-else v-for="v in filteredVersions" :key="v.id" class="version-item" :class="{ chosen: selectedId === v.id }">
-          <label class="version-choice"><input type="radio" :name="`${titleId}-version`" :value="v.id" v-model="selectedId" :aria-label="v.name" /><span class="year-box">{{ v.year || '历史' }}</span><span class="version-info"><span class="version-name">{{ v.name }}<span v-if="v.id === currentId" class="version-badge current">当前</span><span v-if="v.id === defaultId" class="version-badge default">默认出题</span><span v-else class="version-badge" :class="{ draft: v.status === 'draft' }">{{ v.status === 'draft' ? '整理中' : '已启用' }}</span></span><span v-if="v.description" class="version-description">{{ v.description }}</span><span class="version-meta"><span>{{ v.point_count.toLocaleString() }} 个知识点</span><span>{{ v.status === 'published' ? '启用' : '创建' }}于 {{ date(v.published_at || v.created_at) }}</span></span></span></label>
+          <label class="version-choice"><input type="radio" :name="`${titleId}-version`" :value="v.id" v-model="selectedId" :aria-label="v.name" /><span class="year-box">{{ v.year || '历史' }}</span><span class="version-info"><span class="version-name">{{ v.name }}<span v-if="v.id === currentId" class="version-badge current">当前</span><span v-if="v.id === defaultId" class="version-badge default">默认出题</span><span v-else class="version-badge" :class="{ draft: v.status === 'draft' }">{{ v.status === 'draft' ? '整理中' : '已启用' }}</span></span><span v-if="v.description" class="version-description">{{ v.description }}</span><span class="version-meta"><span>{{ v.point_count.toLocaleString() }} 个大纲要点</span><span>{{ v.status === 'published' ? '启用' : '创建' }}于 {{ date(v.published_at || v.created_at) }}</span></span></span></label>
           <button v-if="canManage" class="delete-version" type="button" :aria-label="`删除版本：${v.name}`" :disabled="busy" @click="confirmDelete(v)">删除</button>
         </article>
       </div>

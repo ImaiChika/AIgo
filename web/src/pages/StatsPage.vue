@@ -50,6 +50,16 @@ function statusName(s) {
   return statusNames[s] || s;
 }
 
+function displayBankName(name) {
+  // 兼容旧版接口标签；新接口直接返回“待归类”。
+  return name === "未分类" ? "待归类" : name;
+}
+
+function displayKnowledgeCategory(name) {
+  // 知识点目录的缺省分类与题库归属不是同一概念。
+  return name === "未分类" ? "未设置分类" : name;
+}
+
 async function loadStats(scope = statsScope.value) {
   statsScope.value = scope;
   loading.value = true;
@@ -165,12 +175,12 @@ onMounted(loadStats);
           </div>
           <div class="stat-card">
             <strong>{{ stats.knowledge_count }}</strong>
-            <span>知识点数</span>
+            <span>大纲要点数</span>
             <em v-if="stats.kp_version?.version_name" class="card-sub">{{ stats.kp_version.version_name }}</em>
           </div>
           <div class="stat-card">
             <strong>{{ coveragePct ?? "-" }}</strong>
-            <span>知识点覆盖率</span>
+            <span>大纲要点覆盖率</span>
             <em class="card-sub">已出题 {{ stats.kp_covered ?? 0 }} / {{ stats.kp_version?.total ?? 0 }}</em>
           </div>
           <div class="stat-card">
@@ -261,7 +271,7 @@ onMounted(loadStats);
           <div class="chart-card">
             <h3>分类子题库分布</h3>
             <div v-for="(count, name) in stats.bank_distribution || {}" :key="name" class="bar-row">
-              <span class="bar-label">{{ name }}</span>
+              <span class="bar-label">{{ displayBankName(name) }}</span>
               <div class="bar-track">
                 <div class="bar-fill blue" :style="{ width: barWidth(count, stats.question_count) }"></div>
               </div>
@@ -313,7 +323,7 @@ onMounted(loadStats);
           <div class="chart-card">
             <h3>大纲分类分布</h3>
             <div v-for="(count, cat) in stats.knowledge_categories || {}" :key="cat" class="bar-row">
-              <span class="bar-label">{{ cat }}</span>
+              <span class="bar-label">{{ displayKnowledgeCategory(cat) }}</span>
               <div class="bar-track">
                 <div class="bar-fill orange" :style="{ width: barWidth(count, stats.knowledge_count) }"></div>
               </div>
@@ -326,7 +336,7 @@ onMounted(loadStats);
         <!-- 附加信息行 -->
         <div class="extra-row">
           <div class="chart-card" v-if="Object.keys(stats.kp_versions_total || {}).length">
-            <h3>各大纲版本知识点总数</h3>
+            <h3>各大纲版本要点总数</h3>
             <div class="chip-row">
               <span v-for="(count, name) in stats.kp_versions_total" :key="name" class="chip" :class="{ active: name === stats.kp_version?.version_name }">
                 {{ name }}：{{ count }}

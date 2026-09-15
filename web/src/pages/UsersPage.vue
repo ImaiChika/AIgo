@@ -126,13 +126,6 @@ async function changeRole(u, role) {
   await saveUser(u, { role, roles: role ? [role] : [] });
 }
 
-async function changeRoles(u, event) {
-  if (isProtectedUser(u)) return;
-  const selected = [...(event.target.selectedOptions || [])].map((option) => option.value).filter(Boolean);
-  const role = selected.includes(u.role) ? u.role : (selected[0] || "");
-  await saveUser(u, { role, roles: selected });
-}
-
 function toggleRolePicker(u) {
   rolePickerUserId.value = rolePickerUserId.value === u.id ? "" : u.id;
 }
@@ -202,7 +195,7 @@ onMounted(loadAll);
         </button>
       </div>
       <p class="permission-summary">
-        超级管理员仅保留一名；管理员负责业务管理。命题教师和审题老师是互斥岗位，但同一账号可以同时挂载两个岗位并在左下角切换当前身份。命题教师负责出题和提交审核，审题老师只处理分配到的审核任务；“单题出题”和“批量推理”仍是两个独立权限。
+        超级管理员仅保留一名；管理员负责业务管理。命题教师与审题老师的权限互斥，但同一账号可以同时挂载两种身份并在左下角切换当前身份。命题教师负责出题和提交审核，审题老师只处理分配到的审核任务；“单题出题”和“批量推理”仍是两个独立权限。
       </p>
 
       <!-- 新建用户表单 -->

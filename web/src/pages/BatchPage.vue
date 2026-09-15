@@ -20,8 +20,8 @@ const batchRuntime = ref({
   message: "正在读取批量执行器状态...",
 });
 
-// 批量任务配置（知识点通过选择器多选；仅保留每知识点题数与跳过已有）
-const selectedKPs = ref([]); // 选中的知识点（多选）
+// 批量任务配置（大纲要点通过选择器多选；仅保留每要点题数与跳过已有）
+const selectedKPs = ref([]); // 选中的大纲要点（多选）
 const batchConfig = ref({
   skip_existing: true,
   count: 1,
@@ -122,7 +122,7 @@ async function submitBatch() {
     return;
   }
   if (!selectedKPs.value.length) {
-    showToast("请先搜索并选择至少一个知识点");
+    showToast("请先搜索并选择至少一个大纲要点");
     return;
   }
   submitting.value = true;
@@ -398,7 +398,7 @@ onMounted(() => {
           <strong>{{ stats.question_count }}道</strong>
         </div>
         <div>
-          <span>知识点数</span>
+          <span>大纲要点数</span>
           <strong>{{ stats.knowledge_count }}个</strong>
         </div>
       </div>
@@ -420,18 +420,18 @@ onMounted(() => {
             <p>当前模型：{{ batchRuntime.model || '未配置' }} · {{ batchRuntime.message }}</p>
           </div>
         </div>
-        <!-- 知识点选择（搜索勾选多选，也可按大纲代码逗号分隔加入） -->
+        <!-- 大纲要点选择（搜索勾选多选，也可按大纲代码逗号分隔加入） -->
         <div class="field">
-          <label>选择知识点</label>
-          <KnowledgePointPicker v-model="selectedKPs" :multiple="true" placeholder="搜索知识点、大纲代码或专业" />
-          <span class="field-hint">已选 {{ selectedKPs.length }} 个知识点，每个知识点将生成 {{ batchConfig.count }} 道题</span>
+          <label>选择大纲要点</label>
+          <KnowledgePointPicker v-model="selectedKPs" :multiple="true" placeholder="搜索大纲要点、大纲代码或专业" />
+          <span class="field-hint">已选 {{ selectedKPs.length }} 个大纲要点，每个要点将生成 {{ batchConfig.count }} 道题</span>
         </div>
 
         <div class="form-row">
           <div class="field">
-            <label>每知识点题数</label>
+            <label>每大纲要点题数</label>
             <input v-model.number="batchConfig.count" type="number" min="1" max="20" />
-            <span class="field-hint">建议每个知识点生成 1—3 道</span>
+            <span class="field-hint">建议每个大纲要点生成 1—3 道</span>
           </div>
           <div class="field">
             <label>任务名称（可选）</label>
@@ -442,12 +442,12 @@ onMounted(() => {
         <div class="form-row">
           <label class="checkbox-row">
             <input type="checkbox" v-model="batchConfig.skip_existing" />
-            <span>跳过已有题目的知识点</span>
+            <span>跳过已有题目的大纲要点</span>
           </label>
         </div>
 
         <button class="primary-button full" type="button" @click="submitBatch" :disabled="submitting || !selectedKPs.length || !batchRuntime.available">
-          {{ submitting ? "提交中..." : `提交生成任务（${selectedKPs.length} 个知识点 × ${batchConfig.count} 题）` }}
+          {{ submitting ? "提交中..." : `提交生成任务（${selectedKPs.length} 个大纲要点 × ${batchConfig.count} 题）` }}
         </button>
         <span v-if="!batchRuntime.available" class="field-hint">批量生成功能当前不可用，请联系系统管理员。</span>
       </div>

@@ -251,6 +251,7 @@ const pageCount = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSi
 
 // 批量选择
 const selectedIds = ref(new Set());
+const unassignedBankLabel = "待归类（尚未归入分类子题库）";
 const selectAll = ref(false);
 const exporting = ref(false);
 
@@ -507,14 +508,14 @@ async function loadProfessions() {
 }
 
 function bankName(id) {
-  if (!id) return "未分类";
+  if (!id) return unassignedBankLabel;
   const b = banks.value.find((x) => x.id === id);
   return b ? b.name : id;
 }
 
 // 题目归属：多题库显示名称列表
 function questionBanks(ids) {
-  if (!ids || !ids.length) return "未分类";
+  if (!ids || !ids.length) return unassignedBankLabel;
   return ids.map(bankName).join("、");
 }
 
@@ -559,7 +560,7 @@ onMounted(async () => {
         <div v-else class="empty">暂无题库访问权限，请联系管理员分配相应权限</div>
 
         <div class="filter-row">
-          <input v-model="searchQuery" placeholder="搜索题干、选项、解析、专业、系统、知识点或ID..." @keyup.enter="doSearch" class="search-input" />
+          <input v-model="searchQuery" placeholder="搜索题干、选项、解析、专业、系统、大纲要点或ID..." @keyup.enter="doSearch" class="search-input" />
           <select v-model="filterProfession" @change="doSearch" title="按专业筛选">
             <option value="">全部专业</option>
             <option v-for="p in professions" :key="p" :value="p">{{ p }}</option>
@@ -749,7 +750,7 @@ onMounted(async () => {
         </div>
 
         <div class="detail-field">
-          <label>知识点</label>
+          <label>考试大纲要点</label>
           <div v-for="kp in (selectedQuestion.knowledge_points || [])" :key="kp.id" class="kp-tag">
             {{ kp.topic }}
           </div>

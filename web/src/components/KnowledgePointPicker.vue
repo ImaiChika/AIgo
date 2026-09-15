@@ -4,15 +4,15 @@ import { api } from "../api.js";
 import KnowledgeVersionDialog from "./KnowledgeVersionDialog.vue";
 import { subscribeKnowledgeVersions } from "../knowledgeVersions.js";
 
-// 知识点选择器：模糊搜索（关键词）+ 精确筛选（分类/专业/大纲代码前缀）+ 分页 + 多选勾选
+// 大纲要点选择器：模糊搜索（关键词）+ 精确筛选（分类/专业/大纲代码前缀）+ 分页 + 多选勾选
 // 支持单选（multiple=false）与多选（multiple=true），已选项以标签展示可移除，
 // 也可直接输入逗号分隔的大纲代码批量加入。
 const props = defineProps({
   modelValue: { type: Array, default: () => [] }, // 已选知识点数组
   multiple: { type: Boolean, default: true },      // 是否多选
-  placeholder: { type: String, default: "搜索知识点、大纲代码、专业..." },
+  placeholder: { type: String, default: "搜索大纲要点、大纲代码、专业..." },
 });
-const emit = defineEmits(["update:modelValue"]);
+const emit = defineEmits(["update:modelValue", "version-change"]);
 
 const versions = ref([]);
 const versionDialog = ref(null), versionsLoading = ref(false), versionsError = ref("");
@@ -137,6 +137,13 @@ function removeSelected(id) {
   emit("update:modelValue", props.modelValue.filter((x) => x.id !== id));
 }
 
+function notifyVersionChange() {
+  emit("version-change", {
+    versionId: versionId.value,
+    version: currentVersion.value ? { ...currentVersion.value } : null,
+  });
+}
+
 // 逗号分隔大纲代码批量加入（精确匹配，可包含名称片段？仅大纲代码精确）
 async function addByCodes() {
   const codes = [...new Set(codeInput.value.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean))];
@@ -154,7 +161,7 @@ async function addByCodes() {
       if (!props.multiple) break;
     }
     emit("update:modelValue", list);
-    showToast(missing.length ? `已加入 ${added} 个；当前版本未找到：${missing.join("、")}` : `已加入 ${added} 个知识点`);
+    showToast(missing.length ? `已加入 ${added} 个；当前版本未找到：${missing.join("、")}` : `已加入 ${added} 个大纲要点`);
     codeInput.value = "";
   } catch (e) { showToast("代码查找失败：" + e.message); }
   finally { addingCodes.value = false; }
@@ -168,6 +175,7 @@ async function changeVersion() {
   emit("update:modelValue", []);
   meta.value = { categories: [], subjects: [] };
   pageCount.value = 1; showResults.value = true; loading.value = false;
+  notifyVersionChange();
   if (!versionId.value) return;
   try { const data = await api.kpMeta(versionId.value); if (ticket !== metaTicket) return; meta.value = data; }
   catch (e) { if (ticket === metaTicket) { if (e.status === 404) { await loadVersions(); return; } showToast(e.message); } }
@@ -206,7 +214,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTick
 <template>
   <div class="kp-picker">
     <div class="kp-version-row"><div><span>出题大纲</span><strong>{{ currentVersion?.name || '暂无已启用大纲' }}</strong><small v-if="currentVersion?.id === defaultVersionId && currentVersion">默认</small></div><button class="kp-btn ghost" type="button" @click="versionDialog.open()">切换版本</button></div>
-    <p v-if="!currentVersion && !versionsLoading" class="kp-version-empty">{{ versionsError || '请先在知识点管理中创建并启用大纲版本，再选择知识点出题。' }}</p>
+    <p v-if="!currentVersion && !versionsLoading" class="kp-version-empty">{{ versionsError || '请先在考试大纲管理中创建并启用大纲版本，再选择大纲要点出题。' }}</p>
     <KnowledgeVersionDialog ref="versionDialog" :versions="versions" :current-id="versionId" :default-id="defaultVersionId" :loading="versionsLoading" :error="versionsError" @refresh="loadVersions" @select="chooseVersion" />
     <!-- 搜索区：模糊 + 精确 -->
     <div class="kp-search-row">
@@ -227,7 +235,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTick
     <!-- 结果区（分页 + 勾选） -->
     <div v-if="showResults" class="kp-results">
       <div class="kp-results-head">
-        <span>共 {{ total }} 个知识点</span>
+        <span>共 {{ total }} 个大纲要点</span>
       </div>
       <div ref="resultsScroll" class="kp-results-scroll">
         <div v-if="loading" class="kp-loading">搜索中...</div>
@@ -262,7 +270,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTick
 
     <!-- 已选区 -->
     <div v-if="modelValue.length" class="kp-selected">
-      <div class="kp-selected-title">已选 {{ modelValue.length }} 个知识点：</div>
+      <div class="kp-selected-title">已选 {{ modelValue.length }} 个大纲要点：</div>
       <div class="kp-tags">
         <span v-for="kp in modelValue" :key="kp.id" class="kp-tag">
           {{ kp.topic }}

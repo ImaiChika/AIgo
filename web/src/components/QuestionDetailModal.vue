@@ -162,7 +162,7 @@ const statusClass = (status) => {
 function bankLabel() {
   if (!props.question) return "";
   const ids = props.question.bank_ids || [];
-  if (!ids.length) return "未分类";
+  if (!ids.length) return "待归类（尚未归入分类子题库）";
   const names = ids.map((id) => (props.bankName ? props.bankName(id) : id));
   return names.join("、");
 }
@@ -226,7 +226,7 @@ function difficultyText(d) {
       </div>
 
       <div v-if="(question.knowledge_points || []).length" class="q-block">
-        <label>知识点</label>
+        <label>考试大纲要点</label>
         <div class="q-kps">
           <span v-for="kp in question.knowledge_points" :key="kp.id" class="q-kp">
             {{ kp.topic }}<span v-if="kp.outline_code" class="q-kp-code">（{{ kp.outline_code }}）</span>

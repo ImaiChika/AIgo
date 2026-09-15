@@ -22,6 +22,7 @@ const pageSize = 50;
 const expandedId = ref(""); // 展开查看专家评语的题目ID
 const banks = ref([]);
 const experts = ref([]);
+const unassignedBankLabel = "待归类（尚未归入分类子题库）";
 
 const statusMeta = {
   pending: { label: "未提交审核", cls: "s-pending" },
@@ -124,19 +125,25 @@ async function loadExperts() {
 }
 
 function bankName(id) {
-  if (!id) return "未分类";
+  if (!id) return unassignedBankLabel;
   const b = banks.value.find((x) => x.id === id);
   return b ? b.name : id;
 }
 
 function questionBanks(ids) {
-  if (!ids || !ids.length) return "未分类";
+  if (!ids || !ids.length) return unassignedBankLabel;
   return ids.map(bankName).join("、");
 }
 
 function expertName(id) {
   const e = experts.value.find((x) => x.id === id);
   return e ? e.display_name || e.username : id;
+}
+
+function reviewDisplayName(id, storedName = "") {
+  const value = (storedName || "").trim();
+  if (value && !value.startsWith("user-")) return value;
+  return expertName(id);
 }
 
 function difficultyText(d) {
@@ -227,7 +234,7 @@ onMounted(() => {
       </div>
 
       <div class="filter-row">
-        <input v-model="searchQuery" placeholder="搜索题干、选项、解析、专业、系统、知识点或ID..." @keyup.enter="doSearch" />
+        <input v-model="searchQuery" placeholder="搜索题干、选项、解析、专业、系统、大纲要点或ID..." @keyup.enter="doSearch" />
         <select v-model="filterStatus" @change="doSearch">
           <option value="">全部状态</option>
           <option value="pending">未提交审核</option>
@@ -239,7 +246,7 @@ onMounted(() => {
         </select>
         <select v-model="filterBank" @change="doSearch">
           <option value="">全部题库</option>
-          <option value="__unclassified__">未分类</option>
+          <option value="__unclassified__">{{ unassignedBankLabel }}</option>
           <option v-for="b in banks" :key="b.id" :value="b.id">{{ b.name }}</option>
         </select>
         <button class="ghost-button" type="button" @click="doSearch">搜索</button>
@@ -305,7 +312,7 @@ onMounted(() => {
               <template v-if="item.task.submission_bank_id">提交分类：{{ bankName(item.task.submission_bank_id) }} ｜</template>
               审核人：{{ (item.task.assigned_to || []).map(expertName).join("、") || "自动匹配" }}
               <span v-if="item.task.final_decision" class="final-decision">
-                ｜ 最终决断：{{ expertName(item.task.final_decision.expert_id) }} → {{ conclusionText("final_" + item.task.final_decision.conclusion) }}
+                ｜ 最终决断：{{ reviewDisplayName(item.task.final_decision.expert_id, item.task.final_decision.expert_name) }} → {{ conclusionText("final_" + item.task.final_decision.conclusion) }}
                 <span v-if="item.task.final_decision.opinion">（{{ item.task.final_decision.opinion }}）</span>
               </span>
             </div>
@@ -319,7 +326,7 @@ onMounted(() => {
                     v-for="rec in recs"
                     :key="rec.id"
                     :record="rec"
-                    :fallback-name="expertName(rec.expert_id)"
+                    :fallback-name="reviewDisplayName(rec.expert_id, rec.expert_name)"
                     compact
                   />
                 </div>
@@ -358,11 +365,12 @@ onMounted(() => {
 .stat-card {
   padding: 14px 8px;
   border-radius: 8px;
-  border: 1px solid transparent;
+  border: 1px solid var(--line);
+  border-top-width: 3px;
   text-align: center;
   cursor: pointer;
   background: #fff;
-  transition: all 0.15s;
+  transition: border-color 0.15s, background 0.15s;
 }
 
 .stat-card:hover {
@@ -370,8 +378,9 @@ onMounted(() => {
 }
 
 .stat-card.active {
-  border-color: #1385f8;
-  box-shadow: 0 0 0 2px rgba(19, 133, 248, 0.15);
+  border-color: #8fc2ed;
+  border-top-color: #1385f8;
+  background: #f7fbff;
 }
 
 .stat-card strong {
@@ -389,6 +398,22 @@ onMounted(() => {
 .s-revision strong { color: #c07b22; }
 .s-rejected strong { color: #c54858; }
 .s-published strong { color: #087c55; }
+
+.stat-card.s-pending,
+.stat-card.s-reviewing,
+.stat-card.s-conflict,
+.stat-card.s-revision,
+.stat-card.s-rejected,
+.stat-card.s-published {
+  background: #fff;
+}
+
+.stat-card.s-pending { border-top-color: #aeb9c7; }
+.stat-card.s-reviewing { border-top-color: #73b6e8; }
+.stat-card.s-conflict { border-top-color: #8e9aa8; }
+.stat-card.s-revision { border-top-color: #e0a23c; }
+.stat-card.s-rejected { border-top-color: #d95d6e; }
+.stat-card.s-published { border-top-color: #2fae7c; }
 
 .filter-row {
   display: flex;

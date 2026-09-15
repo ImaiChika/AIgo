@@ -145,7 +145,7 @@ const workflowSteps = computed(() => [
   {
     number: "01",
     title: "题目生成",
-    detail: loading.value ? "命题请求已提交，系统正在生成试题" : selectedKP.value ? `围绕「${selectedKP.value.topic || selectedKP.value.outline_code}」生成` : "选择知识点与难度后开始",
+    detail: loading.value ? "命题请求已提交，系统正在生成试题" : selectedKP.value ? `围绕「${selectedKP.value.topic || selectedKP.value.outline_code}」生成` : "选择大纲要点与难度后开始",
     state: loading.value ? "active" : stem.value ? "done" : workspaceStatus.value === "failed" ? "attention" : "waiting",
     timing: generationDuration.value,
     timingLabel: loading.value ? "已用时" : "处理耗时",
@@ -412,7 +412,7 @@ async function loadStats() {
 // 生成题目
 async function generateQuestion() {
   if (!selectedKP.value) {
-    showToast("请先选择知识点");
+    showToast("请先选择大纲要点");
     return;
   }
   stopAIProgress();
@@ -549,7 +549,7 @@ onBeforeUnmount(() => {
         <div v-else class="preview-empty">
           <span class="preview-empty-mark">A2</span>
           <div>
-            <strong>从右侧选择一个知识点开始命题</strong>
+            <strong>从右侧选择一个大纲要点开始命题</strong>
             <p>系统将生成临床情境、4–5 个选项与唯一答案；生成结果只读，质量检查通过后进入待审核题库。</p>
           </div>
         </div>
@@ -622,7 +622,7 @@ onBeforeUnmount(() => {
             <small v-if="personalTierSummary">{{ personalTierSummary }}</small>
           </div>
           <div>
-            <span>当前大纲知识点</span>
+            <span>当前大纲要点</span>
             <strong>{{ currentKnowledgeCount }}个</strong>
             <small v-if="currentKnowledgeVersionName" :title="currentKnowledgeVersionName">{{ currentKnowledgeVersionName }}</small>
           </div>
@@ -630,8 +630,8 @@ onBeforeUnmount(() => {
 
         <!-- 知识点选择器（精确+模糊搜索，单选） -->
         <div class="kp-selector">
-          <label class="field-label">选择知识点</label>
-          <KnowledgePointPicker v-model="selectedKPs" :multiple="false" placeholder="搜索知识点、大纲代码、专业...（支持精确筛选与模糊搜索）" @version-change="handleKnowledgeVersionChange" />
+          <label class="field-label">选择大纲要点</label>
+          <KnowledgePointPicker v-model="selectedKPs" :multiple="false" placeholder="搜索大纲要点、大纲代码、专业...（支持精确筛选与模糊搜索）" @version-change="handleKnowledgeVersionChange" />
         </div>
 
         <label class="field">

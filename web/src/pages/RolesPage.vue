@@ -138,7 +138,7 @@ onMounted(loadAll);
         <div class="form-row">
           <div class="field">
             <label>角色名称 *</label>
-            <input v-model="form.name" placeholder="如：内科审题专家" />
+            <input v-model="form.name" placeholder="如：内科审题老师" />
           </div>
           <div class="field">
             <label>描述</label>
