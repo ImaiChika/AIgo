@@ -124,6 +124,7 @@ func builtinRoles() []domain.Role {
 			Permissions: []string{
 				domain.PermQuestionView, domain.PermQuestionEdit,
 				domain.PermQuestionGenerate,
+				domain.PermBatchRun,
 				domain.PermQuestionShare,
 				domain.PermReviewSubmit,
 				domain.PermStatsView,
@@ -207,7 +208,7 @@ func (s *Service) InitBuiltinRoles(ctx context.Context) error {
 				}
 			}
 			// 审题老师是岗位型内置角色：启动自愈把权限恢复为模板集，防止旧库残留
-			// 出题权限；批量推理等直接授权不属于角色模板，仍由用户单独保留。
+			// 出题或批量推理权限。
 			if r.ID == domain.RoleExpert {
 				restored := append([]string(nil), r.Permissions...)
 				if !samePermissions(valid, restored) {
@@ -215,13 +216,13 @@ func (s *Service) InitBuiltinRoles(ctx context.Context) error {
 					changed = true
 				}
 			}
-			// 命题教师可以把本人题目送入管理员配置的审核流程，并申请分享正式题。
+			// 命题教师模板默认同时支持单题和批量出题，可以把本人题目送入管理员配置的审核流程，并申请分享正式题。
 			if r.ID == domain.RoleTeacher {
 				have := make(map[string]bool, len(valid))
 				for _, p := range valid {
 					have[p] = true
 				}
-				for _, p := range []string{domain.PermQuestionShare, domain.PermReviewSubmit} {
+				for _, p := range []string{domain.PermBatchRun, domain.PermQuestionShare, domain.PermReviewSubmit} {
 					if !have[p] {
 						valid = append(valid, p)
 						changed = true

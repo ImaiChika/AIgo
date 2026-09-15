@@ -148,7 +148,7 @@ onMounted(loadAll);
 
         <div class="perm-picker">
           <h3>角色权限</h3>
-          <p class="perm-picker-hint">“单题出题”和“批量推理”是独立权限；批量推理默认仅超级管理员角色拥有，其他角色按需配置。</p>
+        <p class="perm-picker-hint">“单题出题”和“批量推理”是独立权限；命题教师模板默认同时拥有，管理员和自定义角色仍可按需配置。</p>
           <div v-for="g in permGroups" :key="g.group" class="perm-group">
             <div class="perm-group-title">{{ g.group }}权限</div>
             <div class="perm-checks">

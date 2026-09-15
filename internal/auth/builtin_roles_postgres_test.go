@@ -14,6 +14,7 @@ import (
 //   - super_admin 始终恢复完整权限；
 //   - admin 自动补齐业务权限并移除角色模板管理权限；
 //   - 审题老师恢复仅审核任务能力，不继承命题权限；
+//   - 命题教师模板恢复单题与批量出题权限；
 //   - 其他内置角色保留管理员的有效自定义修改。
 func TestInitBuiltinRolesHealsAdminRole(t *testing.T) {
 	service, cleanup := loginLimitTestService(t)
@@ -172,8 +173,11 @@ func TestBuiltinAuthoringPermissionsAreSeparated(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if slices.Contains(role.Permissions, domain.PermBatchRun) {
+		if roleID != domain.RoleTeacher && slices.Contains(role.Permissions, domain.PermBatchRun) {
 			t.Fatalf("内置角色 %s 默认不应拥有批量推理权限: %v", roleID, role.Permissions)
+		}
+		if roleID == domain.RoleTeacher && !slices.Contains(role.Permissions, domain.PermBatchRun) {
+			t.Fatalf("命题教师模板应默认拥有批量推理权限: %v", role.Permissions)
 		}
 		if roleID == domain.RoleExpert && slices.Contains(role.Permissions, domain.PermQuestionGenerate) {
 			t.Fatalf("审题老师不应拥有单题出题权限: %v", role.Permissions)
