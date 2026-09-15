@@ -445,59 +445,6 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
-.submit-bank-select {
-  max-width: 220px;
-  height: 28px;
-  border: 1px solid #dce8f7;
-  border-radius: 6px;
-  background: #fff;
-  color: #3a4658;
-  font-size: 12px;
-}
-
-.submit-bank-btn {
-  height: 28px;
-  padding: 0 12px;
-  border: 1px solid #bdecd9;
-  border-radius: 6px;
-  background: #f0fff8;
-  color: #087c55;
-  font-size: 13px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.submit-bank-btn:hover {
-  background: #dff5ea;
-}
-
-.submit-bank-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.revoke-btn {
-  height: 28px;
-  padding: 0 12px;
-  border: 1px solid #f3c2c2;
-  border-radius: 6px;
-  background: #fff;
-  color: #c54858;
-  font-size: 13px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.revoke-btn:hover {
-  background: #fff0f0;
-  border-color: #c54858;
-}
-
-.revoke-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
 .edit-btn {
   height: 28px;
   padding: 0 12px;
@@ -899,12 +846,6 @@ onMounted(() => {
   .flow-actions {
     width: 100%;
     gap: 6px;
-  }
-
-  .flow-actions .submit-bank-select {
-    flex: 1 1 100%;
-    max-width: none;
-    min-width: 0;
   }
 
   .flow-actions > button {

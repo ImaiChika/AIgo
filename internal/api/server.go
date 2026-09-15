@@ -218,7 +218,6 @@ func (s *Server) Handler() http.Handler {
 	// 提交审核仅系统管理员（user:manage）可操作；审核人员只负责投票
 	mux.HandleFunc("POST /api/review/submit", s.requireAuthAny([]string{domain.PermReviewSubmit, domain.PermUserManage}, s.handleSubmitReview))
 	mux.HandleFunc("POST /api/review/submit-batch", s.requireAuthAny([]string{domain.PermReviewSubmit, domain.PermUserManage}, s.handleSubmitReviewBatch))
-	mux.HandleFunc("POST /api/review/submit-bank", s.requireAuth(domain.PermUserManage, s.handleSubmitBankReview))
 	mux.HandleFunc("POST /api/review/action", s.requireAuth(domain.PermReviewDo, s.handleReviewAction))
 	mux.HandleFunc("POST /api/review/finalize", s.requireAuth(domain.PermReviewFinal, s.handleReviewFinalize))
 	mux.HandleFunc("GET /api/review/task/{id}", s.requireAuth("", s.handleGetReviewTask))
@@ -235,7 +234,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/review/flows", s.requireAuth(domain.PermFlowManage, s.handleCreateFlow))
 	mux.HandleFunc("PUT /api/review/flows/{id}", s.requireAuth(domain.PermFlowManage, s.handleUpdateFlow))
 	mux.HandleFunc("DELETE /api/review/flows/{id}", s.requireAuth(domain.PermFlowManage, s.handleDeleteFlow))
-	mux.HandleFunc("POST /api/review/flows/{id}/revoke", s.requireAuth(domain.PermFlowManage, s.handleRevokeFlow))
 
 	// 包装中间件：请求体大小限制 + CORS 跨域 + JSON Content-Type
 	return withBodyLimit(withCORS(s.corsOrigins, withJSON(mux)))

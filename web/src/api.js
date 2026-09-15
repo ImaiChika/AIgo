@@ -346,11 +346,6 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ question_ids: questionIds, flow_id: flowId }),
     }),
-  submitBankReview: (bankId, flowId) =>
-    request("/review/submit-bank", {
-      method: "POST",
-      body: JSON.stringify({ bank_id: bankId, flow_id: flowId }),
-    }),
   reviewResults: (params = {}) => {
     const qs = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => {
@@ -389,5 +384,4 @@ export const api = {
       body: JSON.stringify(data),
     }),
   deleteFlow: (id) => request(`/review/flows/${id}`, { method: "DELETE" }),
-  revokeFlow: (id) => request(`/review/flows/${id}/revoke`, { method: "POST" }),
 };

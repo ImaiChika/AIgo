@@ -322,49 +322,6 @@ func (s *Server) handleReviewFinalize(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
-// handleSubmitBankReview 按题库统一提交审核：把题库内所有可提交状态的题目
-// 批量提交到审核流程（不再需要在审核页一题一题点击提交）。
-// 已在审核中/已审核结束的题目自动跳过并在结果中统计（提示题库状态冲突）。
-// 请求：{"bank_id": "xxx", "flow_id": "xxx"}（bank_id 为空将被拒绝，必须指定分类子题库）
-func (s *Server) handleSubmitBankReview(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		BankID string `json:"bank_id"`
-		FlowID string `json:"flow_id"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err.Error())
-		return
-	}
-	if req.FlowID == "" {
-		writeError(w, 400, "请指定审核流程")
-		return
-	}
-	if req.BankID == "" {
-		writeError(w, 400, "批量送审必须选择分类子题库")
-		return
-	}
-	bank, err := s.bankSvc.GetBank(r.Context(), req.BankID)
-	if err != nil {
-		writeError(w, 500, "查询题库失败")
-		return
-	}
-	if bank == nil {
-		writeError(w, 400, "分类子题库不存在或已删除")
-		return
-	}
-	result, err := s.reviewSvc.SubmitBank(r.Context(), req.BankID, req.FlowID)
-	if err != nil {
-		writeError(w, 400, "批量提交失败: "+err.Error())
-		return
-	}
-	actor := auth.GetUsername(r.Context())
-	if actor == "" {
-		actor = auth.GetUserID(r.Context())
-	}
-	s.auditSvc.Log(r.Context(), "", "submit_bank", actor, fmt.Sprintf("批量提交题库 %s 到流程 %s：成功 %d，跳过审核中 %d，跳过已结束 %d，失败 %d", bankLabel(req.BankID), req.FlowID, result.Submitted, result.SkippedReviewing, result.SkippedFinished, len(result.Failed)))
-	writeJSON(w, 200, result)
-}
-
 // handleMyTasks 列出待我审核的任务（含题目完整信息、流程轮次、投票进度）。
 // 仅当前轮分配给我的任务；投票完成即移开；待决断任务在「待决断」页面处理。
 func (s *Server) handleMyTasks(w http.ResponseWriter, r *http.Request) {
@@ -456,13 +413,6 @@ func (s *Server) handleMyRevisions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"items": items, "total": len(items)})
-}
-
-func bankLabel(bankID string) string {
-	if bankID == "" {
-		return "待归类"
-	}
-	return bankID
 }
 
 func isTechnicalUserID(name string) bool {
@@ -622,23 +572,6 @@ func (s *Server) handleReviewResults(w http.ResponseWriter, r *http.Request) {
 		"has_more":  page*pageSize < total,
 		"stats":     stats,
 	})
-}
-
-// handleRevokeFlow 撤销流程下所有未完成的审核任务（管理员防误提交/卡死用）。
-// 未完成审核的题目恢复提交前状态；已审核结束的题目不受影响。
-func (s *Server) handleRevokeFlow(w http.ResponseWriter, r *http.Request) {
-	flowID := r.PathValue("id")
-	result, err := s.reviewSvc.RevokeFlow(r.Context(), flowID)
-	if err != nil {
-		writeError(w, 400, "撤销失败: "+err.Error())
-		return
-	}
-	actor := auth.GetUsername(r.Context())
-	if actor == "" {
-		actor = auth.GetUserID(r.Context())
-	}
-	s.auditSvc.LogFlow(r.Context(), flowID, actor, "revoke", fmt.Sprintf("撤销未完成审核任务 %d 个，恢复题目 %d 道，保留终态 %d 个", result.Revoked, result.Restored, result.Kept))
-	writeJSON(w, 200, result)
 }
 
 // handleListReviewers 列出有审题权限的用户（流程配置选审核人、名字映射用）。

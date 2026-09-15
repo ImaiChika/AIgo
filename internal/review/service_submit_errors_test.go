@@ -51,26 +51,130 @@ func TestSubmitUncheckedDraftReturnsNotSubmittable(t *testing.T) {
 	}
 }
 
-// 送审题库与流程绑定题库不一致属于请求错误，API 层据此返回 400。
-func TestSubmitBankMismatchReturnsBadRequest(t *testing.T) {
+// 退回修改后必须真的产生新版本，不能仅凭 ai_reviewed 状态绕过修改窗口重新送审。
+func TestResubmitRevisionRequiresNewQuestionVersion(t *testing.T) {
 	svc, reviewStore, questionStore := newTestService(
 		map[string][]string{"bank-neike": {"r1"}},
 		map[string]bool{"admin1": true},
 	)
 	ctx := context.Background()
-
-	checked := testQuestion("bank-neike")
-	checked.Status = domain.StatusAIReviewed
-	if err := questionStore.SaveQuestion(ctx, *checked); err != nil {
+	q := testQuestion("bank-neike")
+	q.Status = domain.StatusAIReviewed
+	if err := questionStore.SaveQuestion(ctx, *q); err != nil {
 		t.Fatal(err)
 	}
-	flow := testFlow()
-	flow.BankID = "bank-other"
-	if err := reviewStore.SaveFlowConfig(ctx, flow); err != nil {
+	if err := reviewStore.SaveFlowConfig(ctx, testFlow()); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.ReviewTask{
+		ID:                 "task-revision",
+		QuestionID:         q.ID,
+		FlowID:             "flow-test",
+		SubmissionBankID:   "bank-neike",
+		CurrentRound:       1,
+		Status:             domain.StatusRevisionRequired,
+		QuestionPrevStatus: domain.StatusAIReviewed,
+		QuestionVersion:    q.Version,
+		Attempt:            1,
+		RoundResults:       []domain.RoundResult{{RoundNumber: 1}},
+	}
+	if err := reviewStore.SaveTask(ctx, task); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := svc.SubmitQuestionForBank(ctx, "q1", "flow-test", "bank-neike"); !errors.Is(err, domain.ErrReviewBadRequest) {
-		t.Fatalf("题库不匹配应返回 ErrReviewBadRequest，实际: %v", err)
+	if _, err := svc.SubmitQuestionForBank(ctx, q.ID, task.FlowID, task.SubmissionBankID); !errors.Is(err, domain.ErrReviewNotSubmittable) {
+		t.Fatalf("未产生新版本的退修题不应重提，实际: %v", err)
+	}
+	storedTask, _ := reviewStore.GetTask(ctx, task.ID)
+	if storedTask.Status != domain.StatusRevisionRequired || storedTask.Attempt != 1 {
+		t.Fatalf("拒绝未修改重提时任务不应变化: %+v", storedTask)
+	}
+}
+
+// 退回修改后的题目沿用原流程，避免覆盖原任务的流程快照；如需换流程应先撤销原任务。
+func TestResubmitRevisionCannotSwitchFlow(t *testing.T) {
+	svc, reviewStore, questionStore := newTestService(
+		map[string][]string{"bank-neike": {"r1"}},
+		map[string]bool{"admin1": true},
+	)
+	ctx := context.Background()
+	q := testQuestion("bank-neike")
+	q.Status = domain.StatusAIReviewed
+	if err := questionStore.SaveQuestion(ctx, *q); err != nil {
+		t.Fatal(err)
+	}
+	if err := reviewStore.SaveFlowConfig(ctx, testFlow()); err != nil {
+		t.Fatal(err)
+	}
+	newFlow := testFlow()
+	newFlow.ID = "flow-new"
+	newFlow.Name = "新规则流程"
+	newFlow.Rounds = []domain.RoundConfig{
+		{RoundNumber: 1, Name: "新流程初审", ExpertIDs: []string{"r1"}, RequiredCount: 1},
+		{RoundNumber: 2, Name: "新流程复审", ExpertIDs: []string{"r1"}, RequiredCount: 1},
+	}
+	if err := reviewStore.SaveFlowConfig(ctx, newFlow); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.ReviewTask{
+		ID:                 "task-revision-switch",
+		QuestionID:         q.ID,
+		FlowID:             "flow-test",
+		SubmissionBankID:   "bank-neike",
+		CurrentRound:       1,
+		Status:             domain.StatusRevisionRequired,
+		QuestionPrevStatus: domain.StatusAIReviewed,
+		QuestionVersion:    q.Version,
+		RoundResults:       []domain.RoundResult{{RoundNumber: 1}},
+	}
+	if err := reviewStore.SaveTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	q.ClinicalStem += "（已按意见修订）"
+	q.Version++
+	if err := questionStore.SaveQuestion(ctx, *q); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SubmitQuestionForBank(ctx, q.ID, newFlow.ID, newFlow.BankID); !errors.Is(err, domain.ErrReviewNotSubmittable) {
+		t.Fatalf("退修题切换流程应被拒绝，实际: %v", err)
+	}
+	storedTask, _ := reviewStore.GetTask(ctx, task.ID)
+	if storedTask.FlowID != "flow-test" || storedTask.Status != domain.StatusRevisionRequired || storedTask.QuestionVersion != 1 {
+		t.Fatalf("切换流程被拒绝后原任务不得覆盖: %+v", storedTask)
+	}
+}
+
+// 需修改任务不能继续沿用旧轮次投票，必须经过修改并重新送审。
+func TestReviewRejectsVoteAfterRevisionRequired(t *testing.T) {
+	svc, reviewStore, questionStore := newTestService(
+		map[string][]string{"bank-neike": {"r1"}},
+		map[string]bool{"admin1": true},
+	)
+	ctx := context.Background()
+	q := testQuestion("bank-neike")
+	q.Status = domain.StatusAIReviewed
+	questionStore.SaveQuestion(ctx, *q)
+	reviewStore.SaveFlowConfig(ctx, testFlow())
+	task := domain.ReviewTask{
+		ID:                 "task-revision-vote",
+		QuestionID:         q.ID,
+		FlowID:             "flow-test",
+		SubmissionBankID:   "bank-neike",
+		CurrentRound:       1,
+		Status:             domain.StatusRevisionRequired,
+		QuestionPrevStatus: domain.StatusAIReviewed,
+		QuestionVersion:    q.Version,
+		AssignedTo:         []string{"r1"},
+		RoundResults:       []domain.RoundResult{{RoundNumber: 1}},
+	}
+	reviewStore.SaveTask(ctx, task)
+
+	if err := svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusApproved}); err == nil {
+		t.Fatal("需修改任务不应继续接受旧轮次投票")
+	}
+	records, _ := reviewStore.ListRecordsByTaskID(ctx, task.ID)
+	if len(records) != 0 {
+		t.Fatalf("拒绝旧轮次投票不应写入记录，实际 %d 条", len(records))
 	}
 }
