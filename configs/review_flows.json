@@ -8,11 +8,11 @@
       "rounds": [
         {
           "round_number": 1,
-          "name": "专家初审",
+          "name": "审题老师初审",
           "expert_ids": [],
           "required_count": 1,
-          "can_modify": true,
-          "pass_condition": "任意1位专家通过即可",
+          "can_modify": false,
+          "pass_condition": "任意1位审题老师通过即可",
           "is_required": true
         },
         {

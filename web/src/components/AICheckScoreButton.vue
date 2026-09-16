@@ -82,21 +82,22 @@ function closeModal() {
 
 <style scoped>
 .ai-score-btn {
-  padding: 3px 12px;
+  padding: 4px 10px;
   font-size: 12px;
   line-height: 1.6;
-  color: #111;
+  color: #536b82;
   background: #fff;
-  border: 1px solid #111;
-  border-radius: 2px;
+  border: 1px solid #d5e0eb;
+  border-radius: 6px;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 
 .ai-score-btn:hover {
-  background: #111;
-  color: #fff;
+  background: #f3f9ff;
+  border-color: #8fc2ed;
+  color: #0571dc;
 }
 
 .asm-close {

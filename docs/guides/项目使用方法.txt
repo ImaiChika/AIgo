@@ -114,7 +114,7 @@ AIgo 项目使用方法
   /knowledge      知识点管理（搜索、添加、删除、Excel导入）
   /review         多轮审核（选题 → 提交审核 → 审核 → 记录）
   /bank           题库（搜索、筛选、详情、编辑、删除、导出）
-  /experts        专家库（增删改查，仅管理员）
+  （无专家库页面；审题老师由用户角色与权限统一管理）
   /review-flows   审核流程配置（仅管理员）
   /audit          操作日志（仅管理员）
   /users          用户管理（仅管理员）
@@ -141,10 +141,7 @@ AIgo 项目使用方法
   POST   /api/knowledge-points/import Excel导入
   DELETE /api/knowledge-points/{id}   删除知识点
 
-  GET    /api/experts                 专家列表
-  POST   /api/experts                 创建专家
-  PUT    /api/experts/{id}            修改专家
-  DELETE /api/experts/{id}            删除专家
+  /api/experts                         历史兼容接口（当前 Web 与新审核流程不使用）
 
   GET    /api/review/flows            审核流程列表
   POST   /api/review/flows            创建审核流程

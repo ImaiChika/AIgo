@@ -101,7 +101,7 @@ func TestStatsHandlerAggregates(t *testing.T) {
 	if payload.TierCounts["working"] != 3 || payload.TierCounts["formal"] != 2 || payload.TierCounts["eliminated"] != 1 {
 		t.Fatalf("tier_counts wrong: %v", payload.TierCounts)
 	}
-	if payload.BankDistribution["stats-bank-a"] != 2 || payload.BankDistribution["未分类"] != 1 {
+	if payload.BankDistribution["stats-bank-a"] != 2 || payload.BankDistribution["待归类"] != 1 {
 		t.Fatalf("bank_distribution wrong: %v", payload.BankDistribution)
 	}
 	if payload.ProfessionDistribution["内科"] != 2 || payload.ProfessionDistribution["外科"] != 1 {
@@ -189,7 +189,7 @@ func TestStatsHandlerScopedAndPermissionGated(t *testing.T) {
 	if _, ok := payload.TierCounts["eliminated"]; ok {
 		t.Fatalf("scoped user should not see eliminated tier count: %v", payload.TierCounts)
 	}
-	if payload.BankDistribution["未分类"] != 0 {
+	if payload.BankDistribution["待归类"] != 0 {
 		t.Fatalf("scoped user should not see unclassified questions: %v", payload.BankDistribution)
 	}
 

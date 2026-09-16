@@ -29,7 +29,7 @@ AIgo 智能命题系统 - 项目结构
 │   │   ├── handler_auth.go        # 认证接口：登录、用户信息、修改昵称/密码、用户管理
 │   │   ├── handler_question.go    # 题目接口：生成、列表、搜索、更新、删除
 │   │   ├── handler_knowledge.go   # 知识点接口：列表、搜索、创建、删除、Excel导入
-│   │   ├── handler_expert.go      # 专家接口：增删改查
+│   │   ├── handler_expert.go      # 历史专家接口兼容；当前审核人来自登录账号权限
 │   │   ├── handler_review.go      # 审核接口：提交、审核操作、任务查询、记录、流程列表
 │   │   ├── handler_batch.go       # 批量推理接口：提交、状态查询、列表、下载导入
 │   │   ├── handler_ai_check.go    # AI检查接口：批量检查、结果查询
@@ -129,7 +129,7 @@ AIgo 智能命题系统 - 项目结构
 users                # 用户表（账号、密码哈希、角色、昵称）
 knowledge_points     # 知识点表（科目、系统、名称、关键词）
 questions            # 题目表（题干、选项、答案、解析、状态、版本）
-experts              # 专家表（姓名、科室、职称、擅长知识点）
+experts              # 历史兼容表；升级清空，当前审核人来自 users/roles
 review_flows         # 审核流程配置表（流程名、轮次配置JSON）
 review_tasks         # 审核任务表（题目ID、流程ID、当前轮次、状态）
 review_records       # 审核记录表（任务ID、轮次、审核人、结论、意见）
@@ -165,10 +165,7 @@ API 接口
   DELETE /api/knowledge-points/{id}   删除知识点
 
 专家:
-  GET    /api/experts                 专家列表
-  POST   /api/experts                 创建专家
-  PUT    /api/experts/{id}            修改专家
-  DELETE /api/experts/{id}            删除专家
+  /api/experts                         历史兼容接口（当前 Web 与新审核流程不使用）
 
 AI检查:
   POST   /api/ai-check                批量AI检查题目
@@ -202,5 +199,5 @@ AI检查:
 ========
 
 admin（管理员）:  全部权限
-expert（专家）:   出题、知识点增删、题库删除、审核、专家查看
+expert（审题老师）:  仅处理分配到的审核任务；命题能力通过 teacher 身份切换获得
 teacher（教师）:  出题、知识点查看、AI检查、提交审核

@@ -46,6 +46,14 @@ func TestInitBuiltinRolesHealsAdminRole(t *testing.T) {
 	if err := service.SaveRole(ctx, *expert); err != nil {
 		t.Fatal(err)
 	}
+	teacher, err := service.GetRole(ctx, domain.RoleTeacher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	teacher.Permissions = []string{domain.PermQuestionView}
+	if err := service.SaveRole(ctx, *teacher); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := service.InitBuiltinRoles(ctx); err != nil {
 		t.Fatal(err)
@@ -82,6 +90,15 @@ func TestInitBuiltinRolesHealsAdminRole(t *testing.T) {
 	for _, forbidden := range []string{domain.PermStatsView, domain.PermKnowledgeMng, domain.PermQuestionViewGlobal} {
 		if slices.Contains(expertAfter.Permissions, forbidden) {
 			t.Fatalf("expert 角色自愈后仍含越界权限 %s: %v", forbidden, expertAfter.Permissions)
+		}
+	}
+	teacherAfter, err := service.GetRole(ctx, domain.RoleTeacher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, permission := range []string{domain.PermQuestionGenerate, domain.PermBatchRun} {
+		if !slices.Contains(teacherAfter.Permissions, permission) {
+			t.Fatalf("teacher 角色自愈后应包含 %s: %v", permission, teacherAfter.Permissions)
 		}
 	}
 }

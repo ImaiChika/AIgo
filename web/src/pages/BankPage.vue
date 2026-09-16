@@ -65,7 +65,7 @@ const TIER_STATUS_OPTIONS = {
 };
 const statusOptions = computed(() => TIER_STATUS_OPTIONS[activeTier.value] || []);
 
-// 切换分类题库：重置筛选与选择后重新加载
+// 切换生命周期题库：重置筛选与选择后重新加载
 function switchTier(tier) {
   if (!tier || tier === activeTier.value) return;
   activeTier.value = tier;
@@ -95,7 +95,6 @@ const filterStatus = ref("");
 const searchQuery = ref("");
 const filterProfession = ref(""); // 专业筛选
 const professions = ref([]); // 专业列表
-const banks = ref([]); // 题库列表
 const selectedQuestion = ref(null);
 const shareStatuses = ref({});
 // 审核意见（按题目加载）：出题人可在详情里看到本人题目的轮次评语与驳回/决断理由；
@@ -114,7 +113,7 @@ watch(shareDialog, async value => {
 });
 const shareNotice = ref('');
 const preparingShare = ref(false);
-const appliedShareFilters = ref({ q: '', bank_id: '', profession: '' });
+const appliedShareFilters = ref({ q: '', profession: '' });
 const shareableSelected = computed(() => [...selectedIds.value].filter(id => !shareStatus(id)));
 
 async function prepareBulkShare(mode) {
@@ -131,7 +130,7 @@ async function prepareBulkShare(mode) {
       const data = await api.previewQuestionShares(filters);
       if (ticket !== questionSearchTicket || !canBatchShare.value) return;
       if (data.total > data.limit) {
-        shareNotice.value = `当前有 ${data.total} 道可分享题目。每批最多 ${data.limit} 道，请缩小专业、分类或关键词范围，或勾选后提交。`;
+        shareNotice.value = `当前有 ${data.total} 道可分享题目。每批最多 ${data.limit} 道，请缩小专业或关键词范围，或勾选后提交。`;
         return;
       }
       ids = data.question_ids || [];
@@ -141,7 +140,6 @@ async function prepareBulkShare(mode) {
     shareDialog.value = {
       ids,
       scope: mode === 'selected' ? '已勾选的个人正式题目' : [
-        filters.bank_id ? `分类：${banks.value.find(b => b.id === filters.bank_id)?.name || filters.bank_id}` : '全部分类',
         filters.profession ? `专业：${filters.profession}` : '全部专业',
         filters.q ? `关键词：${filters.q}` : '',
       ].filter(Boolean).join(' · '),
@@ -251,7 +249,6 @@ const pageCount = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSi
 
 // 批量选择
 const selectedIds = ref(new Set());
-const unassignedBankLabel = "待归类（尚未归入分类子题库）";
 const selectAll = ref(false);
 const exporting = ref(false);
 
@@ -489,15 +486,6 @@ async function selectQuestionById(id) {
   }
 }
 
-async function loadBanks() {
-  try {
-    const data = await api.listBanks(false);
-    banks.value = data.banks || [];
-  } catch (e) {
-    console.error(e);
-  }
-}
-
 async function loadProfessions() {
   try {
     const data = await api.listProfessions();
@@ -507,20 +495,8 @@ async function loadProfessions() {
   }
 }
 
-function bankName(id) {
-  if (!id) return unassignedBankLabel;
-  const b = banks.value.find((x) => x.id === id);
-  return b ? b.name : id;
-}
-
-// 题目归属：多题库显示名称列表
-function questionBanks(ids) {
-  if (!ids || !ids.length) return unassignedBankLabel;
-  return ids.map(bankName).join("、");
-}
-
 onMounted(async () => {
-  await Promise.all([loadQuestions(), loadBanks(), loadProfessions(), loadShareRequests()]);
+  await Promise.all([loadQuestions(), loadProfessions(), loadShareRequests()]);
   // 支持从审核页「去修改题目」跳转：?edit=<题目ID> 自动定位并进入编辑
   const editId = new URLSearchParams(window.location.search).get("edit");
   if (editId) {
@@ -628,7 +604,6 @@ onMounted(async () => {
                 <span class="q-stem">{{ (q.clinical_stem || "").slice(0, 60) }}{{ (q.clinical_stem || "").length > 60 ? "..." : "" }}</span>
                 <span class="q-meta">
                   答案: {{ q.answer }}
-                  <span v-if="(q.bank_ids || []).length"> | 题库: {{ questionBanks(q.bank_ids) }}</span>
                   <span v-if="q.outline_code"> | 大纲: {{ q.outline_code }}</span>
                   <span v-if="q.profession"> | 专业: {{ q.profession }}</span>
                 </span>

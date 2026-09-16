@@ -530,7 +530,6 @@ onBeforeUnmount(() => {
           <h2>题目预览</h2>
           <small v-if="answer">正确答案：{{ answer }}</small>
           <AICheckScoreButton v-if="currentQuestionId" class="preview-ai-score" :question-id="currentQuestionId" />
-          <RouterLink class="ghost-button preview-submit-link" to="/new-questions">进入新题提交审核</RouterLink>
         </div>
         <template v-if="stem">
           <p class="readonly-stem">{{ stem }}</p>

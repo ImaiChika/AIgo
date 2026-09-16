@@ -224,9 +224,13 @@ func TestReviewTransactionRollsBackAcrossTables(t *testing.T) {
 	if _, err := store.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version>=2`); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.InitSchema(string(schemaSQL)); err != nil {
-		t.Fatalf("idempotent migration failed: %v", err)
+	if _, err := store.db.ExecContext(ctx, string(schemaSQL)); err != nil {
+		t.Fatalf("recreate legacy baseline helpers: %v", err)
 	}
+	if _, err := store.db.ExecContext(ctx, `ALTER TABLE questions ADD COLUMN IF NOT EXISTS media_refs JSONB DEFAULT '[]'`); err != nil {
+		t.Fatal(err)
+	}
+	applyMigrationPrefix(t, ctx, store, configuredMigrations(string(schemaSQL))[1:26])
 	versions, _ = store.ListQuestionVersions(ctx, question.ID)
 	storedTask, _ = store.GetTask(ctx, task.ID)
 	if len(versions) != 1 || storedTask.QuestionVersion != storedQuestion.Version {
@@ -274,9 +278,13 @@ func TestReviewTransactionRollsBackAcrossTables(t *testing.T) {
 	if _, err := store.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version>=2`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Migrate(ctx); err != nil {
-		t.Fatalf("legacy question_versions migration failed: %v", err)
+	if _, err := store.db.ExecContext(ctx, string(schemaSQL)); err != nil {
+		t.Fatalf("recreate legacy baseline helpers: %v", err)
 	}
+	if _, err := store.db.ExecContext(ctx, `ALTER TABLE questions ADD COLUMN IF NOT EXISTS media_refs JSONB DEFAULT '[]'`); err != nil {
+		t.Fatal(err)
+	}
+	applyMigrationPrefix(t, ctx, store, configuredMigrations(string(schemaSQL))[1:26])
 	var snapshotType string
 	if err := store.db.QueryRowContext(ctx, `
 		SELECT data_type FROM information_schema.columns

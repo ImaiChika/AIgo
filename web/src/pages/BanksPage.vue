@@ -39,6 +39,7 @@ const addResultsScroll = ref(null);
 const addSearched = ref(false);
 let addSearchTicket = 0;
 const classifiableStatuses = new Set(["ai_draft", "auto_checked", "ai_reviewed", "revision_required"]);
+const unassignedBankLabel = "待归类（尚未归入分类子题库）";
 
 function isClassifiable(q) {
   return classifiableStatuses.has(q?.status);
@@ -172,7 +173,7 @@ async function submitBank() {
 const deletingBankId = ref("");
 
 async function deleteBank(b) {
-  if (!confirm(`确定删除分类子题库「${b.name}」？仅未进入审核且没有历史引用的子题库可删除，其中的待审核题目将变为未分类。`)) return;
+  if (!confirm(`确定删除分类子题库「${b.name}」？仅未进入审核且没有历史引用的子题库可删除，其中的待审核题目将进入待归类状态（尚未归入分类子题库）。`)) return;
   if (deletingBankId.value) return;
   deletingBankId.value = b.id;
   try {
@@ -368,7 +369,7 @@ function bankById(id) {
 
 // 多归属显示：题目所属的题库名称列表
 function bankNames(ids) {
-  if (!ids || !ids.length) return "未分类";
+  if (!ids || !ids.length) return unassignedBankLabel;
   return ids.map((id) => bankById(id)?.name || id).join("、");
 }
 
@@ -443,7 +444,7 @@ onMounted(() => {
             <button class="ghost-button" type="button" @click="addCustomProfession">添加专业</button>
           </div>
           <p class="prof-hint">
-            保存后，符合专业范围的未分类题目将归入本库，题库归属也可手动调整。
+            保存后，符合专业范围的待归类题目将归入本库，题库归属也可手动调整。
           </p>
         </div>
 

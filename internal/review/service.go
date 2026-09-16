@@ -167,6 +167,8 @@ func (s *Service) createFlowLocked(ctx context.Context, flow domain.ReviewFlowCo
 	if existing, _ := s.reviewStore.GetFlowConfig(ctx, flow.ID); existing != nil {
 		return fmt.Errorf("流程 ID %s 已存在，请更换 ID", flow.ID)
 	}
+	// 当前流程不再绑定分类子题库；BankID 只为读取旧记录保留。
+	flow.BankID = ""
 	if err := s.validateFlow(ctx, flow); err != nil {
 		return err
 	}
@@ -200,6 +202,8 @@ func (s *Service) updateFlowLocked(ctx context.Context, flow domain.ReviewFlowCo
 	if activeCount > 0 {
 		return fmt.Errorf("流程 %s 有 %d 个进行中的审核任务，暂不能修改", flow.ID, activeCount)
 	}
+	// 编辑旧流程时同步清除历史分类约束，避免新任务重新依赖子题库。
+	flow.BankID = ""
 	if err := s.validateFlow(ctx, flow); err != nil {
 		return err
 	}
@@ -228,7 +232,7 @@ func (s *Service) validateFlow(ctx context.Context, flow domain.ReviewFlowConfig
 	for i := range flow.Rounds {
 		round := &flow.Rounds[i]
 		if len(round.ExpertIDs) == 0 {
-			// 审核人留空：提交时按"审题权限 + 题库范围"自动匹配
+			// 审核人留空：提交时按当前启用账号的审题权限自动匹配
 			// required_count 保留用户配置（0 = 全员，提交时按实际匹配人数确定）
 			if round.RequiredCount < 0 {
 				round.RequiredCount = 0
@@ -253,17 +257,7 @@ func (s *Service) validateFlow(ctx context.Context, flow domain.ReviewFlowConfig
 				if validUsers[expertID] {
 					continue // 用户有效（有审题权限且启用）
 				}
-				// 兼容历史：专家库直建的专家（E 前缀，无登录账号）
-				expert, err := s.expertStore.GetExpert(ctx, expertID)
-				if err != nil {
-					return fmt.Errorf("查询审核人 %s 失败: %w", expertID, err)
-				}
-				if expert == nil {
-					return fmt.Errorf("第 %d 轮审核人 %s 不存在（无登录账号或未分配审题权限）", round.RoundNumber, expertID)
-				}
-				if !expert.Enabled {
-					return fmt.Errorf("第 %d 轮审核人 %s（%s）已停用", round.RoundNumber, expertID, expert.Name)
-				}
+				return fmt.Errorf("第 %d 轮审核人 %s 不存在、已停用或未分配审题权限", round.RoundNumber, expertID)
 			}
 			// required_count=0 表示全部通过（无反对票）
 			if round.RequiredCount == 0 {
@@ -306,6 +300,58 @@ func (s *Service) ListFlows(ctx context.Context) ([]domain.ReviewFlowConfig, err
 	return s.reviewStore.ListFlowConfigs(ctx)
 }
 
+// UserAssignmentReferences 返回仍依赖指定账号的审核流程或进行中任务。
+// 用户删除、停用或移除审题/把关权限前必须先处理这些引用，避免产生无人可办的任务。
+func (s *Service) UserAssignmentReferences(ctx context.Context, userID string) ([]string, error) {
+	seen := make(map[string]bool)
+	var references []string
+	add := func(value string) {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			references = append(references, value)
+		}
+	}
+	flows, err := s.reviewStore.ListFlowConfigs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, flow := range flows {
+		if containsID(flow.FinalReviewerIDs, userID) {
+			add("流程「" + flow.Name + "」的最终把关人")
+		}
+		for _, round := range flow.Rounds {
+			if containsID(round.ExpertIDs, userID) {
+				add(fmt.Sprintf("流程「%s」第%d轮审核人", flow.Name, round.RoundNumber))
+			}
+		}
+	}
+	tasks, err := s.reviewStore.ListAllTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, task := range tasks {
+		if task.Status != domain.StatusReviewing && task.Status != domain.StatusConflict && task.Status != domain.StatusRevisionRequired {
+			continue
+		}
+		if containsID(task.AssignedTo, userID) {
+			add("进行中的审核任务 " + task.ID)
+		}
+		if containsID(task.FinalReviewerIDs, userID) {
+			add("待决断任务 " + task.ID)
+		}
+	}
+	return references, nil
+}
+
+func containsID(ids []string, target string) bool {
+	for _, id := range ids {
+		if id == target {
+			return true
+		}
+	}
+	return false
+}
+
 // DeleteFlow 删除审核流程。有任务引用该流程（含历史任务）时拒绝删除，
 // 保证历史审核记录始终能追溯到当时的流程配置。
 func (s *Service) DeleteFlow(ctx context.Context, id string) error {
@@ -345,8 +391,7 @@ func (s *Service) SubmitQuestion(ctx context.Context, questionID string, flowID 
 	return s.SubmitQuestionForBank(ctx, questionID, flowID, "")
 }
 
-// SubmitQuestionForOwner 供命题老师提交本人题目。新工作流不要求出题人选择
-// 分类子题库；审核流程若绑定了分类仍由流程本身校验，未绑定时任务保留空分类快照。
+// SubmitQuestionForOwner 供命题老师提交本人题目。新工作流不选择或依赖分类子题库。
 func (s *Service) SubmitQuestionForOwner(ctx context.Context, questionID, flowID string) (*domain.ReviewTask, error) {
 	var task *domain.ReviewTask
 	err := s.withReviewMutation(ctx, func(txCtx context.Context) error {
@@ -421,8 +466,11 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 			if roundIdx < 0 || roundIdx >= len(flow.Rounds) {
 				return nil, fmt.Errorf("审核流程 %s 不包含第 %d 轮", flowID, existing.CurrentRound)
 			}
-			assigned, err := s.resolveReviewers(ctx, submissionBankID, flow.Rounds[roundIdx].ExpertIDs)
+			assigned, err := s.resolveReviewers(ctx, flow.Rounds[roundIdx].ExpertIDs)
 			if err != nil {
+				return nil, err
+			}
+			if _, err := resolvedRequiredCount(flow.Rounds[roundIdx], assigned, flow.VoteRule); err != nil {
 				return nil, err
 			}
 			existing.Status = domain.StatusReviewing
@@ -460,9 +508,12 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 		}
 	}
 
-	// 解析第一轮审核人（显式配置优先，否则按审题权限+题库范围自动匹配）
-	assigned, err := s.resolveReviewers(ctx, submissionBankID, flow.Rounds[0].ExpertIDs)
+	// 解析第一轮审核人（显式配置优先，否则按审题权限自动匹配）
+	assigned, err := s.resolveReviewers(ctx, flow.Rounds[0].ExpertIDs)
 	if err != nil {
+		return nil, err
+	}
+	if _, err := resolvedRequiredCount(flow.Rounds[0], assigned, flow.VoteRule); err != nil {
 		return nil, err
 	}
 
@@ -503,23 +554,50 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 	return &task, nil
 }
 
-// resolveReviewers 解析本轮审核人：
-// 显式配置的审核人直接使用；为空时按"审题权限 + 题库分配范围"自动匹配。
-func (s *Service) resolveReviewers(ctx context.Context, bankID string, configured []string) ([]string, error) {
-	if len(configured) > 0 {
-		return configured, nil
-	}
+// resolveReviewers 解析本轮审核人。新流程只依据当前启用账号的审题权限，
+// 不再读取历史分类子题库范围；显式名单也会在每次分配时重新校验。
+func (s *Service) resolveReviewers(ctx context.Context, configured []string) ([]string, error) {
 	if s.users == nil {
 		return nil, fmt.Errorf("未配置审核人解析器")
 	}
-	reviewers, err := s.users.ListReviewers(ctx, bankID)
+	if len(configured) > 0 {
+		candidates, err := s.users.ListReviewCandidates(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("查询审题人失败: %w", err)
+		}
+		valid := make(map[string]bool, len(candidates))
+		for _, candidate := range candidates {
+			valid[candidate.ID] = true
+		}
+		for _, reviewerID := range configured {
+			if !valid[reviewerID] {
+				return nil, fmt.Errorf("审核人 %s 已停用、被删除或不再拥有审题权限，请先更新审核流程", reviewerID)
+			}
+		}
+		return append([]string(nil), configured...), nil
+	}
+	reviewers, err := s.users.ListReviewers(ctx, "")
 	if err != nil {
 		return nil, fmt.Errorf("查询审题人失败: %w", err)
 	}
 	if len(reviewers) == 0 {
-		return nil, fmt.Errorf("题库「%s」没有分配审题人：请给用户分配审题权限并设置题库范围，或在流程中显式指定审核人", bankNameOrAll(bankID))
+		return nil, fmt.Errorf("没有可用的审题老师：请为启用账号分配审题权限，或在流程中显式指定审核人")
 	}
 	return reviewers, nil
+}
+
+func resolvedRequiredCount(round domain.RoundConfig, assigned []string, voteRule string) (int, error) {
+	if len(assigned) == 0 {
+		return 0, fmt.Errorf("第 %d 轮「%s」没有可用审核人", round.RoundNumber, round.Name)
+	}
+	required := round.RequiredCount
+	if required < 1 || voteRule == "veto" {
+		required = len(assigned)
+	}
+	if required > len(assigned) {
+		return 0, fmt.Errorf("第 %d 轮「%s」需要 %d 票通过，但当前仅有 %d 位可用审核人，请先调整流程", round.RoundNumber, round.Name, required, len(assigned))
+	}
+	return required, nil
 }
 
 func resolveSubmissionBank(q *domain.A2Question, flow *domain.ReviewFlowConfig, requested string, allowNoBank bool) (string, error) {
@@ -1066,7 +1144,8 @@ func (s *Service) loadTodoQuestions(ctx context.Context, tasks []domain.ReviewTa
 }
 
 // MyDecisions 列出待我决断的任务（最终把关人专用）：
-// 所有 conflict（待决断）任务，且我在该流程的把关人名单内（名单空=全部把关人可见）。
+// 仅返回所有审核轮次均已通过、等待轮外最终决断的 conflict 任务，
+// 且我在该流程的把关人名单内（名单空=全部把关人可见）。
 // 含题目完整信息、流程轮次、票数统计，供「待决断」独立页面使用。
 func (s *Service) MyDecisions(ctx context.Context, userID string) ([]MyTaskItem, error) {
 	return s.MyDecisionsForViewer(ctx, userID, false)
@@ -1109,6 +1188,10 @@ func (s *Service) MyDecisionsForViewer(ctx context.Context, userID string, isSys
 		if task.Status != domain.StatusConflict {
 			continue
 		}
+		flow := flowByName[task.FlowID]
+		if !finalDecisionReady(task, flow) {
+			continue
+		}
 		q := questionByID[task.QuestionID]
 		if q == nil {
 			continue // 题目已删除（原实现按题目遍历自然跳过）
@@ -1131,7 +1214,6 @@ func (s *Service) MyDecisionsForViewer(ctx context.Context, userID string, isSys
 			continue
 		}
 		round := &task.RoundResults[roundIdx]
-		flow := flowByName[task.FlowID]
 		item := MyTaskItem{
 			Task:            task,
 			Question:        *q,
@@ -1161,6 +1243,24 @@ func (s *Service) MyDecisionsForViewer(ctx context.Context, userID string, isSys
 		return result[i].Task.UpdatedAt.After(result[j].Task.UpdatedAt)
 	})
 	return result, nil
+}
+
+// finalDecisionReady 统一定义“轮外最终决断”的进入条件。
+// conflict 只允许表示所有配置轮次均已通过；旧数据若仍有中途 conflict，
+// 不应再暴露给新的最终决断入口。
+func finalDecisionReady(task *domain.ReviewTask, flow *domain.ReviewFlowConfig) bool {
+	if task == nil || flow == nil || task.Status != domain.StatusConflict {
+		return false
+	}
+	if len(flow.Rounds) == 0 || task.CurrentRound != len(flow.Rounds) || len(task.RoundResults) < len(flow.Rounds) {
+		return false
+	}
+	for i := range flow.Rounds {
+		if !task.RoundResults[i].Passed {
+			return false
+		}
+	}
+	return true
 }
 
 // ReviewRequest 专家审核请求。
@@ -1196,9 +1296,10 @@ func validateComment(action domain.QuestionStatus, comment *domain.ReviewComment
 }
 
 // Review 专家执行审核（投票）。
-// 新规则：单人反对不再立即退回/驳回，所有分配审核人审核完毕后自动统计：
-//   - 无反对票且通过数达门槛 → 本轮通过（进下一轮/完成）
-//   - 全员审完但存在反对票 → 任务进入 conflict，等待最终把关人决断
+// 每轮收齐全部分配审核人的意见后统一裁定：
+//   - 有需修改票 → 题目回到生成者的待我修改
+//   - 通过数达门槛 → 进入下一轮；最终轮通过后进入轮外最终决断
+//   - 没有需修改且通过数不足 → 驳回并进入淘汰终态
 //
 // 评语规则：通过时评语可选；驳回/需修改必须填写结构化评语（至少一栏）。
 func (s *Service) Review(ctx context.Context, req ReviewRequest) error {
@@ -1230,7 +1331,7 @@ func (s *Service) reviewLocked(ctx context.Context, req ReviewRequest) error {
 	// 只有审核中的任务允许投票；需修改必须先提交新版本并由管理员重新送审。
 	if task.Status != domain.StatusReviewing {
 		if task.Status == domain.StatusConflict {
-			return fmt.Errorf("本轮审核票数冲突，请等待最终把关人决断，不能再投票")
+			return fmt.Errorf("所有轮次审核已完成，请等待最终把关人决断，不能再投票")
 		}
 		if task.Status == domain.StatusRevisionRequired {
 			return fmt.Errorf("题目已退回修改，需提交新版本后由管理员重新送审，不能继续本轮投票")
@@ -1276,6 +1377,11 @@ func (s *Service) reviewLocked(ctx context.Context, req ReviewRequest) error {
 		return err
 	}
 
+	requiredCount, err := resolvedRequiredCount(currentRoundConfig, task.AssignedTo, flow.VoteRule)
+	if err != nil {
+		return err
+	}
+
 	// 记录审核结果
 	now := time.Now()
 	expertReview := domain.ExpertReview{
@@ -1317,66 +1423,43 @@ func (s *Service) reviewLocked(ctx context.Context, req ReviewRequest) error {
 		roundResult.RevisionCount++
 	}
 
-	// 通过票数门槛（0=全员）
-	requiredCount := currentRoundConfig.RequiredCount
-	if requiredCount < 1 {
-		requiredCount = len(task.AssignedTo)
-	}
-
-	// === 一票否决规则（flow.VoteRule == "veto"）===
-	// 任一审核人驳回 → 题目直接驳回；任一需修改 → 退回修改；全员通过且达门槛 → 过轮。
-	if flow.VoteRule == "veto" {
-		if req.Action == domain.StatusRejected {
-			task.Status = domain.StatusRejected
-			task.UpdatedAt = now
-			if err := s.reviewStore.UpdateTask(ctx, *task); err != nil {
-				return fmt.Errorf("更新审核任务失败: %w", err)
-			}
-			if err := s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusRejected); err != nil {
-				return err
-			}
-			return nil
-		}
-		if req.Action == domain.StatusRevisionRequired {
-			// 退回修改：任务标记 revision_required，题目本体恢复 ai_reviewed
-			task.Status = domain.StatusRevisionRequired
-			task.UpdatedAt = now
-			if err := s.reviewStore.UpdateTask(ctx, *task); err != nil {
-				return fmt.Errorf("更新审核任务失败: %w", err)
-			}
-			if err := s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusAIReviewed); err != nil {
-				return err
-			}
-			return nil
-		}
-		// approved：达到通过票数 → 过轮（最终轮进入最终待决断）
-		if roundResult.ApprovedCount >= requiredCount {
-			return s.advanceRoundAfterVote(ctx, task, roundIdx)
-		}
-		task.UpdatedAt = now
-		return s.reviewStore.UpdateTask(ctx, *task)
-	}
-
-	// === 通过票数规则（默认）===
-	// 达到通过票数 → 本轮通过（无视反对票；反对票累积，最终决断时供把关人参考）。
-	// 例：通过票数=1 时，只要有 1 票通过即过轮进入下一轮，即使有人投了驳回。
+	// 达到通过票数后立即进入下一轮；已经提交的驳回/需修改意见只留痕，
+	// 不阻塞本轮通过。尚未投票的审核人不再补投已结束的本轮。
 	if roundResult.ApprovedCount >= requiredCount {
 		return s.advanceRoundAfterVote(ctx, task, roundIdx)
 	}
 
-	// 所有分配审题人都投完票仍未达标（如通过票数=全员但有反对票）→ 分歧，进入待决断
-	if len(roundResult.Reviews) >= len(task.AssignedTo) {
-		task.Status = domain.StatusConflict
+	// 尚未达到门槛时，先等待本轮全部分配审核人投票；未完成投票不能
+	// 推导出“只有驳回”还是“包含需修改”。
+	if len(roundResult.Reviews) < len(task.AssignedTo) {
+		task.UpdatedAt = now
+		return s.reviewStore.UpdateTask(ctx, *task)
+	}
+
+	// 需修改优先级最高：无论同时存在多少驳回票，都退回原生成者修改。
+	if roundResult.RevisionCount > 0 {
+		task.Status = domain.StatusRevisionRequired
 		task.UpdatedAt = now
 		if err := s.reviewStore.UpdateTask(ctx, *task); err != nil {
 			return fmt.Errorf("更新审核任务失败: %w", err)
 		}
+		if err := s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusAIReviewed); err != nil {
+			return err
+		}
 		return nil
 	}
 
-	// 还有审核人未投票，继续等待
+	// 已收齐意见且仍未达到门槛：此时没有需修改票，剩余非通过意见
+	// 只能是驳回，题目进入淘汰终态；中间轮次不进入最终决断。
+	task.Status = domain.StatusRejected
 	task.UpdatedAt = now
-	return s.reviewStore.UpdateTask(ctx, *task)
+	if err := s.reviewStore.UpdateTask(ctx, *task); err != nil {
+		return fmt.Errorf("更新审核任务失败: %w", err)
+	}
+	if err := s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusRejected); err != nil {
+		return err
+	}
+	return nil
 }
 
 // advanceRoundAfterVote 投票达成通过条件后推进：
@@ -1402,6 +1485,9 @@ func (s *Service) advanceRoundAfterVote(ctx context.Context, task *domain.Review
 		if err != nil {
 			return err
 		}
+		if _, err := resolvedRequiredCount(nextRound, assigned, flow.VoteRule); err != nil {
+			return err
+		}
 		task.AssignedTo = assigned
 		task.Status = domain.StatusReviewing
 	} else {
@@ -1412,60 +1498,23 @@ func (s *Service) advanceRoundAfterVote(ctx context.Context, task *domain.Review
 	return s.reviewStore.UpdateTask(ctx, *task)
 }
 
-// advanceRoundAfterFinalize 把关人决断通过后推进：
-//   - 非最终轮 → 进入下一轮
-//   - 最终轮 → 直接入库（决断通过即发布，无需手动发布）
+// advanceRoundAfterFinalize 处理轮外最终决断通过：
+// 所有审核轮次已经通过，因此决断通过即进入正式题库。
 func (s *Service) advanceRoundAfterFinalize(ctx context.Context, task *domain.ReviewTask, roundIdx int) error {
-	flow, err := s.reviewStore.GetFlowConfig(ctx, task.FlowID)
-	if err != nil {
-		return err
-	}
-	if flow == nil {
-		return fmt.Errorf("审核流程 %s 不存在（可能已被删除）", task.FlowID)
-	}
-
 	task.RoundResults[roundIdx].Passed = true
 	now := time.Now()
-
-	if task.CurrentRound < len(flow.Rounds) {
-		// 进入下一轮
-		task.CurrentRound++
-		nextRound := flow.Rounds[task.CurrentRound-1]
-		assigned, err := s.resolveAssignedForTask(ctx, task, nextRound.ExpertIDs)
-		if err != nil {
-			return err
-		}
-		task.AssignedTo = assigned
-		task.Status = domain.StatusReviewing
-	} else {
-		// 最终轮决断通过 → 直接入库
-		task.Status = domain.StatusPublished
-		if err := s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusPublished); err != nil {
-			return err
-		}
+	task.Status = domain.StatusPublished
+	if err := s.updateQuestionStatus(ctx, task.QuestionID, domain.StatusPublished); err != nil {
+		return err
 	}
 	task.UpdatedAt = now
 	return s.reviewStore.UpdateTask(ctx, *task)
 }
 
-// resolveAssignedForTask 为任务解析某轮审核人。
-// 始终使用任务提交时固化的分类子题库，不能被题目后续分类调整改变。
-func (s *Service) resolveAssignedForTask(ctx context.Context, task *domain.ReviewTask, configured []string) ([]string, error) {
-	if len(configured) > 0 {
-		return configured, nil
-	}
-	if task.SubmissionBankID == "" {
-		// 兼容迁移前已存在的任务：只有当前题目恰好属于一个子题库时才能无歧义补齐。
-		q, err := s.questionStore.GetQuestion(ctx, task.QuestionID)
-		if err != nil {
-			return nil, err
-		}
-		if q == nil || len(q.BankIDs) != 1 {
-			return nil, fmt.Errorf("审核任务 %s 缺少提交题库快照，无法安全分配下一轮审核人", task.ID)
-		}
-		task.SubmissionBankID = q.BankIDs[0]
-	}
-	return s.resolveReviewers(ctx, task.SubmissionBankID, nil)
+// resolveAssignedForTask 为任务解析某轮审核人。当前流程按账号审题权限或
+// 显式名单分配，不再要求历史分类子题库快照。
+func (s *Service) resolveAssignedForTask(ctx context.Context, _ *domain.ReviewTask, configured []string) ([]string, error) {
+	return s.resolveReviewers(ctx, configured)
 }
 
 // FinalizeRequest 最终把关决断请求。
@@ -1478,7 +1527,7 @@ type FinalizeRequest struct {
 	IsSystemAdmin bool                  `json:"is_system_admin"` // 系统管理员可跳过把关人名单
 }
 
-// Finalize 最终把关人对冲突任务做决断。
+// Finalize 最终把关人对所有轮次均已通过的任务做轮外决断。
 // 仅任务处于 conflict 状态时可决断；决断人必须在流程配置的把关人名单内
 // （名单为空则任意把关权限者；系统管理员不受名单限制）。
 func (s *Service) Finalize(ctx context.Context, req FinalizeRequest) error {
@@ -1498,8 +1547,12 @@ func (s *Service) finalizeLocked(ctx context.Context, req FinalizeRequest) error
 	if err := s.ensureTaskQuestionVersion(ctx, task); err != nil {
 		return err
 	}
-	if task.Status != domain.StatusConflict {
-		return fmt.Errorf("任务当前状态为 %s，只有票数冲突的任务需要最终把关", task.Status)
+	flow, err := s.reviewStore.GetFlowConfig(ctx, task.FlowID)
+	if err != nil {
+		return err
+	}
+	if !finalDecisionReady(task, flow) {
+		return fmt.Errorf("任务当前状态为 %s，只有所有轮次审核完成的任务需要最终把关", task.Status)
 	}
 
 	// 把关人名单校验（名单为空 = 任意有最终把关权限的用户；系统管理员不受限）

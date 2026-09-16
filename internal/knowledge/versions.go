@@ -264,7 +264,7 @@ func (s *Service) Tree(ctx context.Context, versionID string) ([]*TreeNode, erro
 			}
 			path = append(path, value)
 			if value == "" {
-				value = "未分类"
+				value = "未设置目录"
 			}
 			key := strings.Join(path, "\x00")
 			node := nodes[key]

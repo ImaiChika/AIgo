@@ -10,7 +10,7 @@ import (
 // 属于客户端可纠正的状态冲突，API 层应映射为 409 而不是 500。
 var ErrReviewNotSubmittable = errors.New("题目当前状态不允许提交审核")
 
-// ErrReviewBadRequest 送审请求本身不合法（缺少分类子题库、流程与题库不匹配、题目不属于所选题库等）。
+// ErrReviewBadRequest 送审请求本身不合法。
 // API 层应映射为 400。
 var ErrReviewBadRequest = errors.New("送审请求不合法")
 
@@ -21,7 +21,7 @@ const (
 	StatusAIDraft          QuestionStatus = "ai_draft"          // AI 草稿（刚生成）
 	StatusAutoChecked      QuestionStatus = "auto_checked"      // 自动初评完成
 	StatusReviewing        QuestionStatus = "reviewing"         // 审核中
-	StatusConflict         QuestionStatus = "conflict"          // 本轮票数冲突，待最终把关人决断
+	StatusConflict         QuestionStatus = "conflict"          // 所有轮次通过，待轮外最终把关人决断
 	StatusRevisionRequired QuestionStatus = "revision_required" // 需要修改
 	StatusRejected         QuestionStatus = "rejected"          // 驳回
 	StatusApproved         QuestionStatus = "approved"          // 审核动作/结论：通过（不能作为题目或任务终态）
@@ -57,14 +57,14 @@ type Expert struct {
 
 // ReviewFlowConfig 审核流程配置。
 // 管理员可配置多个流程，每个流程包含多轮审核。
-// BankID 限定该流程适用的题库（空=通用）；FinalReviewerIDs 为最终把关管理员列表。
-// VoteRule 投票规则："" = 达到通过票数即过轮（默认）；"veto" = 一票否决（任一驳回直接驳回）。
+// BankID 仅保留历史数据结构兼容；新流程必须为空。FinalReviewerIDs 为最终把关管理员列表。
+// VoteRule 投票规则："" = 达到通过票数即过轮（默认）；"veto" = 本轮收齐意见后须全员通过，否则按驳回/需修改结果结束本轮。
 type ReviewFlowConfig struct {
 	ID               string        `json:"id"`                           // 流程唯一标识
 	Name             string        `json:"name"`                         // 流程名称
 	Description      string        `json:"description,omitempty"`        // 描述
 	Subject          string        `json:"subject"`                      // 适用专业（兼容旧字段）
-	BankID           string        `json:"bank_id,omitempty"`            // 适用题库（空=通用）
+	BankID           string        `json:"bank_id,omitempty"`            // 历史兼容字段；新流程不使用
 	FinalReviewerIDs []string      `json:"final_reviewer_ids,omitempty"` // 最终把关管理员（空=任意有最终把关权限者）
 	VoteRule         string        `json:"vote_rule,omitempty"`          // 投票规则（""/veto）
 	Rounds           []RoundConfig `json:"rounds"`                       // 各轮配置
@@ -72,12 +72,12 @@ type ReviewFlowConfig struct {
 }
 
 // RoundConfig 单轮审核配置。
-// ExpertIDs 为空时，提交审核自动收集"有审题权限且题库范围匹配"的用户作为本轮审核人。
+// ExpertIDs 为空时，提交审核自动收集当前启用且有审题权限的用户作为本轮审核人。
 type RoundConfig struct {
 	RoundNumber   int      `json:"round_number"`   // 第几轮
 	Name          string   `json:"name"`           // 轮次名称（如"命题教师初审"）
 	ExpertIDs     []string `json:"expert_ids"`     // 本轮审核人 ID 列表（空=按审题权限自动匹配）
-	RequiredCount int      `json:"required_count"` // 需要几位通过（无反对票时提前通过；0=全部）
+	RequiredCount int      `json:"required_count"` // 需要几位通过（达标立即过轮；未达标收齐意见后裁定；0=全部）
 	CanModify     bool     `json:"can_modify"`     // 是否允许直接修改题目
 	PassCondition string   `json:"pass_condition"` // 通过条件说明
 	IsRequired    bool     `json:"is_required"`    // 是否必审
@@ -91,7 +91,7 @@ type ReviewTask struct {
 	ID                 string         `json:"id"`                       // 任务唯一标识
 	QuestionID         string         `json:"question_id"`              // 关联的题目 ID
 	FlowID             string         `json:"flow_id"`                  // 使用的审核流程 ID
-	SubmissionBankID   string         `json:"submission_bank_id"`       // 本批次提交时选定的分类子题库快照
+	SubmissionBankID   string         `json:"submission_bank_id"`       // 历史兼容快照；新任务为空
 	CurrentRound       int            `json:"current_round"`            // 当前轮次
 	Status             QuestionStatus `json:"status"`                   // 任务状态
 	AssignedTo         []string       `json:"assigned_to"`              // 当前轮审核人 ID

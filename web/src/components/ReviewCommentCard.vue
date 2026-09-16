@@ -21,7 +21,10 @@ const attitudeMap = {
 
 const attitude = attitudeMap[props.record.review_status] || { text: props.record.review_status, cls: "" };
 
-const displayName = props.record.expert_name || props.fallbackName || props.record.expert_id;
+const storedName = (props.record.expert_name || "").trim();
+const displayName = storedName && !storedName.startsWith("user-")
+  ? storedName
+  : props.fallbackName || storedName || props.record.expert_id;
 
 const attemptTag = props.record.attempt > 1 ? `第${props.record.attempt}批` : "";
 const isFinal = (props.record.id || "").startsWith("rec-final-");
@@ -65,10 +68,10 @@ function formatTime(ts) {
 <style scoped>
 .rc-card {
   border: 1px solid #e5ebf3;
-  border-top: 3px solid #c6d2e2;
+  border-top: 2px solid #c6d2e2;
   border-radius: 8px;
   background: #fff;
-  padding: 10px 12px;
+  padding: 11px 12px;
   min-width: 0;
 }
 
@@ -95,31 +98,29 @@ function formatTime(ts) {
 .rc-attitude {
   font-size: 11px;
   font-weight: 700;
-  padding: 1px 7px;
-  border-radius: 4px;
+  padding: 0;
   white-space: nowrap;
 }
 
 .rc-final {
-  padding: 1px 6px;
+  padding: 1px 5px;
+  border: 1px solid #ded3f4;
   border-radius: 4px;
   color: #7652bb;
-  background: #f2edff;
+  background: transparent;
   font-size: 10px;
   font-weight: 700;
   white-space: nowrap;
 }
 
-.at-ok { background: #f0fff8; color: #087c55; }
-.at-no { background: #fff0f0; color: #c54858; }
-.at-rev { background: #fdf2e3; color: #c07b22; }
+.at-ok { color: #087c55; }
+.at-no { color: #c54858; }
+.at-rev { color: #c07b22; }
 
 .rc-attempt {
   font-size: 10px;
   font-weight: 700;
-  padding: 1px 5px;
-  border-radius: 3px;
-  background: #eff3f9;
+  padding: 0;
   color: #6e7b8f;
   white-space: nowrap;
 }
@@ -140,7 +141,7 @@ function formatTime(ts) {
   border: 1px solid #eef2f7;
   border-radius: 6px;
   padding: 5px 8px;
-  background: #fafbfd;
+  background: #fbfcfe;
 }
 
 .rc-section.filled {

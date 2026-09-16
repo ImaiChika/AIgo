@@ -6,8 +6,9 @@ import { currentUser, permissionName } from "../auth.js";
 const toast = ref("");
 const users = ref([]);
 const roles = ref([]);
-const banks = ref([]);
 const permGroups = ref([]);
+// 分类子题库管理已从当前产品流程撤下；历史权限只在后端保留兼容。
+const hiddenPermissionCodes = new Set(["bank:manage", "question:create"]);
 const loading = ref(false);
 const showCreate = ref(false);
 const expandedRow = ref(""); // 展开权限矩阵的用户ID
@@ -32,18 +33,17 @@ function showToast(msg) {
 async function loadAll() {
   loading.value = true;
   try {
-    const [userData, roleData, bankData, permData] = await Promise.all([
+    const [userData, roleData, permData] = await Promise.all([
       api.listUsers(),
       api.listRoles(),
-      api.listBanks(false),
       api.listPermissions(),
     ]);
     users.value = userData.users || [];
     roles.value = roleData.roles || [];
-    banks.value = bankData.banks || [];
     // 按分组整理权限点
     const groups = {};
     for (const p of permData.permissions || []) {
+      if (hiddenPermissionCodes.has(p.code)) continue;
       if (!groups[p.group]) groups[p.group] = [];
       groups[p.group].push(p);
     }
@@ -113,17 +113,12 @@ async function togglePerm(u, code) {
   await saveUser(u, { permissions: Array.from(perms) });
 }
 
-async function toggleBank(u, bankId) {
-  if (isProtectedUser(u)) return;
-  const banksArr = new Set(u.bank_ids || []);
-  if (banksArr.has(bankId)) banksArr.delete(bankId);
-  else banksArr.add(bankId);
-  await saveUser(u, { bank_ids: Array.from(banksArr) });
-}
-
 async function changeRole(u, role) {
   if (isProtectedUser(u)) return;
-  await saveUser(u, { role, roles: role ? [role] : [] });
+  const assigned = roleIDs(u);
+  // 在已经挂载的身份间切换默认身份时保留附加身份；选择一个全新模板时才替换。
+  const next = role ? (assigned.includes(role) ? assigned : [role]) : [];
+  await saveUser(u, { role, roles: next });
 }
 
 function toggleRolePicker(u) {
@@ -221,7 +216,7 @@ onMounted(loadAll);
           </div>
         </div>
         <button class="primary-button" type="button" :disabled="creating" @click="createUser">{{ creating ? "创建中..." : "确认创建" }}</button>
-        <span class="form-hint">创建后可在下方列表中继续勾选具体权限与题库范围</span>
+        <span class="form-hint">创建后可在下方列表中继续勾选具体权限</span>
       </div>
 
       <div v-if="loading" class="loading">加载中...</div>
@@ -283,7 +278,7 @@ onMounted(loadAll);
                   <div v-for="g in permGroups" :key="g.group" class="perm-group">
                     <div class="perm-group-title">{{ g.group }}权限</div>
                     <div class="perm-checks">
-                      <label v-for="p in g.perms" :key="p.code" class="perm-check" :class="{ scoped: p.bank_scope }">
+                      <label v-for="p in g.perms" :key="p.code" class="perm-check">
                         <input
                           type="checkbox"
                           :checked="directPerms(u).includes(p.code)"
@@ -291,34 +286,12 @@ onMounted(loadAll);
                           @change="togglePerm(u, p.code)"
                         />
                         {{ permissionName(p) }}
-                        <span v-if="p.bank_scope" class="scope-mark" title="可按题库限定范围">库</span>
                       </label>
                     </div>
                   </div>
 
-                  <!-- 题库范围 -->
-                  <div class="perm-group bank-scope">
-                    <div class="perm-group-title">
-                      分类子题库范围
-                      <span class="scope-hint">（不选表示全部；对角色权限和直接权限都生效）</span>
-                    </div>
-                    <div class="bank-chips">
-                      <button
-                        v-for="b in banks" :key="b.id"
-                        type="button"
-                        class="bank-chip"
-                        :class="{ selected: (u.bank_ids || []).includes(b.id) }"
-                        :disabled="isProtectedUser(u)"
-                        @click="toggleBank(u, b.id)"
-                      >
-                        {{ b.name }}
-                      </button>
-                      <span v-if="!banks.length" class="no-bank">暂无题库，请先在「题库管理」创建（如内科、外科）</span>
-                    </div>
-                  </div>
-
                   <p class="matrix-note">
-                    角色决定“能做什么”，题库范围决定“可在哪些专业子题库做”；审题与最终决断的题目内容按任务分配开放，不需要题库查看权限。
+                    角色决定“能做什么”；审题与最终决断的题目内容按审核任务分配开放。
                   </p>
                 </div>
               </td>
@@ -591,55 +564,6 @@ onMounted(loadAll);
 
 .perm-check input {
   cursor: pointer;
-}
-
-.scope-mark {
-  font-size: 10px;
-  color: #c07b22;
-  background: #fdf2e3;
-  border-radius: 3px;
-  padding: 0 4px;
-}
-
-.bank-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.bank-chip {
-  padding: 5px 14px;
-  border: 1px solid #e5ebf3;
-  border-radius: 16px;
-  background: #fff;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.bank-chip:hover {
-  border-color: #1385f8;
-}
-
-.bank-chip.selected {
-  background: #1385f8;
-  color: #fff;
-  border-color: #1385f8;
-}
-
-.bank-chip:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
-}
-
-.no-bank {
-  font-size: 12px;
-  color: #c07b22;
-}
-
-.scope-hint {
-  font-size: 11px;
-  color: #9aa5b4;
-  font-weight: 400;
 }
 
 .matrix-note {

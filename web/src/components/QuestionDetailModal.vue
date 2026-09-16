@@ -5,7 +5,6 @@ import { hasPerm } from "../auth.js";
 
 const props = defineProps({
   question: { type: Object, default: null },
-  bankName: { type: Function, default: null },
 });
 const emit = defineEmits(["close", "refresh"]);
 
@@ -159,14 +158,6 @@ const statusClass = (status) => {
   return "";
 };
 
-function bankLabel() {
-  if (!props.question) return "";
-  const ids = props.question.bank_ids || [];
-  if (!ids.length) return "待归类（尚未归入分类子题库）";
-  const names = ids.map((id) => (props.bankName ? props.bankName(id) : id));
-  return names.join("、");
-}
-
 function difficultyText(d) {
   const map = { easy: "简单", medium: "中等", hard: "困难" };
   if (map[d]) return map[d];
@@ -195,7 +186,6 @@ function difficultyText(d) {
         <span v-if="question.system" class="q-param"><label>系统</label>{{ question.system }}</span>
         <span v-if="question.difficulty" class="q-param"><label>难度</label>{{ difficultyText(question.difficulty) }}</span>
         <span v-if="question.cognitive_level" class="q-param"><label>认知层次</label>{{ question.cognitive_level }}</span>
-        <span class="q-param"><label>题库</label>{{ bankLabel() }}</span>
         <span class="q-param"><label>状态</label><b :class="statusClass(effectiveStatus)">{{ statusText(effectiveStatus) }}</b></span>
         <span class="q-param"><label>版本</label>v{{ question.version }}</span>
       </div>

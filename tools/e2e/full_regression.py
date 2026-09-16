@@ -39,8 +39,8 @@ with sync_playwright() as p:
     page.get_by_placeholder("请输入用户名").fill("admin")
     page.get_by_placeholder("请输入密码").fill("admin")
     page.get_by_role("button", name="登录").click()
-    page.wait_for_url("**/generate", timeout=20000)
-    check("登录并进入命题工作区", True, page.url)
+    page.wait_for_url("**/my", timeout=20000)
+    check("登录并进入我的数据", True, page.url)
 
     # ===== 2. 知识点页回归（快照缓存改动） =====
     page.goto(BASE + "/knowledge")
@@ -77,7 +77,7 @@ with sync_playwright() as p:
     page.wait_for_timeout(1000)
     body = page.inner_text("body")
     check("生成页已移除「目标题库」选择器", "目标题库" not in body, "")
-    picker = page.get_by_placeholder(re.compile("搜索知识点"))
+    picker = page.get_by_placeholder(re.compile("搜索大纲"))
     picker.fill("消化性溃疡")
     page.wait_for_timeout(1200)
     items = page.locator(".kp-item")
@@ -86,7 +86,7 @@ with sync_playwright() as p:
         page.wait_for_timeout(1500)
         items = page.locator(".kp-item")
     ok_kp = items.count() > 0
-    check("知识点选择器出结果", ok_kp, f"items={items.count()}")
+    check("考试大纲选择器出结果", ok_kp, f"items={items.count()}")
     if not ok_kp:
         page.screenshot(path="/tmp/e2e_fail_picker.png", full_page=True)
         sys.exit(1)
@@ -162,7 +162,7 @@ with sync_playwright() as p:
     page.goto(BASE + "/bank")
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(1500)
-    check("题库页已移除子题库筛选（送审组织只在题库管理页）", page.locator(".bank-filter-row").count() == 0, "")
+    check("题库页已移除分类子题库筛选", page.locator(".bank-filter-row").count() == 0, "")
     if stem_snippet:
         # 管理员默认进入全局题库作用域；新题在个人题库的待审核层，先切回“我的题库”
         scope_btn = page.locator(".scope-tab", has_text="我的题库")
@@ -195,8 +195,8 @@ with sync_playwright() as p:
     import subprocess
     subprocess.run(["psql", dsn, "-c",
         "DELETE FROM questions WHERE status IN ('ai_draft','ai_reviewed') AND created_by='admin' AND created_at > NOW() - INTERVAL '30 minutes'"], capture_output=True)
-    subprocess.run(["psql", dsn, "-c",
-        "DELETE FROM generation_runs WHERE created_at > NOW() - INTERVAL '30 minutes'"], capture_output=True)
+    subprocess.run(["psql", dsn, "-v", "ON_ERROR_STOP=1", "-c",
+        "DELETE FROM generation_runs WHERE started_at > NOW() - INTERVAL '30 minutes'"], capture_output=True, check=True)
     print("cleanup done")
 
     browser.close()

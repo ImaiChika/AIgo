@@ -15,14 +15,11 @@ const loading = ref(false);
 const reviewScope = ref(hasPerm("question:view") ? "personal" : "global");
 
 const filterStatus = ref("");
-const filterBank = ref("");
 const searchQuery = ref("");
 const page = ref(1);
 const pageSize = 50;
 const expandedId = ref(""); // 展开查看专家评语的题目ID
-const banks = ref([]);
 const experts = ref([]);
-const unassignedBankLabel = "待归类（尚未归入分类子题库）";
 
 const statusMeta = {
   pending: { label: "未提交审核", cls: "s-pending" },
@@ -56,7 +53,6 @@ async function loadResults(resetPage = true) {
   try {
     const data = await api.reviewResults({
       final_status: filterStatus.value,
-      bank_id: filterBank.value,
       q: searchQuery.value,
       page: page.value,
       page_size: pageSize,
@@ -96,7 +92,6 @@ function switchScope(scope) {
 
 function clearFilters() {
   filterStatus.value = "";
-  filterBank.value = "";
   searchQuery.value = "";
   doSearch();
 }
@@ -106,15 +101,6 @@ function setStatusFilter(s) {
   doSearch();
 }
 
-async function loadBanks() {
-  try {
-    const data = await api.listBanks(false);
-    banks.value = data.banks || [];
-  } catch (e) {
-    console.error(e);
-  }
-}
-
 async function loadExperts() {
   try {
     const data = await api.listReviewers();
@@ -122,17 +108,6 @@ async function loadExperts() {
   } catch (e) {
     console.error(e);
   }
-}
-
-function bankName(id) {
-  if (!id) return unassignedBankLabel;
-  const b = banks.value.find((x) => x.id === id);
-  return b ? b.name : id;
-}
-
-function questionBanks(ids) {
-  if (!ids || !ids.length) return unassignedBankLabel;
-  return ids.map(bankName).join("、");
 }
 
 function expertName(id) {
@@ -182,7 +157,6 @@ function conclusionText(c) {
 
 onMounted(() => {
   loadResults();
-  loadBanks();
   loadExperts();
 });
 </script>
@@ -244,11 +218,6 @@ onMounted(() => {
           <option value="rejected">已驳回</option>
           <option value="published">已通过</option>
         </select>
-        <select v-model="filterBank" @change="doSearch">
-          <option value="">全部题库</option>
-          <option value="__unclassified__">{{ unassignedBankLabel }}</option>
-          <option v-for="b in banks" :key="b.id" :value="b.id">{{ b.name }}</option>
-        </select>
         <button class="ghost-button" type="button" @click="doSearch">搜索</button>
         <button class="ghost-button" type="button" @click="clearFilters">重置</button>
       </div>
@@ -261,7 +230,6 @@ onMounted(() => {
               <span class="r-stem">{{ (item.question.clinical_stem || "").slice(0, 70) }}{{ (item.question.clinical_stem || "").length > 70 ? "..." : "" }}</span>
               <span class="r-meta">
                 <span v-if="item.question.profession">专业：{{ item.question.profession }}</span>
-                <span>题库：{{ questionBanks(item.question.bank_ids) }}</span>
                 <span>难度：{{ item.question.difficulty }}</span>
               </span>
             </div>
@@ -280,7 +248,6 @@ onMounted(() => {
                 <span v-if="item.question.system" class="q-param"><label>系统</label>{{ item.question.system }}</span>
                 <span class="q-param"><label>难度</label>{{ difficultyText(item.question.difficulty) }}</span>
                 <span v-if="item.question.cognitive_level" class="q-param"><label>认知层次</label>{{ item.question.cognitive_level }}</span>
-                <span class="q-param"><label>题库</label>{{ questionBanks(item.question.bank_ids) }}</span>
                 <span class="q-param"><label>版本</label>v{{ item.question.version }}</span>
                 <span class="q-param"><label>ID</label>{{ item.question.id }}</span>
               </div>
@@ -309,7 +276,6 @@ onMounted(() => {
             <div v-if="item.task" class="task-line">
               审核任务：第 {{ item.task.current_round }} 轮 / 共
               {{ item.task.round_results?.length || 1 }} 轮 ｜ 流程：{{ item.task.flow_id }} ｜
-              <template v-if="item.task.submission_bank_id">提交分类：{{ bankName(item.task.submission_bank_id) }} ｜</template>
               审核人：{{ (item.task.assigned_to || []).map(expertName).join("、") || "自动匹配" }}
               <span v-if="item.task.final_decision" class="final-decision">
                 ｜ 最终决断：{{ reviewDisplayName(item.task.final_decision.expert_id, item.task.final_decision.expert_name) }} → {{ conclusionText("final_" + item.task.final_decision.conclusion) }}

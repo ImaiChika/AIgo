@@ -174,9 +174,9 @@ async function doFinalize() {
   } catch (e) {
     const msg = e.message || "";
     // 后端幂等拦截的重复决断给出友好提示（任务状态已流转即视为决断已生效）
-    if (msg.includes("只有票数冲突的任务需要最终把关")) {
+    if (msg.includes("只有所有轮次审核完成的任务需要最终把关")) {
       showToast("该任务已完成决断，无需重复提交");
-    } else if (msg.includes("版本") && msg.includes("请撤销或退回后重新提交")) {
+	    } else if (msg.includes("版本") && msg.includes("请由管理员处理当前审核任务后再重新提交")) {
       showToast("题目在决断期间被修改，请刷新后按最新版本处理");
     } else {
       showToast("决断失败: " + msg);
@@ -259,7 +259,7 @@ onMounted(() => {
         >
           <div class="dc-head">
             <span class="dc-flow">{{ item.flow_name || item.task.flow_id }}</span>
-            <span class="dc-round">第 {{ item.round_index }}/{{ item.round_count }} 轮</span>
+            <span class="dc-round">已完成 {{ item.round_count }} 轮 · 轮外决断</span>
             <span class="dc-badge">待决断</span>
           </div>
           <div class="dc-stem">{{ (item.question.clinical_stem || "").slice(0, 55) }}{{ (item.question.clinical_stem || "").length > 55 ? "..." : "" }}</div>
@@ -293,8 +293,7 @@ onMounted(() => {
       <!-- 任务信息 -->
       <div class="task-info">
         <strong>{{ selected.flow_name || selected.task.flow_id }}</strong>
-        <span>第 {{ selected.round_index }}/{{ selected.round_count }} 轮</span>
-        <span v-if="selected.round_name">｜ {{ selected.round_name }}</span>
+        <span>已完成 {{ selected.round_count }} 轮 · 轮外最终决断</span>
         <div class="vote-bar">
           <div class="vote-bar-fill" :style="{ width: votePercent + '%' }"></div>
         </div>
@@ -306,19 +305,25 @@ onMounted(() => {
         </div>
       </div>
 
+      <p class="decision-scope-hint">所有审核轮次均已通过。下方按当前提交批次展示全部轮次的审核评语，最终把关不属于任何一轮。</p>
+
       <!-- 题目完整信息 -->
       <div class="q-detail">
-        <div class="q-params">
-          <span v-if="selected.question.outline_code" class="q-param"><label>大纲代码</label>{{ selected.question.outline_code }}</span>
+        <div class="q-params q-primary-params">
           <span v-if="selected.question.profession" class="q-param"><label>专业</label>{{ selected.question.profession }}</span>
           <span v-if="selected.question.system" class="q-param"><label>系统</label>{{ selected.question.system }}</span>
           <span class="q-param"><label>难度</label>{{ difficultyText(selected.question.difficulty) }}</span>
-          <span v-if="selected.question.cognitive_level" class="q-param"><label>认知层次</label>{{ selected.question.cognitive_level }}</span>
           <span class="q-param"><label>版本</label>v{{ selected.question.version }}</span>
-          <span class="q-param"><label>审核绑定</label>v{{ selected.task.question_version }}</span>
-          <span v-if="selected.task.submission_bank_id" class="q-param"><label>提交分类</label>{{ selected.task.submission_bank_id }}</span>
-          <span class="q-param"><label>ID</label>{{ selected.question.id }}</span>
         </div>
+        <details class="question-extra">
+          <summary>查看题目属性</summary>
+          <div class="q-params q-technical-params">
+            <span v-if="selected.question.outline_code" class="q-param"><label>大纲代码</label>{{ selected.question.outline_code }}</span>
+            <span v-if="selected.question.cognitive_level" class="q-param"><label>认知层次</label>{{ selected.question.cognitive_level }}</span>
+            <span class="q-param"><label>审核绑定</label>v{{ selected.task.question_version }}</span>
+            <span class="q-param"><label>题目 ID</label>{{ selected.question.id }}</span>
+          </div>
+        </details>
         <div class="q-stem-full">
           <label>题干</label>
           <p>{{ selected.question.clinical_stem }}</p>
@@ -339,18 +344,20 @@ onMounted(() => {
       </div>
 
       <p v-if="selected.version_mismatch" class="version-mismatch-warning">
-        当前题目版本与审核任务不一致，不能决断；请撤销或退回后重新提交审核。
+        当前题目版本与审核任务不一致，不能决断；请由管理员处理当前审核任务后再重新提交审核。
       </p>
 
       <!-- AI 检查报告（决断者全量可见） -->
-      <div v-if="selectedAIReview" class="ai-report">
-        <div class="ai-report-head">
+      <details v-if="selectedAIReview" class="ai-report">
+        <summary class="ai-report-summary">
           <h3>AI 检查报告</h3>
           <span class="ai-verdict" :class="selectedAIReview.verdict === 'pass' ? 'good' : selectedAIReview.verdict === 'reject' ? 'bad' : 'warn'">
             {{ selectedAIVerdict }}<template v-if="selectedAIAvg !== null">（综合 {{ selectedAIAvg }} 分）</template>
           </span>
           <span v-if="selectedAIStale" class="ai-stale">题目已修改，结果待复检</span>
-        </div>
+          <span class="ai-caret">展开 ▼</span>
+        </summary>
+        <div class="ai-report-body">
         <div v-if="selectedAIScores.length" class="ai-score-row">
           <span v-for="s in selectedAIScores" :key="s.label" class="ai-score">{{ s.label }} <b :class="s.value >= 70 ? 'good' : s.value >= 60 ? 'warn' : 'bad'">{{ s.value }}</b></span>
         </div>
@@ -362,7 +369,8 @@ onMounted(() => {
         </ul>
         <p v-if="selectedAIReview.suggestion" class="ai-suggestion">AI 建议：{{ selectedAIReview.suggestion }}</p>
         <p class="ai-hint">检查时间：{{ selectedAIReview.created_at ? new Date(selectedAIReview.created_at).toLocaleString() : "-" }}<span v-if="selectedAIReview.model"> · 模型：{{ selectedAIReview.model }}</span></p>
-      </div>
+        </div>
+      </details>
 
       <!-- 专家评语对比（把关人全量可见，按轮次切换对比） -->
       <div class="records-block">
@@ -431,11 +439,11 @@ onMounted(() => {
       <!-- 决断表单 -->
       <div class="finalize-form">
         <h3>最终决断</h3>
-        <p class="finalize-hint">通过时评语可不填；退回修改或驳回时请至少填写一栏理由。</p>
+        <p class="finalize-hint">当前题目已完成全部审核轮次；决断通过后正式定稿，退回修改或驳回时请至少填写一栏理由。</p>
         <div class="finalize-row">
           <select v-model="finalizeAction">
-            <option value="approved">通过（非最终轮进入下一轮，最终轮完成审核）</option>
-            <option value="rejected">驳回（题目不可用）</option>
+            <option value="approved">通过</option>
+            <option value="rejected">驳回</option>
             <option value="revision_required">退回修改</option>
           </select>
           <button class="primary-button" type="button" :disabled="submitting || selected.version_mismatch" @click="doFinalize">
@@ -457,15 +465,16 @@ onMounted(() => {
 <style scoped>
 .decisions-layout {
   display: grid;
-  grid-template-columns: 380px minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: 350px minmax(0, 1fr);
+  gap: 14px;
   min-width: 0;
+  align-items: start;
 }
 
 .decision-list-panel {
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 180px);
+  max-height: calc(100vh - 154px);
   overflow: hidden;
 }
 
@@ -488,13 +497,13 @@ onMounted(() => {
   padding: 10px 12px;
   background: #fff;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: border-color 0.15s, background 0.15s;
   min-width: 0;
 }
 
 .decision-card:hover {
   border-color: var(--blue);
-  box-shadow: 0 4px 12px rgba(19, 133, 248, 0.1);
+  background: #fbfdff;
 }
 
 .decision-card.active {
@@ -513,9 +522,7 @@ onMounted(() => {
   font-size: 12px;
   font-weight: 700;
   color: #172033;
-  background: #f0f3f7;
-  padding: 2px 8px;
-  border-radius: 4px;
+  padding: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -526,9 +533,9 @@ onMounted(() => {
   font-size: 11px;
   font-weight: 700;
   color: #6e7b8f;
-  background: #f0f3f7;
-  padding: 2px 6px;
-  border-radius: 4px;
+  color: #58738d;
+  background: transparent;
+  padding: 0;
   white-space: nowrap;
 }
 
@@ -591,6 +598,10 @@ onMounted(() => {
   color: var(--blue);
 }
 
+.decision-card .dc-action {
+  display: none;
+}
+
 .empty {
   text-align: center;
   color: #6e7b8f;
@@ -629,11 +640,11 @@ onMounted(() => {
 }
 
 .task-info {
-  background: var(--surface-muted);
-  border: 1px solid var(--line);
+  background: #f9fbfd;
+  border: 1px solid #e2e9f0;
   border-radius: 8px;
-  padding: 10px 12px;
-  margin-bottom: 12px;
+  padding: 11px 12px;
+  margin-bottom: 14px;
   font-size: 13px;
 }
 
@@ -644,6 +655,15 @@ onMounted(() => {
 
 .task-info > span {
   color: #6e7b8f;
+  font-size: 12px;
+}
+
+.decision-scope-hint {
+  margin: -4px 0 14px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #eff8ff;
+  color: #49627d;
   font-size: 12px;
 }
 
@@ -669,10 +689,11 @@ onMounted(() => {
 
 /* 题目详情 */
 .q-detail {
-  border: 1px solid #dce8f7;
+  border: 1px solid #e2e9f0;
   border-radius: 8px;
-  padding: 12px;
-  margin-bottom: 12px;
+  padding: 14px;
+  margin-bottom: 14px;
+  background: #fff;
 }
 
 .q-params {
@@ -680,6 +701,35 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 6px 16px;
   margin-bottom: 8px;
+}
+
+.q-primary-params {
+  margin-bottom: 0;
+}
+
+.q-technical-params {
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid #edf1f5;
+}
+
+.question-extra {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #edf1f5;
+}
+
+.question-extra summary {
+  width: fit-content;
+  color: #5c7690;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.question-extra summary:hover {
+  color: #0571dc;
 }
 
 .q-param {
@@ -794,8 +844,43 @@ onMounted(() => {
   border: 1px solid #dce8f7;
   background: #f8fbff;
   border-radius: 8px;
-  padding: 10px 14px;
-  margin-bottom: 12px;
+  padding: 0 14px;
+  margin-bottom: 14px;
+}
+
+.ai-report-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.ai-report-summary::-webkit-details-marker,
+.question-extra summary::-webkit-details-marker {
+  display: none;
+}
+
+.ai-report-summary::before,
+.question-extra summary::before {
+  content: "＋";
+  color: #7d91a4;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.ai-report[open] .ai-report-summary::before,
+.question-extra[open] summary::before {
+  content: "−";
+}
+
+.ai-report-summary .ai-caret {
+  margin-left: auto;
+}
+
+.ai-report-body {
+  padding: 0 0 11px 20px;
 }
 
 .ai-report-head {
@@ -907,9 +992,9 @@ onMounted(() => {
 }
 
 .round-tab.active {
-  background: var(--blue);
-  border-color: var(--blue);
-  color: #fff;
+  background: #edf6ff;
+  border-color: #8fc2ed;
+  color: #0571dc;
 }
 
 .round-stats-line {
@@ -950,9 +1035,10 @@ onMounted(() => {
 /* 决断表单 */
 .finalize-form {
   padding: 14px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #fff;
+  border: 1px solid #cbddec;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 1px 2px rgba(24, 39, 75, 0.04);
 }
 
 .finalize-form h3 {
@@ -980,6 +1066,11 @@ onMounted(() => {
   border-radius: 7px;
   padding: 0 8px;
   font-size: 13px;
+}
+
+.ai-caret {
+  color: #7d8d9f;
+  font-size: 11px;
 }
 
 .finalize-comment {

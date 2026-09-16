@@ -50,11 +50,6 @@ function statusName(s) {
   return statusNames[s] || s;
 }
 
-function displayBankName(name) {
-  // 兼容旧版接口标签；新接口直接返回“待归类”。
-  return name === "未分类" ? "待归类" : name;
-}
-
 function displayKnowledgeCategory(name) {
   // 知识点目录的缺省分类与题库归属不是同一概念。
   return name === "未分类" ? "未设置分类" : name;
@@ -265,19 +260,6 @@ onMounted(loadStats);
               </template>
             </div>
             <p v-if="!Object.keys(tierCounts).length" class="empty-hint">暂无可见题库</p>
-          </div>
-
-          <!-- 分类子题库分布 -->
-          <div class="chart-card">
-            <h3>分类子题库分布</h3>
-            <div v-for="(count, name) in stats.bank_distribution || {}" :key="name" class="bar-row">
-              <span class="bar-label">{{ displayBankName(name) }}</span>
-              <div class="bar-track">
-                <div class="bar-fill blue" :style="{ width: barWidth(count, stats.question_count) }"></div>
-              </div>
-              <span class="bar-count">{{ count }}</span>
-            </div>
-            <p v-if="!Object.keys(stats.bank_distribution || {}).length" class="empty-hint">暂无数据</p>
           </div>
 
           <!-- 审核状态分布 -->

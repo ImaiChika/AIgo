@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { api } from "../api.js";
 import { currentUser, hasPerm, roleName } from "../auth.js";
 
@@ -22,7 +22,7 @@ const counts = ref({
 });
 
 const todoEntries = computed(() => [
-  { key: "newQuestions", label: "待提交审核", count: counts.value.newQuestions, to: "/new-questions", visible: hasPerm("review:submit") || hasPerm("question:generate") },
+  { key: "newQuestions", label: "待提交审核", count: counts.value.newQuestions, to: "/new-questions", visible: hasPerm("review:submit") },
   { key: "review", label: "待我审核", count: counts.value.review, to: "/review", visible: hasPerm("review:do") },
   { key: "decisions", label: "待我决断", count: counts.value.decisions, to: "/review-decisions", visible: hasPerm("review:final") },
   { key: "revisions", label: "待我修改", count: counts.value.revisions, to: "/my-revisions", visible: hasPerm("question:edit") },
@@ -103,6 +103,7 @@ async function loadDashboard() {
 }
 
 onMounted(loadDashboard);
+watch(() => `${currentUser.value?.id || ""}:${currentUser.value?.role || ""}:${(currentUser.value?.permissions || []).join(",")}`, loadDashboard);
 </script>
 
 <template>
@@ -172,7 +173,7 @@ onMounted(loadDashboard);
       <div class="achievement-grid">
         <div class="achievement-card generated"><span>我已出题</span><strong>{{ loading ? "—" : counts.generated }}</strong><small>累计生成题目</small></div>
         <div class="achievement-card reviewed"><span>我已审核</span><strong>{{ loading ? "—" : counts.reviewed }}</strong><small>累计提交审核意见</small></div>
-        <RouterLink class="achievement-card pending" to="/new-questions"><span>待提交审核</span><strong>{{ loading ? "—" : counts.newQuestions }}</strong><small>进入新题提交页 →</small></RouterLink>
+        <RouterLink v-if="hasPerm('review:submit')" class="achievement-card pending" to="/new-questions"><span>待提交审核</span><strong>{{ loading ? "—" : counts.newQuestions }}</strong><small>进入新题提交页 →</small></RouterLink>
       </div>
     </section>
 

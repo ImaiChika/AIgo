@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -84,20 +85,18 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 // handleMySummary 返回个人中心需要的轻量累计指标，不暴露题目内容或他人数据。
 func (s *Server) handleMySummary(w http.ResponseWriter, r *http.Request) {
 	userID := auth.GetUserID(r.Context())
-	questions, err := s.questionStore.ListQuestions(r.Context())
+	_, generated, err := s.questionStore.SearchQuestions(r.Context(), storage.QuestionFilter{OwnerID: userID}, 1, 1)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取个人数据失败")
 		return
 	}
-	generated, newQuestions := 0, 0
-	for _, question := range questions {
-		if question.OwnerID != userID {
-			continue
-		}
-		generated++
-		if question.Status == domain.StatusAIReviewed {
-			newQuestions++
-		}
+	_, newQuestions, err := s.questionStore.SearchQuestions(r.Context(), storage.QuestionFilter{
+		OwnerID: userID, Status: string(domain.StatusAIReviewed),
+		Tiers: []string{string(domain.TierWorking)}, NoReviewTask: true,
+	}, 1, 1)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取待提交新题失败")
+		return
 	}
 	reviewed := 0
 	if s.reviewSvc != nil {
@@ -324,6 +323,31 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "请求格式错误")
 		return
 	}
+	if s.reviewSvc != nil {
+		current, currentErr := s.authSvc.GetUserByID(userID)
+		roles := append([]string(nil), req.Roles...)
+		if req.Role != "" && !slices.Contains(roles, req.Role) {
+			roles = append([]string{req.Role}, roles...)
+		}
+		futurePermissions, permissionErr := s.authSvc.PermissionsForAssignments(r.Context(), roles, req.Permissions)
+		futureEnabled := current != nil && current.Enabled
+		if req.Enabled != nil {
+			futureEnabled = *req.Enabled
+		}
+		losesReviewRole := current != nil && slices.Contains(current.Permissions, domain.PermReviewDo) && !slices.Contains(futurePermissions, domain.PermReviewDo)
+		losesFinalRole := current != nil && slices.Contains(current.Permissions, domain.PermReviewFinal) && !slices.Contains(futurePermissions, domain.PermReviewFinal)
+		if currentErr == nil && permissionErr == nil && current != nil && (!futureEnabled || losesReviewRole || losesFinalRole) {
+			references, referenceErr := s.reviewSvc.UserAssignmentReferences(r.Context(), userID)
+			if referenceErr != nil {
+				writeError(w, http.StatusInternalServerError, "检查审核任务引用失败")
+				return
+			}
+			if len(references) > 0 {
+				writeError(w, http.StatusConflict, "该用户仍被审核流程或进行中任务引用，请先调整："+strings.Join(references, "；"))
+				return
+			}
+		}
+	}
 	user, err := s.authSvc.UpdateUserAsWithRoles(r.Context(), auth.GetUserID(r.Context()), userID, req.DisplayName, req.Role, req.Roles, req.Permissions, req.BankIDs, req.Enabled)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -341,6 +365,17 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 // handleDeleteUser 删除普通用户。超级管理员账号和当前操作账号由服务层保护。
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	userID := r.PathValue("id")
+	if s.reviewSvc != nil {
+		references, err := s.reviewSvc.UserAssignmentReferences(r.Context(), userID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "检查审核任务引用失败")
+			return
+		}
+		if len(references) > 0 {
+			writeError(w, http.StatusConflict, "该用户仍被审核流程或进行中任务引用，请先调整："+strings.Join(references, "；"))
+			return
+		}
+	}
 	deleted, err := s.authSvc.DeleteUserAs(r.Context(), auth.GetUserID(r.Context()), userID)
 	if err != nil {
 		status := http.StatusBadRequest

@@ -151,7 +151,9 @@ func TestFinalizeCommentRequiredForNonApproval(t *testing.T) {
 	)
 	ctx := context.Background()
 	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
-	reviewStore.SaveFlowConfig(ctx, testFlow())
+	flow := testFlow()
+	flow.Rounds[0].RequiredCount = 1
+	reviewStore.SaveFlowConfig(ctx, flow)
 	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-test")
 	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusRejected, Opinion: "科学性错误"})
 	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusApproved})
@@ -175,17 +177,20 @@ func TestFinalizeCommentRequiredForNonApproval(t *testing.T) {
 
 func TestRecordsForViewerIsolation(t *testing.T) {
 	svc, reviewStore, questionStore := newTestService(
-		map[string][]string{"bank-neike": {"r1", "r2", "r3"}},
+		map[string][]string{"bank-neike": {"r1", "r2", "r3", "r4"}},
 		map[string]bool{"admin1": true},
 	)
 	ctx := context.Background()
 	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
-	reviewStore.SaveFlowConfig(ctx, testFlow())
+	flow := testFlow()
+	flow.Rounds[0].RequiredCount = 3
+	reviewStore.SaveFlowConfig(ctx, flow)
 	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-test")
 
 	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusApproved, Comment: &domain.ReviewComment{Stem: "r1 意见"}})
 	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusApproved, Comment: &domain.ReviewComment{Stem: "r2 意见"}})
 	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r3", Action: domain.StatusRejected, Comment: &domain.ReviewComment{Stem: "r3 意见"}})
+	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r4", Action: domain.StatusApproved, Comment: &domain.ReviewComment{Stem: "r4 意见"}})
 
 	// 普通审核人：只能看到自己的记录（任务进行中）
 	own, err := svc.RecordsForViewer(ctx, task.ID, "r1", false)
@@ -200,11 +205,11 @@ func TestRecordsForViewerIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 3 {
-		t.Fatalf("把关人应看到全部 3 条记录，实际 %d", len(all))
+	if len(all) != 4 {
+		t.Fatalf("把关人应看到全部 4 条记录，实际 %d", len(all))
 	}
 
-	// 任务结束后（全员投完有分歧 → conflict 仍在进行中），普通审核人依旧只见自己的；
+	// 任务进入轮外最终决断后，普通审核人依旧只见自己的；
 	// 决断驳回为终态后，历史档案全量可见
 	if err := svc.Finalize(ctx, FinalizeRequest{TaskID: task.ID, ReviewerID: "admin1", Action: domain.StatusRejected, Comment: &domain.ReviewComment{Other: "维持驳回"}}); err != nil {
 		t.Fatal(err)
@@ -213,8 +218,8 @@ func TestRecordsForViewerIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ownAfter) != 4 {
-		t.Fatalf("终态后历史记录应全量可见（3条审核+1条决断），实际 %d", len(ownAfter))
+	if len(ownAfter) != 5 {
+		t.Fatalf("终态后历史记录应全量可见（4条审核+1条决断），实际 %d", len(ownAfter))
 	}
 }
 
@@ -338,12 +343,14 @@ func TestListResultsForViewerIsolation(t *testing.T) {
 	)
 	ctx := context.Background()
 	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
-	reviewStore.SaveFlowConfig(ctx, testFlow())
+	flow := testFlow()
+	flow.Rounds[0].RequiredCount = 1
+	reviewStore.SaveFlowConfig(ctx, flow)
 	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-test")
 	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusRejected, Comment: &domain.ReviewComment{Stem: "r1 意见"}})
 	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusApproved, Comment: &domain.ReviewComment{Stem: "r2 意见"}})
 
-	// 进行中的任务（全员投完、有分歧 → conflict）：普通审核人只见自己的记录
+	// 轮外最终决断中的任务：普通审核人只见自己的记录
 	items, _, err := svc.ListResultsForViewer(ctx, "r1", false)
 	if err != nil {
 		t.Fatal(err)
@@ -399,23 +406,29 @@ func TestResubmitStartsNewAttempt(t *testing.T) {
 	)
 	ctx := context.Background()
 	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
-	reviewStore.SaveFlowConfig(ctx, testFlow())
+	flow := testFlow()
+	flow.Rounds[0].RequiredCount = 1
+	reviewStore.SaveFlowConfig(ctx, flow)
 	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-test")
 	if task.Attempt != 1 {
 		t.Fatalf("首提批次应为 1，实际 %d", task.Attempt)
 	}
 
-	// 第 1 批：有分歧 → 决断退回修改
+	// 第 1 批：达到通过门槛后进入轮外决断 → 决断退回修改
 	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusRejected, Comment: &domain.ReviewComment{Stem: "第一批驳回意见"}})
 	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusApproved, Comment: &domain.ReviewComment{Stem: "第一批通过意见"}})
 	if err := svc.Finalize(ctx, FinalizeRequest{TaskID: task.ID, ReviewerID: "admin1", Action: domain.StatusRevisionRequired, Comment: &domain.ReviewComment{Other: "退回修改"}}); err != nil {
 		t.Fatal(err)
 	}
 
-	// 修改后重提 → 批次 +1，本轮票清零
+	// 修改后重提 → 版本 +1、批次 +1，本轮票清零
 	q, _ := questionStore.GetQuestion(ctx, "q1")
-	q.Status = domain.StatusRevisionRequired
-	questionStore.SaveQuestion(ctx, *q)
+	q.ClinicalStem += "（第二批修订）"
+	q.Version++
+	q.Status = domain.StatusAIReviewed
+	if err := questionStore.SaveQuestion(ctx, *q); err != nil {
+		t.Fatal(err)
+	}
 	task2, err := svc.SubmitQuestion(ctx, "q1", "flow-test")
 	if err != nil {
 		t.Fatal(err)

@@ -19,7 +19,7 @@ var baselineSchemaSQL string
 
 const (
 	// LatestSchemaVersion 是当前程序能够使用的最新数据库版本。
-	LatestSchemaVersion int64 = 26
+	LatestSchemaVersion int64 = 28
 	// migrationLockKey 在同一 PostgreSQL 数据库内串行化所有 AIgo Schema 迁移。
 	migrationLockKey int64 = 0x4149474f5f4d4947 // "AIGO_MIG"
 )
@@ -339,6 +339,50 @@ func configuredMigrations(schemaSQL string) []migration {
 		}},
 		{Version: 26, Name: "local_batch_output_snapshot", Statements: []string{
 			`ALTER TABLE batch_jobs ADD COLUMN IF NOT EXISTS output_json JSONB NOT NULL DEFAULT '[]'`,
+		}},
+		{Version: 27, Name: "remove_legacy_review_workflow_data", Statements: []string{
+			// 用户确认旧审核数据不再保留：只删除曾创建审核任务的题目；
+			// 从未送审的新题继续保留，作为新流程的待提交数据。
+			`CREATE TEMP TABLE aigo_legacy_reviewed_question_ids ON COMMIT DROP AS
+			 SELECT DISTINCT question_id FROM review_tasks`,
+			`UPDATE generation_runs gr
+			 SET question_ids = COALESCE((
+				 SELECT array_agg(item.id ORDER BY item.ordinality)
+				 FROM unnest(gr.question_ids) WITH ORDINALITY AS item(id, ordinality)
+				 WHERE NOT EXISTS (
+					 SELECT 1 FROM aigo_legacy_reviewed_question_ids old WHERE old.question_id=item.id
+				 )
+			 ), '{}')
+			 WHERE EXISTS (
+				 SELECT 1 FROM unnest(gr.question_ids) AS item(id)
+				 JOIN aigo_legacy_reviewed_question_ids old ON old.question_id=item.id
+			 )`,
+			`UPDATE generation_runs
+			 SET request_json = request_json - 'bank_id' - 'scoped_bank_ids'
+			 WHERE request_json IS NOT NULL`,
+			`DELETE FROM audit_logs
+			 WHERE question_id IN (SELECT question_id FROM aigo_legacy_reviewed_question_ids)
+			    OR action LIKE 'flow_%' OR action LIKE 'bank_%' OR action LIKE 'expert_%'`,
+			`DELETE FROM questions
+			 WHERE id IN (SELECT question_id FROM aigo_legacy_reviewed_question_ids)`,
+			`DELETE FROM review_flows`,
+			`DELETE FROM question_bank_members`,
+			`DELETE FROM question_banks`,
+			`DELETE FROM experts`,
+			`UPDATE users SET bank_ids='{}' WHERE cardinality(bank_ids) > 0`,
+			`UPDATE question_versions SET snapshot=snapshot-'bank_ids' WHERE snapshot ? 'bank_ids'`,
+		}},
+		{Version: 28, Name: "remove_stale_generation_question_links", Statements: []string{
+			`UPDATE generation_runs gr
+			 SET question_ids = COALESCE((
+				 SELECT array_agg(item.id ORDER BY item.ordinality)
+				 FROM unnest(gr.question_ids) WITH ORDINALITY AS item(id, ordinality)
+				 WHERE EXISTS (SELECT 1 FROM questions q WHERE q.id=item.id)
+			 ), '{}')
+			 WHERE EXISTS (
+				 SELECT 1 FROM unnest(gr.question_ids) AS item(id)
+				 WHERE NOT EXISTS (SELECT 1 FROM questions q WHERE q.id=item.id)
+			 )`,
 		}},
 	}
 }

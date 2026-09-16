@@ -14,7 +14,7 @@ with sync_playwright() as p:
     browser = p.chromium.launch(headless=True, channel="chrome")
     page = browser.new_page(viewport={"width": 1440, "height": 900})
 
-    # ===== expert 视角：题库仅本人题目，子题库目录不泄露 =====
+    # ===== expert 视角：题库仅本人题目，旧分类目录不泄露 =====
     page.goto(BASE + "/login")
     page.wait_for_load_state("networkidle")
     page.get_by_placeholder("请输入用户名").fill("expert")
@@ -26,12 +26,12 @@ with sync_playwright() as p:
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(1800)
     body = page.inner_text("body")
-    check("expert 题库页不显示管理员测试子题库", "管理员第一次测试" not in body, "")
+    check("expert 题库页不显示旧分类子题库", "分类子题库" not in body and "管理员第一次测试" not in body, "")
     # 全局题库入口对 expert 不可见（无 view_global）
     check("expert 不显示全局题库切换", "全局题库" not in body, "")
     page.screenshot(path="/tmp/e2e_expert_bank.png", full_page=True)
 
-    # ===== admin（super_admin）视角：仍然看到全部 =====
+    # ===== admin（super_admin）视角：未送审题保留，旧分类数据为空 =====
     page.goto(BASE + "/login")
     page.wait_for_load_state("networkidle")
     # 退出 expert
@@ -50,8 +50,12 @@ with sync_playwright() as p:
     page.goto(BASE + "/bank")
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(1800)
-    body = page.inner_text("body")
-    check("admin（super_admin）仍可见全部题库列表", "男，38岁" in body or "男，38 岁" in body, "legacy 题可见")
+    token = page.evaluate("localStorage.getItem('aigo_token')")
+    headers = {"Authorization": "Bearer " + token}
+    questions = page.request.get(BASE + "/api/questions?page=1&page_size=1&scope=personal", headers=headers)
+    banks = page.request.get(BASE + "/api/banks", headers=headers)
+    check("admin 未送审题仍保留", questions.status == 200 and questions.json().get("total", 0) > 0, f"total={questions.json().get('total', 0)}")
+    check("旧分类子题库数据已清空", banks.status == 200 and banks.json().get("total", 0) == 0, banks.text()[:160])
 
     browser.close()
 

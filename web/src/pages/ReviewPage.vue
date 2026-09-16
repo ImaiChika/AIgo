@@ -282,11 +282,9 @@ onMounted(() => {
             </span>
           </div>
           <div class="mt-stem">{{ (item.question.clinical_stem || "").slice(0, 60) }}{{ (item.question.clinical_stem || "").length > 60 ? "..." : "" }}</div>
-          <div class="mt-meta">
-            <span v-if="item.round_name">轮次：{{ item.round_name }}</span>
-            <span>本轮共 {{ item.assigned }} 位审核人</span>
+          <div v-if="item.round_name" class="mt-meta">
+            <span>{{ item.round_name }}</span>
           </div>
-          <div class="mt-action">去审核 →</div>
         </div>
       </div>
       <CompactPager
@@ -302,11 +300,11 @@ onMounted(() => {
     <section class="panel" v-if="selectedQuestion">
       <div class="section-heading">
         <span class="dot blue"></span>
-        <h2>题目详情</h2>
+        <h2>审核题目</h2>
         <span class="q-status" :class="statusClass(selectedQuestion.status)">
           {{ statusText(selectedQuestion.status) }}
         </span>
-        <button class="ghost-button" type="button" @click="detailQuestion = selectedQuestion">查看完整信息</button>
+        <button class="ghost-button" type="button" @click="detailQuestion = selectedQuestion">查看题目属性</button>
       </div>
 
       <div class="detail-section">
@@ -356,39 +354,48 @@ onMounted(() => {
       <div class="review-actions">
         <!-- 审核任务信息 -->
         <div v-if="reviewTask" class="task-info">
-          <h3>
-            审核任务
-            <span class="task-status" :class="statusClass(reviewTask.status)">{{ statusText(reviewTask.status) }}</span>
-          </h3>
+          <div class="task-info-kicker">审核任务</div>
           <div class="task-flow-row">
             <span class="task-flow-name">{{ currentFlowName }}</span>
             <span class="task-round">第 {{ reviewTask.current_round }}/{{ currentFlowRounds || 1 }} 轮</span>
-            <span v-if="reviewTask.submission_bank_id" class="task-version">提交分类 {{ reviewTask.submission_bank_id }}</span>
-            <span class="task-version">审核版本 v{{ reviewTask.question_version }}</span>
             <span v-if="currentRoundName" class="task-round-name">
               {{ currentRoundName }}
             </span>
           </div>
           <p v-if="taskVersionMismatch" class="version-mismatch-warning">
-            当前题目已是 v{{ selectedQuestion.version }}，本任务绑定 v{{ reviewTask.question_version }}，请由管理员撤销或退回后重新提交。
+            当前题目已是 v{{ selectedQuestion.version }}，本任务绑定 v{{ reviewTask.question_version }}，请由管理员处理当前审核任务后再重新提交。
           </p>
-          <p>审核人：{{ (reviewTask.assigned_to || []).map(id => expertName(id)).join("、") || "自动匹配" }}</p>
-          <!-- 历史轮次脱敏摘要：按隔离规则，只展示之前轮次的票数统计，不展示评语 -->
-          <div v-if="prevRoundSummaries.length" class="prev-rounds">
-            <div v-for="s in prevRoundSummaries" :key="s.round" class="prev-round">
-              <span class="pr-tag">第 {{ s.round }} 轮</span>
-              <span class="pr-vote ok">通过 {{ s.approved }}</span>
-              <span class="pr-vote no">驳回 {{ s.rejected }}</span>
-              <span class="pr-vote warn">需修改 {{ s.revision }}</span>
-              <span class="pr-result" :class="s.passed ? 'passed' : 'not-passed'">{{ s.passed ? "已过轮" : "未过轮" }}</span>
+          <details class="task-extra">
+            <summary>查看任务信息</summary>
+            <div class="task-extra-grid">
+              <span>审核版本 v{{ reviewTask.question_version }}</span>
+              <span>审核人：{{ (reviewTask.assigned_to || []).map(id => expertName(id)).join("、") || "自动匹配" }}</span>
             </div>
-          </div>
-          <p class="isolation-hint">为保证独立判断，本轮各审核人的评语与态度互相保密，全部提交后由系统汇总流转。</p>
+          </details>
+          <!-- 历史轮次脱敏摘要：按隔离规则，只展示之前轮次的票数统计，不展示评语 -->
+          <details v-if="prevRoundSummaries.length" class="task-extra">
+            <summary>查看前轮概览</summary>
+            <div class="prev-rounds">
+              <div v-for="s in prevRoundSummaries" :key="s.round" class="prev-round">
+                <span class="pr-tag">第 {{ s.round }} 轮</span>
+                <span class="pr-vote ok">通过 {{ s.approved }}</span>
+                <span class="pr-vote no">驳回 {{ s.rejected }}</span>
+                <span class="pr-vote warn">需修改 {{ s.revision }}</span>
+                <span class="pr-result" :class="s.passed ? 'passed' : 'not-passed'">{{ s.passed ? "已过轮" : "未过轮" }}</span>
+              </div>
+            </div>
+          </details>
+          <p class="isolation-hint">独立审核：本轮意见在你提交前对其他审核人不可见，提交后由系统统一汇总。</p>
         </div>
 
         <!-- 审核表单：结构化评语 -->
         <div v-if="reviewTask && canReview(reviewTask)" class="review-form">
+          <div class="review-form-heading">
+            <h3>提交本轮审核</h3>
+            <span>通过可不填评语；其他结论需填写理由</span>
+          </div>
           <div class="review-form-top">
+            <span class="form-label">本轮结论</span>
             <select v-model="reviewAction">
               <option value="approved">通过</option>
               <option value="rejected">驳回</option>
@@ -444,14 +451,15 @@ onMounted(() => {
 <style scoped>
 .review-layout {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: 304px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
 }
 
 .question-list-panel {
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 180px);
+  max-height: calc(100vh - 154px);
   overflow: hidden;
 }
 
@@ -563,18 +571,18 @@ onMounted(() => {
 }
 
 .my-task-card {
-  border: 2px solid #dce8f7;
-  border-radius: 10px;
-  padding: 10px 12px;
+  border: 1px solid #dce8f7;
+  border-radius: 8px;
+  padding: 10px 11px;
   background: #fff;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: border-color 0.15s, background 0.15s;
   position: relative;
 }
 
 .my-task-card:hover {
   border-color: #1385f8;
-  box-shadow: 0 4px 12px rgba(19, 133, 248, 0.12);
+  background: #fbfdff;
 }
 
 .my-task-card.active {
@@ -593,7 +601,7 @@ onMounted(() => {
 .mt-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   margin-bottom: 6px;
 }
 
@@ -601,9 +609,7 @@ onMounted(() => {
   font-size: 12px;
   font-weight: 700;
   color: #172033;
-  background: #f0f3f7;
-  padding: 2px 8px;
-  border-radius: 4px;
+  padding: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -613,10 +619,8 @@ onMounted(() => {
 .mt-round {
   font-size: 11px;
   font-weight: 700;
-  color: #1385f8;
-  background: #eff8ff;
-  padding: 2px 6px;
-  border-radius: 4px;
+  color: #58738d;
+  padding: 0;
   white-space: nowrap;
 }
 
@@ -635,21 +639,17 @@ onMounted(() => {
   font-size: 11px;
   color: #6e7b8f;
   align-items: center;
-  margin-bottom: 6px;
+  margin-bottom: 0;
 }
 
 .mt-action {
-  margin-top: 6px;
-  text-align: right;
-  font-size: 12px;
-  font-weight: 700;
-  color: #1385f8;
+  display: none;
 }
 
 /* 任务信息：流程/轮次/进度条 */
 .task-flow-row {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
   margin-bottom: 6px;
   flex-wrap: wrap;
@@ -664,10 +664,11 @@ onMounted(() => {
 .task-round {
   font-size: 12px;
   font-weight: 700;
-  color: #1385f8;
-  background: #eff8ff;
+  color: #28658f;
+  background: #f5f9fc;
+  border: 1px solid #dce8f1;
   padding: 2px 8px;
-  border-radius: 4px;
+  border-radius: 5px;
 }
 
 .task-round-name {
@@ -683,6 +684,42 @@ onMounted(() => {
   font-size: 11px;
   font-weight: 700;
   white-space: nowrap;
+}
+
+.task-info-kicker {
+  margin-bottom: 6px;
+  color: #748398;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.task-extra {
+  margin-top: 9px;
+  border-top: 1px solid #edf1f5;
+  padding-top: 8px;
+}
+
+.task-extra summary {
+  width: fit-content;
+  color: #5c7690;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.task-extra summary:hover {
+  color: #0571dc;
+}
+
+.task-extra-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 14px;
+  margin-top: 7px;
+  color: #7d8a9a;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .version-mismatch-warning {
@@ -742,9 +779,10 @@ onMounted(() => {
 .pr-result.not-passed { color: #c07b22; }
 
 .isolation-hint {
-  margin: 8px 0 0;
-  padding: 7px 10px;
-  background: #f7f8fa;
+  margin: 10px 0 0;
+  padding: 7px 0 0;
+  border-top: 1px solid #edf1f5;
+  background: transparent;
   border-radius: 6px;
   color: #6e7b8f !important;
   font-size: 12px !important;
@@ -780,7 +818,7 @@ onMounted(() => {
 .hint-bad { background: #fff0f0; border: 1px solid #f3c2c2; color: #a13535; }
 
 .detail-section {
-  margin-bottom: 16px;
+  margin-bottom: 18px;
 }
 
 .detail-section h3 {
@@ -790,8 +828,8 @@ onMounted(() => {
 }
 
 .detail-section p {
-  font-size: 14px;
-  line-height: 1.7;
+  font-size: 15px;
+  line-height: 1.8;
   margin: 0;
   color: #172033;
 }
@@ -893,10 +931,11 @@ onMounted(() => {
 
 .option-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
-  padding: 6px 0;
+  padding: 7px 0;
   font-size: 14px;
+  line-height: 1.6;
 }
 
 .opt-label {
@@ -909,6 +948,7 @@ onMounted(() => {
   color: #fff;
   font-size: 12px;
   font-weight: 700;
+  flex: 0 0 auto;
 }
 
 .correct {
@@ -919,8 +959,8 @@ onMounted(() => {
 
 .review-actions {
   border-top: 1px solid #e5ebf3;
-  padding-top: 16px;
-  margin-top: 16px;
+  padding-top: 18px;
+  margin-top: 20px;
 }
 
 .submit-section {
@@ -950,19 +990,7 @@ onMounted(() => {
 }
 
 .task-info {
-  margin-bottom: 12px;
-}
-
-.task-info h3 {
-  font-size: 14px;
-  margin: 0 0 6px;
-}
-
-.task-status {
-  font-size: 12px;
-  padding: 2px 8px;
-  border-radius: 4px;
-  margin-left: 8px;
+  margin-bottom: 14px;
 }
 
 .task-info p {
@@ -975,7 +1003,40 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
+}
+
+.review-form {
+  border: 1px solid #dce8f7;
+  border-radius: 9px;
+  padding: 13px 14px 14px;
+  background: #f9fcff;
+}
+
+.review-form-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.review-form-heading h3 {
+  margin: 0;
+  color: #172033;
+  font-size: 14px;
+}
+
+.review-form-heading span {
+  color: #7a8798;
+  font-size: 11px;
+}
+
+.form-label {
+  color: #5e7185;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .review-form-top select {
@@ -999,6 +1060,7 @@ onMounted(() => {
 .form-submit-row {
   display: flex;
   justify-content: flex-end;
+  padding-top: 2px;
 }
 
 .primary-button {
@@ -1055,6 +1117,7 @@ onMounted(() => {
   display: grid;
   place-items: center;
   color: #6e7b8f;
+  min-height: 520px;
 }
 
 .empty {
@@ -1077,6 +1140,48 @@ onMounted(() => {
 
 .load-more-btn:hover {
   background: #eff8ff;
+}
+
+@media (max-width: 900px) {
+  .review-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .question-list-panel {
+    max-height: none;
+  }
+
+  .my-task-list {
+    max-height: 42vh;
+    overflow-y: auto;
+  }
+
+  .review-form-heading {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 600px) {
+  .review-layout {
+    gap: 12px;
+  }
+
+  .review-form-top {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .review-form-top select {
+    width: 100%;
+  }
+
+  .form-rule {
+    flex: 1 1 100%;
+  }
+
+  .form-label {
+    width: 100%;
+  }
 }
 
 </style>

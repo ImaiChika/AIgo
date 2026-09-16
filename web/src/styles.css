@@ -1,8 +1,8 @@
 :root {
-  --bg: #f3f6fb;
+  --bg: #f5f7fa;
   --surface: #ffffff;
-  --surface-muted: #f8fbff;
-  --line: #e5ebf3;
+  --surface-muted: #f7f9fc;
+  --line: #e1e7ef;
   --text: #172033;
   --muted: #6e7b8f;
   --blue: #1385f8;
@@ -11,8 +11,8 @@
   --green: #12b981;
   --red: #c54858;
   --warn: #f2a800;
-  --shadow: 0 12px 28px rgba(24, 39, 75, 0.08);
-  --radius: 8px;
+  --shadow: 0 1px 2px rgba(24, 39, 75, 0.04), 0 8px 20px rgba(24, 39, 75, 0.035);
+  --radius: 9px;
 }
 
 * {
@@ -25,8 +25,8 @@ body {
   color: var(--text);
   background: var(--bg);
   font-family:
-    Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial,
-    sans-serif;
+    -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans CJK SC",
+    "Microsoft YaHei", sans-serif;
   letter-spacing: 0;
 }
 
@@ -224,7 +224,7 @@ button {
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow);
-  padding: 16px;
+  padding: 15px;
 }
 
 .sticky-panel {
@@ -287,7 +287,7 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 12px;
+  margin-bottom: 13px;
 }
 
 .section-heading small {
@@ -301,9 +301,10 @@ button {
 }
 
 .dot {
-  width: 9px;
-  height: 18px;
-  border-radius: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
 }
 
 .blue {

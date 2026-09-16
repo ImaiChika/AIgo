@@ -45,7 +45,7 @@ type A2Question struct {
 	OutlineCode     string           `json:"outline_code"`     // 大纲代码（标到最后一级）
 	Profession      string           `json:"profession"`       // 专业，如"消化"、"生理，消化"
 	System          string           `json:"system"`           // 系统，如"消化系统"
-	BankIDs         []string         `json:"bank_ids"`         // 所属题库列表（一道题可属于多个题库，空=未分类）
+	BankIDs         []string         `json:"bank_ids"`         // 所属分类子题库列表（一道题可属于多个，空=待归类）
 	Status          QuestionStatus   `json:"status"`           // 审核状态
 	Version         int              `json:"version"`          // 版本号，每次修改递增
 	CreatedBy       string           `json:"-"`                // 生成者（仅审计/内部追溯，题目接口不向前端暴露）

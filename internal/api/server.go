@@ -147,7 +147,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/generation-runs/{id}", s.requireAuth(domain.PermQuestionGenerate, s.handleGetGenerationRun))
 	mux.HandleFunc("GET /api/questions", s.requireAuth("", s.handleListQuestions))
 	mux.HandleFunc("GET /api/questions/search", s.requireAuth("", s.handleSearchQuestions))
-	mux.HandleFunc("GET /api/questions/my-new", s.requireAuthAny([]string{domain.PermReviewSubmit, domain.PermQuestionGenerate}, s.handleMyNewQuestions))
+	mux.HandleFunc("GET /api/questions/my-new", s.requireAuth(domain.PermReviewSubmit, s.handleMyNewQuestions))
 	mux.HandleFunc("GET /api/questions/{id}/versions", s.requireAuth("", s.handleListQuestionVersions))
 	mux.HandleFunc("POST /api/questions/{id}/restore", s.requireAuth(domain.PermQuestionEdit, s.handleRestoreQuestionVersion))
 	mux.HandleFunc("POST /api/questions/{id}/unpublish", s.requireAuth(domain.PermUserManage, s.handleUnpublishQuestion))

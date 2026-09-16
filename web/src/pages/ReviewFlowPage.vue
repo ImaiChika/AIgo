@@ -6,8 +6,6 @@ const toast = ref("");
 const flows = ref([]);
 const reviewers = ref([]); // 有审题权限的用户（流程选审核人用）
 const users = ref([]); // 用户账号列表（把关人名映射）
-const banks = ref([]); // 题库列表
-const unboundSubbankLabel = "未限定分类范围（命题老师提交时不选择）";
 const loading = ref(false);
 const showCreate = ref(false);
 const editingFlowId = ref(""); // 非空表示编辑模式
@@ -16,7 +14,6 @@ const form = ref({
   id: "",
   name: "",
   description: "",
-  bank_id: "",
   vote_rule: "",
   final_reviewer_ids: [],
   rounds: [
@@ -60,15 +57,6 @@ async function loadUsers() {
   }
 }
 
-async function loadBanks() {
-  try {
-    const data = await api.listBanks();
-    banks.value = data.banks || [];
-  } catch (e) {
-    console.error(e);
-  }
-}
-
 // 可选的最终把关人：拥有最终把关权限的用户
 const finalReviewers = () => users.value.filter((u) => (u.permissions || []).includes("review:final"));
 
@@ -77,7 +65,6 @@ function resetForm() {
     id: "",
     name: "",
     description: "",
-    bank_id: "",
     vote_rule: "",
     final_reviewer_ids: [],
     rounds: [
@@ -131,7 +118,6 @@ function startEditFlow(flow) {
     id: flow.id,
     name: flow.name,
     description: flow.description || "",
-    bank_id: flow.bank_id || "",
     vote_rule: flow.vote_rule || "",
     final_reviewer_ids: [...(flow.final_reviewer_ids || [])],
     rounds: (flow.rounds || []).map((r) => ({
@@ -166,7 +152,6 @@ async function submitFlow() {
     name: form.value.name,
     description: form.value.description,
     subject: "临床医学",
-    bank_id: form.value.bank_id,
     vote_rule: form.value.vote_rule,
     final_reviewer_ids: form.value.final_reviewer_ids,
     rounds: form.value.rounds,
@@ -221,21 +206,7 @@ function matchedReviewers(flow) {
   if (firstRound && (firstRound.expert_ids || []).length) {
     return firstRound.expert_ids.map(expertName).join("、");
   }
-  if (!flow.bank_id) return "按审核流程自动匹配审题老师";
-  return "按流程绑定的分类范围自动匹配";
-}
-
-// 题库下拉选项：附带可提交/审核中数量提示
-function bankOptionLabel(b) {
-  if (!b.status_counts) return `${b.name}（${b.question_count || 0} 题）`;
-  const c = b.status_counts;
-  const pending = (c.ai_draft || 0) + (c.auto_checked || 0) + (c.ai_reviewed || 0) + (c.revision_required || 0);
-  const reviewing = (c.reviewing || 0) + (c.conflict || 0);
-  let label = `${b.name}（${b.question_count || 0} 题`;
-  if (pending) label += `，待提交 ${pending}`;
-  if (reviewing) label += `，审核中 ${reviewing}`;
-  label += "）";
-  return label;
+  return "按审题权限自动匹配审题老师";
 }
 
 function userName(id) {
@@ -247,7 +218,6 @@ onMounted(() => {
   loadFlows();
   loadReviewers();
   loadUsers();
-  loadBanks();
 });
 </script>
 
@@ -278,17 +248,10 @@ onMounted(() => {
             <input v-model="form.description" placeholder="可选" />
           </div>
           <div class="field">
-            <label>可选分类范围（仅用于流程路由）</label>
-            <select v-model="form.bank_id">
-              <option value="">{{ unboundSubbankLabel }}</option>
-              <option v-for="b in banks" :key="b.id" :value="b.id">{{ bankOptionLabel(b) }}</option>
-            </select>
-          </div>
-          <div class="field">
             <label>投票规则</label>
             <select v-model="form.vote_rule">
               <option value="">通过票数推进（默认）</option>
-              <option value="veto">一票否决（任一驳回直接驳回）</option>
+              <option value="veto">一票否决（收齐本轮意见后，有驳回即淘汰）</option>
             </select>
           </div>
         </div>
@@ -339,7 +302,7 @@ onMounted(() => {
               </div>
             </div>
             <div class="expert-select">
-              <label>审核人（不选则按审题权限和题库范围分配）</label>
+              <label>审核人（不选则自动匹配当前可用的审题老师）</label>
               <div class="expert-chips">
                 <button
                   v-for="r in reviewers"
@@ -354,7 +317,7 @@ onMounted(() => {
                 <span v-if="!reviewers.length" class="no-expert">没有用户拥有审题权限，请在「用户管理」中分配审题权限</span>
               </div>
               <p class="expert-hint">
-                审核范围可在“用户管理”中调整。
+                审题资格与账号启停状态在“用户管理”中调整。
               </p>
             </div>
           </div>
@@ -385,7 +348,7 @@ onMounted(() => {
           </div>
           <p v-if="flow.description" class="flow-desc">{{ flow.description }}</p>
           <p class="flow-meta">
-            适用分类子题库：{{ flow.bank_id || "未限定（由命题老师提交）" }}
+            题目提交后按审核流程和审题权限自动分配
             <span v-if="flow.vote_rule === 'veto'" class="rule-tag veto">一票否决</span>
             <span v-else class="rule-tag">通过票数推进</span>
             <span v-if="(flow.final_reviewer_ids || []).length">

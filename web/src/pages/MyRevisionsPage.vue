@@ -132,6 +132,7 @@ onMounted(load);
           <div class="rc-head">
             <span class="rc-flow">{{ item.task.flow_id }}</span>
             <span class="rc-round">第 {{ item.task.current_round }} 轮</span>
+            <span class="rc-version">送审 v{{ item.task.question_version }} · 当前 v{{ item.question.version }}</span>
             <span class="rc-state" :class="item.modified ? 'done' : 'pending'">
               {{ item.modified ? "已提交修改" : "待修改" }}
             </span>
@@ -157,6 +158,14 @@ onMounted(load);
       <div v-if="revisionReason(selected)" class="reason-box">
         <label>专家退修意见</label>
         <p>{{ revisionReason(selected) }}</p>
+      </div>
+
+      <div class="version-strip" :class="{ ready: selected.modified }" role="status" aria-live="polite">
+        <span>送审版本 <strong>v{{ selected.task.question_version }}</strong></span>
+        <span class="version-arrow" aria-hidden="true">→</span>
+        <span>当前版本 <strong>v{{ selected.question.version }}</strong></span>
+        <b v-if="selected.modified">已产生新版本，可重新送审</b>
+        <em v-else>尚未产生新版本，修改内容后版本号会自动递增</em>
       </div>
 
       <div class="edit-field">
@@ -348,6 +357,12 @@ onMounted(load);
   white-space: nowrap;
 }
 
+.rc-version {
+  font-size: 11px;
+  color: #6e7b8f;
+  white-space: nowrap;
+}
+
 .rc-state {
   margin-left: auto;
   font-size: 11px;
@@ -390,6 +405,38 @@ onMounted(load);
   border-radius: 8px;
   padding: 10px 12px;
   margin-bottom: 14px;
+}
+
+.version-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 8px 10px;
+  border: 1px solid #e5ebf3;
+  border-radius: 8px;
+  background: #f7f9fc;
+  color: #53647a;
+  font-size: 12px;
+}
+
+.version-strip strong {
+  color: #172033;
+}
+
+.version-strip .version-arrow {
+  color: #9aa8ba;
+}
+
+.version-strip b {
+  color: #087c55;
+  font-weight: 700;
+}
+
+.version-strip em {
+  color: #c07b22;
+  font-style: normal;
 }
 
 .reason-box label {

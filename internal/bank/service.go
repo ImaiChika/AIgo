@@ -24,7 +24,7 @@ func NewService(store storage.BankStore, questionStore storage.QuestionStore) *S
 	return &Service{store: store, questionStore: questionStore}
 }
 
-// CreateBank 创建题库。指定专业范围时立即自动归纳存量未分类题目。
+// CreateBank 创建题库。指定专业范围时立即自动归纳存量待归类题目。
 func (s *Service) CreateBank(ctx context.Context, id, name, description string, professions []string) (*domain.QuestionBank, error) {
 	if name == "" {
 		return nil, fmt.Errorf("题库名称不能为空")

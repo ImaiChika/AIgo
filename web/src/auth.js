@@ -41,11 +41,11 @@ export function hasPerm(p) {
 }
 
 export function setAuth(tokenStr, userObj) {
-  // 切换账号时清除前一账号的命题工作台；修改昵称沿用同一 token，不触发清理。
-  if (token.value && token.value !== tokenStr) {
-    clearGenerationWorkspace(user.value?.id);
-    clearGenerationWorkspace(userObj?.id);
-  }
+	// 切换账号时清除前一账号的命题工作台；修改昵称沿用同一 token，不触发清理。
+	if (token.value && user.value?.id && userObj?.id && user.value.id !== userObj.id) {
+		clearGenerationWorkspace(user.value?.id);
+		clearGenerationWorkspace(userObj?.id);
+	}
   token.value = tokenStr;
   user.value = userObj;
   localStorage.setItem("aigo_token", tokenStr);

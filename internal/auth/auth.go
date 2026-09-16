@@ -223,7 +223,7 @@ func (s *Service) InitBuiltinRoles(ctx context.Context) error {
 				for _, p := range valid {
 					have[p] = true
 				}
-				for _, p := range []string{domain.PermBatchRun, domain.PermQuestionViewFormal, domain.PermQuestionViewEliminated, domain.PermQuestionShare, domain.PermReviewSubmit} {
+				for _, p := range []string{domain.PermQuestionGenerate, domain.PermBatchRun, domain.PermQuestionViewFormal, domain.PermQuestionViewEliminated, domain.PermQuestionShare, domain.PermReviewSubmit} {
 					if !have[p] {
 						valid = append(valid, p)
 						changed = true
@@ -1012,43 +1012,50 @@ func (s *Service) GetBankScope(ctx context.Context, userID, perm string) (scope 
 	return bankIDs, false, true, nil
 }
 
-// ListReviewers 列出可审核指定题库的用户（自动匹配审题人）。
-// 审题权限可来自角色或直接授权；有直接分配人时优先使用该精确名单，否则回退到角色审题人。
-// bank_ids 仅用于决定任务可分配范围，并不授予题库浏览权。
+// ListReviewers 列出当前可自动分配的审题用户。bankID 仅保留接口兼容，
+// 当前审核流程不再按历史分类子题库范围筛选审核人。
 // 系统管理员默认拥有全部权限，但不会被自动塞进专家投票名单。
-func (s *Service) ListReviewers(ctx context.Context, bankID string) ([]string, error) {
+func (s *Service) ListReviewers(ctx context.Context, _ string) ([]string, error) {
 	users, err := s.ListUsers()
 	if err != nil {
 		return nil, err
 	}
-	var direct, inherited []string
+	var reviewers []string
 	for _, user := range users {
 		if !user.Enabled || containsPermission(user.Permissions, domain.PermUserManage) ||
 			!containsPermission(user.Permissions, domain.PermReviewDo) {
 			continue
 		}
-		inScope := len(user.BankIDs) == 0
-		if !inScope {
-			for _, b := range user.BankIDs {
-				if b == bankID {
-					inScope = true
-					break
-				}
-			}
-		}
-		if !inScope {
-			continue
-		}
-		target := &inherited
-		if containsPermission(user.DirectPermissions, domain.PermReviewDo) {
-			target = &direct
-		}
-		*target = append(*target, user.ID)
+		reviewers = append(reviewers, user.ID)
 	}
-	if len(direct) > 0 {
-		return direct, nil
+	return reviewers, nil
+}
+
+// PermissionsForAssignments 计算管理员拟保存的角色集合与直接权限的并集，
+// 供用户更新前判断是否会移除流程仍依赖的审题/把关能力。
+func (s *Service) PermissionsForAssignments(ctx context.Context, roles, direct []string) ([]string, error) {
+	set := make(map[string]bool)
+	for _, roleID := range normalizeRoleIDs("", roles) {
+		role, err := s.GetRole(ctx, roleID)
+		if err != nil {
+			return nil, err
+		}
+		if role == nil {
+			return nil, fmt.Errorf("角色模板 %s 不存在", roleID)
+		}
+		for _, permission := range role.Permissions {
+			set[permission] = true
+		}
 	}
-	return inherited, nil
+	for _, permission := range direct {
+		set[permission] = true
+	}
+	result := make([]string, 0, len(set))
+	for permission := range set {
+		result = append(result, permission)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 func containsPermission(permissions []string, permission string) bool {

@@ -1,5 +1,6 @@
 <script setup>
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { onBeforeRouteLeave } from "vue-router";
 import { api } from "../api.js";
 import CompactPager from "../components/CompactPager.vue";
 import QuestionDetailModal from "../components/QuestionDetailModal.vue";
@@ -17,6 +18,7 @@ const submitting = ref(false);
 const saving = ref(false);
 const toast = ref("");
 const errorDialog = ref("");
+const errorDialogTitle = ref("操作失败");
 const detailQuestion = ref(null);
 const editForm = ref({ clinical_stem: "", options: [], answer: "", explanation: "", change_reason: "" });
 
@@ -122,6 +124,7 @@ async function saveDraft() {
     startEdit(data);
     showToast(`已保存为 v${data.version}，不会触发 AI 复检`);
   } catch (error) {
+	errorDialogTitle.value = "保存失败";
     errorDialog.value = error.message || "保存微调失败，请稍后重试";
   } finally {
     saving.value = false;
@@ -178,6 +181,8 @@ async function submit(ids) {
     if (selected.value && submittedIDs.has(selected.value.id)) startEdit(null);
     if (result.failed?.length) {
       showToast(`已提交 ${result.submitted} 道，${result.failed.length} 道未提交，请查看列表状态后重试`);
+	  errorDialogTitle.value = "部分题目未提交";
+	  errorDialog.value = result.failed.map((item) => `${item.question_id}：${item.error || "未知原因"}`).join("\n");
     } else {
       showToast(`已提交 ${result.submitted} 道题进入审核流程`);
     }
@@ -194,10 +199,23 @@ function difficultyText(value) {
   return map[value] || value || "-";
 }
 
+function warnBeforeUnload(event) {
+  if (!selectedDirty.value) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
+
+onBeforeRouteLeave(() => {
+  if (!selectedDirty.value) return true;
+  return confirm("当前题目有未保存修改，确定离开并放弃这些修改吗？");
+});
+
 onMounted(() => {
+  window.addEventListener("beforeunload", warnBeforeUnload);
   loadQuestions();
   loadFlows();
 });
+onBeforeUnmount(() => window.removeEventListener("beforeunload", warnBeforeUnload));
 </script>
 
 <template>
@@ -313,9 +331,9 @@ onMounted(() => {
   <QuestionDetailModal v-if="detailQuestion" :question="detailQuestion" @close="detailQuestion = null" />
   <div v-if="errorDialog" class="error-overlay" role="alertdialog" aria-modal="true" aria-labelledby="new-question-error-title">
     <div class="error-modal">
-      <h3 id="new-question-error-title">保存失败</h3>
+      <h3 id="new-question-error-title">{{ errorDialogTitle }}</h3>
       <p>{{ errorDialog }}</p>
-      <button class="primary-button" type="button" @click="errorDialog = ''">知道了，继续修改</button>
+      <button class="primary-button" type="button" @click="errorDialog = ''">知道了</button>
     </div>
   </div>
   <div class="toast" :class="{ show: toast }" role="status" aria-live="polite">{{ toast }}</div>

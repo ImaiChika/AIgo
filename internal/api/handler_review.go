@@ -116,14 +116,13 @@ func (s *Server) handleSubmitReview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, task)
 }
 
-// submitReviewForActor 区分管理员兼容路径与命题教师新路径：命题教师只能
-// 提交本人题目，且不再从提交界面选择分类子题库；管理员仍保留旧接口能力。
+// submitReviewForActor 优先处理当前账号自己的新题；即使账号同时拥有管理权限，
+// 从新题工作区提交时也不再要求历史分类子题库。显式 bank_id 仅保留旧接口兼容。
 func (s *Server) submitReviewForActor(r *http.Request, questionID, flowID, bankID string) (*domain.ReviewTask, error) {
 	userID := auth.GetUserID(r.Context())
-	if s.hasPermission(r, domain.PermUserManage) {
-		return s.reviewSvc.SubmitQuestionForBank(r.Context(), questionID, flowID, bankID)
-	}
-	if !s.hasPermission(r, domain.PermReviewSubmit) {
+	canSubmitOwn := s.hasPermission(r, domain.PermReviewSubmit)
+	canManage := s.hasPermission(r, domain.PermUserManage)
+	if !canSubmitOwn && !canManage {
 		return nil, auth.ErrPermissionDenied
 	}
 	question, err := s.questionStore.GetQuestion(r.Context(), questionID)
@@ -132,6 +131,12 @@ func (s *Server) submitReviewForActor(r *http.Request, questionID, flowID, bankI
 	}
 	if question == nil {
 		return nil, fmt.Errorf("题目不存在")
+	}
+	if strings.TrimSpace(bankID) == "" && question.OwnerID == userID && canSubmitOwn {
+		return s.reviewSvc.SubmitQuestionForOwner(r.Context(), questionID, flowID)
+	}
+	if canManage {
+		return s.reviewSvc.SubmitQuestionForBank(r.Context(), questionID, flowID, bankID)
 	}
 	if question.OwnerID != userID {
 		return nil, errReviewSubmitForbidden
@@ -204,6 +209,10 @@ func (s *Server) handleAvailableReviewFlows(w http.ResponseWriter, r *http.Reque
 	}
 	result := make([]flowSummary, 0, len(flows))
 	for _, flow := range flows {
+		// 历史绑定分类子题库的流程只供旧任务追溯，不能再用于新题提交。
+		if strings.TrimSpace(flow.BankID) != "" {
+			continue
+		}
 		result = append(result, flowSummary{
 			ID: flow.ID, Name: flow.Name, Description: flow.Description,
 			Subject: flow.Subject, RoundCount: len(flow.Rounds),
@@ -213,7 +222,7 @@ func (s *Server) handleAvailableReviewFlows(w http.ResponseWriter, r *http.Reque
 }
 
 // handleReviewAction 执行审核投票（通过/驳回/需修改）。
-// 单人反对不再立即退回；所有分配审核人投票完毕后自动统计，冲突进入待决断。
+// 达到通过票数立即进入下一轮；未达门槛时收齐本轮意见后，需修改优先退修，否则驳回终止。
 // 拥有最终把关权限的用户可以审核任意轮次。
 // 评语规则：通过时评语可选；驳回/需修改必须填写结构化评语（题干/选项/答案与解析/其他至少一栏）。
 // 请求：{"task_id": "xxx", "action": "rejected", "comment": {"stem": "...", "options": "...", "answer": "...", "other": "..."}}
@@ -276,9 +285,9 @@ func (s *Server) handleReviewAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
-// handleReviewFinalize 最终把关人对票数冲突的任务做决断。
+// handleReviewFinalize 最终把关人对所有轮次已通过的任务做轮外决断。
 // 请求：{"task_id": "xxx", "action": "approved", "opinion": "...", "comment": {"stem": "...", ...}}
-// action：approved（通过进下一轮/完成）/ rejected（驳回）/ revision_required（退回修改）
+// action：approved（所有轮次完成后正式通过）/ rejected（驳回）/ revision_required（退回修改）
 // 非通过决断必须填写至少一栏结构化评语；通过时评语可选。
 func (s *Server) handleReviewFinalize(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -684,9 +693,7 @@ func (s *Server) handleCreateFlow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "请求格式错误: "+err.Error())
 		return
 	}
-	if !s.ensureFlowBankExists(w, r, flow.BankID) {
-		return
-	}
+	flow.BankID = ""
 	actor := auth.GetUsername(r.Context())
 	ok := s.withAuditedTx(w, r, "创建审核流程",
 		func(txCtx context.Context) error {
@@ -713,9 +720,7 @@ func (s *Server) handleUpdateFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flow.ID = r.PathValue("id")
-	if !s.ensureFlowBankExists(w, r, flow.BankID) {
-		return
-	}
+	flow.BankID = ""
 	actor := auth.GetUsername(r.Context())
 	ok := s.withAuditedTx(w, r, "更新审核流程",
 		func(txCtx context.Context) error {
@@ -732,22 +737,6 @@ func (s *Server) handleUpdateFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, flow)
-}
-
-func (s *Server) ensureFlowBankExists(w http.ResponseWriter, r *http.Request, bankID string) bool {
-	if strings.TrimSpace(bankID) == "" {
-		return true
-	}
-	bank, err := s.bankSvc.GetBank(r.Context(), bankID)
-	if err != nil {
-		writeError(w, 500, "查询分类子题库失败")
-		return false
-	}
-	if bank == nil {
-		writeError(w, 400, "审核流程绑定的分类子题库不存在")
-		return false
-	}
-	return true
 }
 
 // handleDeleteFlow 删除审核流程。

@@ -10,6 +10,8 @@ const permNameMap = ref({});
 const loading = ref(false);
 const showCreate = ref(false);
 const editingId = ref("");
+// 分类子题库管理已从当前产品流程撤下；保留后端权限仅用于兼容历史角色数据。
+const hiddenPermissionCodes = new Set(["bank:manage", "question:create"]);
 
 const form = ref({
   name: "",
@@ -35,6 +37,7 @@ async function loadAll() {
     const groups = {};
     const nameMap = {};
     for (const p of permData.permissions || []) {
+      if (hiddenPermissionCodes.has(p.code)) continue;
       nameMap[p.code] = permissionName(p);
       if (!groups[p.group]) groups[p.group] = [];
       groups[p.group].push(p);
@@ -62,7 +65,7 @@ function startEdit(r) {
   form.value = {
     name: r.name,
     description: r.description || "",
-    permissions: [...(r.permissions || [])],
+    permissions: (r.permissions || []).filter((code) => !hiddenPermissionCodes.has(code)),
   };
   editingId.value = r.id;
   showCreate.value = true;
@@ -183,8 +186,8 @@ onMounted(loadAll);
           </div>
           <p v-if="r.description" class="role-desc">{{ r.description }}</p>
           <div class="role-perms">
-            <span v-for="p in (r.permissions || [])" :key="p" class="perm-tag">{{ permName(p) }}</span>
-            <span v-if="!(r.permissions || []).length" class="no-perm">无权限</span>
+            <span v-for="p in (r.permissions || []).filter((code) => !hiddenPermissionCodes.has(code))" :key="p" class="perm-tag">{{ permName(p) }}</span>
+            <span v-if="!(r.permissions || []).filter((code) => !hiddenPermissionCodes.has(code)).length" class="no-perm">无权限</span>
           </div>
         </div>
         <div v-if="!roles.length" class="empty">暂无角色，点击「新建角色」创建</div>

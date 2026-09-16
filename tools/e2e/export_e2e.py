@@ -2,16 +2,19 @@
 
 import json
 import os
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import uuid
 from pathlib import Path
 
 
 BASE = os.environ.get("AIGO_E2E_BASE_URL", "http://127.0.0.1:5173")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXPORT_DIR = PROJECT_ROOT / "output" / "exports"
+DSN = os.environ.get("AIGO_E2E_DB_DSN", "postgres://localhost:5432/aigo?sslmode=disable")
 
 
 def request(path, method="GET", body=None, token=""):
@@ -31,12 +34,24 @@ def request(path, method="GET", body=None, token=""):
 status, raw = request("/api/auth/login", "POST", {"username": "admin", "password": "admin"})
 assert status == 200, (status, raw[:200])
 token = json.loads(raw)["token"]
+admin_id = json.loads(raw)["user"]["id"]
+question_id = "ze2e-export-" + uuid.uuid4().hex[:10]
+subprocess.run([
+    "psql", DSN, "-v", "ON_ERROR_STOP=1", "-c", f"""
+    INSERT INTO questions (id, clinical_stem, options, answer, status, version, owner_id, created_by, created_at, updated_at, search_text)
+    VALUES ('{question_id}', '男，50岁。端到端导出题，最可能的诊断是？',
+      '[{{"label":"A","text":"甲"}},{{"label":"B","text":"乙"}},{{"label":"C","text":"丙"}},{{"label":"D","text":"丁"}},{{"label":"E","text":"戊"}}]'::jsonb,
+      'A', 'published', 1, '{admin_id}', 'admin', NOW(), NOW(), '端到端导出题');
+    INSERT INTO question_share_requests (id, question_id, owner_id, status, reviewed_by, created_at, reviewed_at)
+    VALUES ('share-{question_id}', '{question_id}', '{admin_id}', 'approved', '{admin_id}', NOW(), NOW());
+    """
+], check=True, capture_output=True, text=True)
 status, raw = request("/api/questions/search?tier=formal&scope=global&page=1&page_size=1", token=token)
 assert status == 200, (status, raw[:200])
 payload = json.loads(raw)
 questions = payload.get("questions", payload.get("items", []))
 assert questions, "本地演示库没有可导出的 published 题目"
-question_id = questions[0]["id"]
+assert any(question["id"] == question_id for question in questions), (question_id, questions)
 
 created_files = []
 try:
@@ -66,3 +81,4 @@ try:
 finally:
     for path in created_files:
         path.unlink(missing_ok=True)
+    subprocess.run(["psql", DSN, "-c", f"DELETE FROM questions WHERE id='{question_id}'"], check=True, capture_output=True, text=True)

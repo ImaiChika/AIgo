@@ -261,6 +261,85 @@ func TestRemoveQuestionImagesMigrationPreservesQuestion(t *testing.T) {
 	}
 }
 
+func TestLegacyReviewWorkflowCleanupMigrationKeepsUnsubmittedQuestions(t *testing.T) {
+	_, dsn, cleanup := migrationTestSchema(t)
+	defer cleanup()
+	store, err := New(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	migrations := configuredMigrations(baselineSchemaSQL)
+	applyMigrationPrefix(t, ctx, store, migrations[:26])
+
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO users (id, username, password_hash, display_name, role, roles, bank_ids)
+		VALUES ('cleanup-user', 'cleanup-user', 'unused', '清理测试', 'teacher', ARRAY['teacher'], ARRAY['legacy-bank']);
+		INSERT INTO question_banks (id, name) VALUES ('legacy-bank', '旧分类库');
+		INSERT INTO review_flows (id, name, rounds) VALUES ('legacy-flow', '旧审核流程', '[]');
+		INSERT INTO questions (id, clinical_stem, options, answer, status, version, owner_id)
+		VALUES
+		 ('reviewed-question', '已送审题', '[{"label":"A","text":"甲"},{"label":"B","text":"乙"},{"label":"C","text":"丙"},{"label":"D","text":"丁"}]', 'A', 'reviewing', 1, 'cleanup-user'),
+		 ('new-question', '未送审题', '[{"label":"A","text":"甲"},{"label":"B","text":"乙"},{"label":"C","text":"丙"},{"label":"D","text":"丁"}]', 'A', 'ai_reviewed', 1, 'cleanup-user');
+		INSERT INTO question_bank_members (question_id, bank_id) VALUES
+		 ('reviewed-question', 'legacy-bank'), ('new-question', 'legacy-bank');
+		INSERT INTO question_versions (id, question_id, version, snapshot)
+		VALUES ('version-reviewed', 'reviewed-question', 1, '{"bank_ids":["legacy-bank"]}'),
+		       ('version-new', 'new-question', 1, '{"bank_ids":["legacy-bank"]}');
+		INSERT INTO review_tasks (id, question_id, flow_id, status, question_version, round_results)
+		VALUES ('legacy-task', 'reviewed-question', 'legacy-flow', 'reviewing', 1, '[]');
+		INSERT INTO review_records (id, task_id, question_id, round_number, expert_id, conclusion)
+		VALUES ('legacy-record', 'legacy-task', 'reviewed-question', 1, 'cleanup-user', 'approved');
+		INSERT INTO audit_logs (id, question_id, action, actor) VALUES
+		 ('legacy-question-log', 'reviewed-question', 'review', 'cleanup-user'),
+		 ('legacy-flow-log', '', 'flow_create', 'cleanup-user'),
+		 ('new-question-log', 'new-question', 'create', 'cleanup-user');
+		INSERT INTO generation_runs (id, owner_id, status, question_ids, request_json)
+		VALUES ('cleanup-run', 'cleanup-user', 'succeeded', ARRAY['reviewed-question','missing-question','new-question'], '{"bank_id":"legacy-bank","scoped_bank_ids":["legacy-bank"],"topic":"保留"}');
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.migrate(ctx, migrations); err != nil {
+		t.Fatal(err)
+	}
+	for table, want := range map[string]int{
+		"questions": 1, "review_tasks": 0, "review_records": 0,
+		"review_flows": 0, "question_banks": 0, "question_bank_members": 0,
+	} {
+		var got int
+		if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+pq.QuoteIdentifier(table)).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("%s count=%d, want %d", table, got, want)
+		}
+	}
+	var questionID string
+	if err := store.db.QueryRowContext(ctx, `SELECT id FROM questions`).Scan(&questionID); err != nil || questionID != "new-question" {
+		t.Fatalf("unsubmitted question not preserved: id=%q err=%v", questionID, err)
+	}
+	var bankIDs, runQuestionIDs []string
+	var requestJSON, snapshot string
+	if err := store.db.QueryRowContext(ctx, `SELECT bank_ids FROM users WHERE id='cleanup-user'`).Scan(pq.Array(&bankIDs)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT question_ids, request_json::text FROM generation_runs WHERE id='cleanup-run'`).Scan(pq.Array(&runQuestionIDs), &requestJSON); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT snapshot::text FROM question_versions WHERE question_id='new-question'`).Scan(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(bankIDs) != 0 || len(runQuestionIDs) != 1 || runQuestionIDs[0] != "new-question" || strings.Contains(requestJSON, "bank_id") || strings.Contains(snapshot, "bank_ids") {
+		t.Fatalf("legacy references remain: bankIDs=%v runIDs=%v request=%s snapshot=%s", bankIDs, runQuestionIDs, requestJSON, snapshot)
+	}
+	var newLogs int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_logs WHERE id='new-question-log'`).Scan(&newLogs); err != nil || newLogs != 1 {
+		t.Fatalf("unsubmitted question audit log not preserved: count=%d err=%v", newLogs, err)
+	}
+}
+
 func applyMigrationPrefix(t *testing.T, ctx context.Context, store *Store, migrations []migration) {
 	t.Helper()
 	if _, err := store.db.ExecContext(ctx, migrationTableSQL); err != nil {

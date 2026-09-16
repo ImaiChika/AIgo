@@ -32,14 +32,49 @@ func TestTeacherSubmitsOwnQuestionsWithoutBankSelection(t *testing.T) {
 	if err := json.Unmarshal(created.Body.Bytes(), &teacher); err != nil || teacher.ID == "" {
 		t.Fatalf("parse teacher: %v %s", err, created.Body)
 	}
+	reviewerCreated := serveAuthJSON(t, h, http.MethodPost, "/api/users", adminToken, "198.51.100.1", map[string]any{
+		"username": "submission-reviewer", "password": "submission-reviewer-password", "display_name": "审题老师", "role": domain.RoleExpert,
+	})
+	var reviewer struct {
+		ID string `json:"id"`
+	}
+	if reviewerCreated.Code != http.StatusCreated || json.Unmarshal(reviewerCreated.Body.Bytes(), &reviewer) != nil || reviewer.ID == "" {
+		t.Fatalf("create reviewer: %d %s", reviewerCreated.Code, reviewerCreated.Body)
+	}
 	teacherToken := loginForAuthTest(t, h, "submission-teacher", "submission-teacher-password", "198.51.100.2")
 	now := time.Now()
 	flow := domain.ReviewFlowConfig{
 		ID: "teacher-submit-flow", Name: "命题教师流程", CreatedAt: now,
-		Rounds: []domain.RoundConfig{{RoundNumber: 1, Name: "审题老师审核", ExpertIDs: []string{teacher.ID}, RequiredCount: 1}},
+		Rounds: []domain.RoundConfig{{RoundNumber: 1, Name: "审题老师审核", ExpertIDs: []string{reviewer.ID}, RequiredCount: 1}},
 	}
 	if err := store.SaveFlowConfig(t.Context(), flow); err != nil {
 		t.Fatal(err)
+	}
+	if err := store.SaveFlowConfig(t.Context(), domain.ReviewFlowConfig{
+		ID: "legacy-bank-flow", Name: "旧分类流程", BankID: "legacy-bank",
+		Rounds: []domain.RoundConfig{{RoundNumber: 1, Name: "旧审核", ExpertIDs: []string{reviewer.ID}, RequiredCount: 1}}, CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	adminUser, err := s.authSvc.GetUserByUsername("admin")
+	if err != nil || adminUser == nil {
+		t.Fatalf("load admin user: %v", err)
+	}
+	adminQuestion := domain.A2Question{
+		ID: "admin-submit-own-unclassified", OwnerID: adminUser.ID, CreatedBy: "admin",
+		ClinicalStem: "女，40岁。出现持续症状。该患者最可能的诊断是",
+		Options:      []domain.Option{{Label: "A", Text: "甲"}, {Label: "B", Text: "乙"}, {Label: "C", Text: "丙"}, {Label: "D", Text: "丁"}},
+		Answer:       "A", Status: domain.StatusAIReviewed, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.SaveQuestion(t.Context(), adminQuestion); err != nil {
+		t.Fatal(err)
+	}
+	adminSubmitted := serveAuthJSON(t, h, http.MethodPost, "/api/review/submit", adminToken, "198.51.100.1", map[string]any{
+		"question_id": adminQuestion.ID, "flow_id": flow.ID,
+	})
+	var adminTask domain.ReviewTask
+	if adminSubmitted.Code != http.StatusOK || json.Unmarshal(adminSubmitted.Body.Bytes(), &adminTask) != nil || adminTask.SubmissionBankID != "" {
+		t.Fatalf("admin own unclassified question should use owner submission path: %d %s", adminSubmitted.Code, adminSubmitted.Body)
 	}
 	question := domain.A2Question{
 		ID: "teacher-submit-own", OwnerID: teacher.ID, CreatedBy: "submission-teacher",
@@ -63,7 +98,7 @@ func TestTeacherSubmitsOwnQuestionsWithoutBankSelection(t *testing.T) {
 	}
 
 	flows := serveAuthJSON(t, h, http.MethodGet, "/api/review/available-flows", teacherToken, "198.51.100.2", nil)
-	if flows.Code != http.StatusOK || strings.Contains(flows.Body.String(), teacher.ID) {
+	if flows.Code != http.StatusOK || strings.Contains(flows.Body.String(), teacher.ID) || strings.Contains(flows.Body.String(), "legacy-bank-flow") {
 		t.Fatalf("teacher flow summary leaked reviewer details: %d %s", flows.Code, flows.Body)
 	}
 	batch := serveAuthJSON(t, h, http.MethodPost, "/api/review/submit-batch", teacherToken, "198.51.100.2", map[string]any{
@@ -117,6 +152,15 @@ func TestTeacherCanEditCheckedQuestionBeforeFirstSubmissionWithoutRecheck(t *tes
 	if err := json.Unmarshal(created.Body.Bytes(), &teacher); err != nil || teacher.ID == "" {
 		t.Fatalf("parse pre-review editor: %v %s", err, created.Body)
 	}
+	reviewerCreated := serveAuthJSON(t, h, http.MethodPost, "/api/users", adminToken, "198.51.100.10", map[string]any{
+		"username": "pre-review-reviewer", "password": "pre-review-reviewer-password", "display_name": "审题老师", "role": domain.RoleExpert,
+	})
+	var reviewer struct {
+		ID string `json:"id"`
+	}
+	if reviewerCreated.Code != http.StatusCreated || json.Unmarshal(reviewerCreated.Body.Bytes(), &reviewer) != nil || reviewer.ID == "" {
+		t.Fatalf("create pre-review reviewer: %d %s", reviewerCreated.Code, reviewerCreated.Body)
+	}
 	teacherToken := loginForAuthTest(t, h, "pre-review-editor", "pre-review-editor-password", "198.51.100.11")
 	now := time.Now()
 	question := domain.A2Question{
@@ -153,7 +197,7 @@ func TestTeacherCanEditCheckedQuestionBeforeFirstSubmissionWithoutRecheck(t *tes
 
 	flow := domain.ReviewFlowConfig{
 		ID: "pre-review-flow", Name: "提交前编辑后审核", CreatedAt: now,
-		Rounds: []domain.RoundConfig{{RoundNumber: 1, Name: "审题", ExpertIDs: []string{teacher.ID}, RequiredCount: 1}},
+		Rounds: []domain.RoundConfig{{RoundNumber: 1, Name: "审题", ExpertIDs: []string{reviewer.ID}, RequiredCount: 1}},
 	}
 	if err := store.SaveFlowConfig(t.Context(), flow); err != nil {
 		t.Fatal(err)

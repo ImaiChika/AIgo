@@ -145,8 +145,8 @@ type bankScopeEval struct {
 	hasPerm   bool
 	fullScope bool
 	// ownerID 非空表示“无 view_all 且未分配题库范围”：仅本人题目可见。
-	ownerID   string
-	bankSet   map[string]bool
+	ownerID string
+	bankSet map[string]bool
 }
 
 // bankScopeEvalFor 获取用户对指定权限点的范围判定器（一次查库）。
@@ -240,7 +240,7 @@ func tierFilter(tier domain.QuestionTier, evals ...bankScopeEval) *storage.Quest
 // questionInScope 校验当前登录用户对题目是否拥有指定权限的题库范围访问权。
 // 全范围用户（bank_ids 为空）直接放行；
 // 受限范围用户仅能访问属于其可见题库之一的题目（多对多任一命中即可）。
-// 未分类题目（不属于任何题库）对受限范围用户不可见。
+// 待归类题目（不属于任何分类子题库）对受限范围用户不可见。
 func (s *Server) questionInScope(r *http.Request, q *domain.A2Question, perm string) bool {
 	userID := auth.GetUserID(r.Context())
 	if userID == "" || q == nil {

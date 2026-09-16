@@ -263,7 +263,7 @@ func (s *Service) ListCategories(ctx context.Context) (map[string]int, error) {
 	for _, p := range all {
 		cat := p.Category
 		if cat == "" {
-			cat = "未分类"
+			cat = "未设置分类"
 		}
 		counts[cat]++
 	}
@@ -305,7 +305,7 @@ func (s *Service) KPStats(ctx context.Context) (*KPVersionStats, map[string]int,
 	for i := range points {
 		cat := points[i].Category
 		if cat == "" {
-			cat = "未分类"
+			cat = "未设置分类"
 		}
 		stats.Categories[cat]++
 	}

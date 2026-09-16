@@ -69,9 +69,6 @@ const batchConfig = ref({
 const currentJob = ref(null);
 const jobHistory = ref([]);
 const polling = ref(false);
-const manualJobId = ref(""); // 手动输入的 job_id
-const searchName = ref(""); // 搜索名称
-const searchResults = ref([]); // 搜索结果
 const importResult = ref(null); // 导入结果详情
 const detailQuestion = ref(null); // 弹窗查看的题目全貌（复用题库详情弹窗）
 
@@ -370,36 +367,6 @@ function isRunning(status) {
   return ["validating", "in_progress", "finalizing", "cancelling"].includes(status);
 }
 
-// 按名称搜索任务
-async function searchJobs() {
-  if (!searchName.value.trim()) {
-    showToast("请输入搜索关键词");
-    return;
-  }
-  try {
-    const data = await api.batchList({ name: searchName.value.trim() });
-    searchResults.value = data.jobs || [];
-    if (searchResults.value.length === 0) {
-      showToast("未找到匹配的任务");
-    }
-  } catch (e) {
-    showToast("搜索失败: " + e.message);
-  }
-}
-
-// 选择任务
-function selectJob(job) {
-  stopPolling();
-  currentJob.value = job;
-  saveJobToStorage(job);
-  searchResults.value = [];
-  searchName.value = "";
-  // 如果任务还在运行中，开始轮询
-  if (isRunning(job.status)) {
-    startPolling(job.job_id);
-  }
-}
-
 onMounted(() => {
   if (!batchPermission.value) return;
   loadStats();
@@ -489,49 +456,6 @@ onMounted(() => {
           {{ submitting ? "提交中..." : `提交生成任务（${selectedKPs.length} 个大纲要点 × ${batchConfig.count} 题）` }}
         </button>
         <span v-if="!batchRuntime.available" class="field-hint">批量生成功能当前不可用，请联系系统管理员。</span>
-      </div>
-    </section>
-
-    <!-- 查询任务 -->
-    <section class="panel">
-      <div class="section-heading">
-        <span class="dot blue"></span>
-        <h2>查询任务</h2>
-      </div>
-      <div class="form-row">
-        <div class="field">
-          <label>按 ID 查询</label>
-          <input v-model="manualJobId" placeholder="batch_xxx" />
-        </div>
-        <div class="field" style="display: flex; align-items: flex-end;">
-          <button class="ghost-button" type="button" @click="checkStatus(manualJobId)" :disabled="!manualJobId">
-            查询
-          </button>
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="field">
-          <label>按名称搜索</label>
-          <input v-model="searchName" placeholder="输入任务名称关键词" @keyup.enter="searchJobs" />
-        </div>
-        <div class="field" style="display: flex; align-items: flex-end;">
-          <button class="ghost-button" type="button" @click="searchJobs">搜索</button>
-          <button class="ghost-button" type="button" @click="searchName = ''; searchResults = []">清空</button>
-        </div>
-      </div>
-
-      <!-- 搜索结果 -->
-      <div v-if="searchResults.length > 0" class="search-results">
-        <div v-for="job in searchResults" :key="job.job_id" class="search-item" @click="selectJob(job)">
-          <div class="search-item-header">
-            <strong>{{ job.job_name || '未命名' }}</strong>
-            <span class="q-status" :class="statusClass(job.status)">{{ statusText(job.status) }}</span>
-          </div>
-          <div class="search-item-meta">
-            <span>{{ job.job_id }}</span>
-            <span>生成项：{{ job.total_count }} ｜ 已完成：{{ job.completed || 0 }}</span>
-          </div>
-        </div>
       </div>
     </section>
 
@@ -892,41 +816,6 @@ onMounted(() => {
 }
 
 .action-hint {
-  font-size: 12px;
-  color: #6e7b8f;
-}
-
-.search-results {
-  margin-top: 12px;
-  border: 1px solid #e5ebf3;
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.search-item {
-  padding: 10px 12px;
-  border-bottom: 1px solid #f0f3f7;
-  cursor: pointer;
-}
-
-.search-item:last-child {
-  border-bottom: none;
-}
-
-.search-item:hover {
-  background: #f8fbff;
-}
-
-.search-item-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 4px;
-}
-
-.search-item-meta {
-  display: flex;
-  gap: 16px;
   font-size: 12px;
   color: #6e7b8f;
 }

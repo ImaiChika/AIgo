@@ -240,6 +240,86 @@ func TestTeacherAndReviewerIdentitySwitch(t *testing.T) {
 	}
 }
 
+func TestMySummaryPendingCountMatchesNewQuestionWorkspace(t *testing.T) {
+	server, store, cleanup := authHandlerTestServer(t)
+	defer cleanup()
+	handler := server.Handler()
+	adminToken := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.70")
+	created := serveAuthJSON(t, handler, http.MethodPost, "/api/users", adminToken, "198.51.100.70", map[string]any{
+		"username": "summary-teacher", "password": "summary-teacher-password", "display_name": "统计命题老师", "role": domain.RoleTeacher,
+	})
+	var teacher auth.User
+	if created.Code != http.StatusCreated || json.Unmarshal(created.Body.Bytes(), &teacher) != nil {
+		t.Fatalf("create summary teacher: %d %s", created.Code, created.Body)
+	}
+	now := time.Now()
+	for _, id := range []string{"summary-new", "summary-revision"} {
+		if err := store.SaveQuestion(t.Context(), domain.A2Question{
+			ID: id, OwnerID: teacher.ID, CreatedBy: teacher.Username, ClinicalStem: "患者出现症状，最可能的诊断是？",
+			Options: []domain.Option{{Label: "A", Text: "甲"}, {Label: "B", Text: "乙"}, {Label: "C", Text: "丙"}, {Label: "D", Text: "丁"}},
+			Answer:  "A", Status: domain.StatusAIReviewed, Version: 1, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	flow := domain.ReviewFlowConfig{ID: "summary-flow", Name: "统计流程", Rounds: []domain.RoundConfig{{RoundNumber: 1, Name: "审核", ExpertIDs: []string{teacher.ID}, RequiredCount: 1}}, CreatedAt: now}
+	if err := store.SaveFlowConfig(t.Context(), flow); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveTask(t.Context(), domain.ReviewTask{
+		ID: "summary-task", QuestionID: "summary-revision", FlowID: flow.ID, Status: domain.StatusRevisionRequired,
+		CurrentRound: 1, AssignedTo: []string{teacher.ID}, QuestionVersion: 1, RoundResults: []domain.RoundResult{{RoundNumber: 1}}, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	teacherToken := loginForAuthTest(t, handler, teacher.Username, "summary-teacher-password", "198.51.100.71")
+	summary := serveAuthJSON(t, handler, http.MethodGet, "/api/my/summary", teacherToken, "198.51.100.71", nil)
+	var payload struct {
+		Generated    int `json:"generated_count"`
+		NewQuestions int `json:"new_questions_count"`
+	}
+	if summary.Code != http.StatusOK || json.Unmarshal(summary.Body.Bytes(), &payload) != nil || payload.Generated != 2 || payload.NewQuestions != 1 {
+		t.Fatalf("summary count mismatch: %d %s", summary.Code, summary.Body)
+	}
+	workspace := serveAuthJSON(t, handler, http.MethodGet, "/api/questions/my-new?page=1&page_size=20", teacherToken, "198.51.100.71", nil)
+	var page struct {
+		Total int `json:"total"`
+	}
+	if workspace.Code != http.StatusOK || json.Unmarshal(workspace.Body.Bytes(), &page) != nil || page.Total != payload.NewQuestions {
+		t.Fatalf("summary and workspace diverged: summary=%d workspace=%d body=%s", payload.NewQuestions, page.Total, workspace.Body)
+	}
+}
+
+func TestReferencedReviewerCannotBeDisabledOrDeleted(t *testing.T) {
+	server, store, cleanup := authHandlerTestServer(t)
+	defer cleanup()
+	handler := server.Handler()
+	adminToken := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.80")
+	created := serveAuthJSON(t, handler, http.MethodPost, "/api/users", adminToken, "198.51.100.80", map[string]any{
+		"username": "referenced-reviewer", "password": "referenced-reviewer-password", "display_name": "被引用审题老师", "role": domain.RoleExpert,
+	})
+	var reviewer auth.User
+	if created.Code != http.StatusCreated || json.Unmarshal(created.Body.Bytes(), &reviewer) != nil {
+		t.Fatalf("create reviewer: %d %s", created.Code, created.Body)
+	}
+	if err := store.SaveFlowConfig(t.Context(), domain.ReviewFlowConfig{
+		ID: "referenced-reviewer-flow", Name: "引用审题人流程", Rounds: []domain.RoundConfig{{RoundNumber: 1, Name: "审核", ExpertIDs: []string{reviewer.ID}, RequiredCount: 1}}, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	disable := serveAuthJSON(t, handler, http.MethodPut, "/api/users/"+reviewer.ID, adminToken, "198.51.100.80", map[string]any{
+		"display_name": reviewer.DisplayName, "role": reviewer.Role, "roles": reviewer.Roles,
+		"permissions": reviewer.DirectPermissions, "bank_ids": reviewer.BankIDs, "enabled": false,
+	})
+	if disable.Code != http.StatusConflict || !strings.Contains(disable.Body.String(), "仍被审核流程") {
+		t.Fatalf("referenced reviewer disable should be blocked: %d %s", disable.Code, disable.Body)
+	}
+	deleted := serveAuthJSON(t, handler, http.MethodDelete, "/api/users/"+reviewer.ID, adminToken, "198.51.100.80", nil)
+	if deleted.Code != http.StatusConflict || !strings.Contains(deleted.Body.String(), "仍被审核流程") {
+		t.Fatalf("referenced reviewer deletion should be blocked: %d %s", deleted.Code, deleted.Body)
+	}
+}
+
 func authHandlerTestServer(t *testing.T) (*Server, *postgres.Store, func()) {
 	t.Helper()
 	dsn := os.Getenv("AIGO_TEST_POSTGRES_DSN")

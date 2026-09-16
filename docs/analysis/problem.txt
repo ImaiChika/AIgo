@@ -15,10 +15,9 @@ P6. 提交不校验题目状态 SubmitQuestion 对任何状态的题目都能创
 P7. 前端 expert_id 由登录用户硬填，可冒名 ReviewPage.vue:117 发送 expert_id: currentUser.id，但服务端只校验"该 ID 是否在当前轮名单里"，不校验 expert_id 与登录用户一致。任一 expert 可传别人的 ID 冒充审核。同时专家库双轨制（CLI 建 E001 vs 账号同步 user-xxx）依然是"审核人指定不清晰"的根因：流程里点了 CLI 建的专家，任何账号登录都对不上号。
 
 三、审核执行环节
-P8. revision_required 有两条互相冲突的重审路径
+P8. revision_required 有两条互相冲突的重审路径（已修复：2026-09-15）
 
-路径 A：任务被打回后（task.Status=revision_required），Review() 不检查任务状态，专家可直接再投票原地继续，清空的本轮票重新投；
-路径 B：SubmitQuestion 的 revision 分支把任务重置回第 1 轮，之前的轮次全作废。 两条路并存：一个原地重审、一个重头再来，且都可用，行为完全看用户点了哪个按钮。
+原问题：任务被打回后（task.Status=revision_required），Review() 不检查任务状态，专家可直接再投票原地继续；SubmitQuestion 的 revision 分支又可能把任务重置回第 1 轮。现已统一为：必须产生新题目版本，由管理员重新送审；退修题沿用原流程，切换流程需先撤销原任务。
 P9. 打回时清空本轮全部票 Review() 的 revision 分支（service.go:294）把 RoundResults[roundIdx].Reviews = nil——其他专家已投的通过票也被抹掉。如果流程是"3 人通过算过"，第 3 人打回，前 2 人白投。
 
 P10. rejected 一票否决且无出路 任一专家驳回 → 任务终态 rejected；SubmitQuestion 只放行 revision_required，rejected 题目永远无法重提，前端 canSubmit 也不含 rejected。需求支持"驳回"，但驳回后应该能修改重提，现在是死胡同。

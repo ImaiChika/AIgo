@@ -36,7 +36,6 @@ const (
 
 	// ===== 题库范围权限 =====
 	PermQuestionView        = "question:view"         // 查看题目列表/详情（过程题库）
-	PermQuestionCreate      = "question:create"       // 手工新建题目
 	PermQuestionEdit        = "question:edit"         // 编辑题目
 	PermQuestionDelete      = "question:delete"       // 删除题目（过程/淘汰题库）
 	PermQuestionGenerate    = "question:generate"     // 单题 AI 出题
@@ -75,7 +74,6 @@ func AllPermissions() []PermissionMeta {
 	all := []PermissionMeta{
 		// 题库权限
 		{PermQuestionView, "查看题目", "题库", true},
-		{PermQuestionCreate, "新建题目", "题库", true},
 		{PermQuestionEdit, "编辑题目", "题库", true},
 		{PermQuestionDelete, "删除题目", "题库", true},
 		{PermQuestionGenerate, "单题出题", "命题", true},

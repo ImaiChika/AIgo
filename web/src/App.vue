@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
-import { useRouter, useRoute } from "vue-router";
+import { useRouter, useRoute, isNavigationFailure } from "vue-router";
 import { currentUser, hasPerm, roleName, clearAuth, setAuth } from "./auth.js";
 import { api } from "./api.js";
 import SidebarNavigation from "./components/SidebarNavigation.vue";
@@ -26,11 +26,21 @@ watch(mobileNavigationOpen, async open => {
   if (open) { previousOverflow = document.body.style.overflow; document.body.style.overflow = "hidden"; await nextTick(); sidebar.value?.querySelector("button")?.focus(); }
   else { document.body.style.overflow = previousOverflow; menuButton.value?.focus(); }
 });
-watch(() => route.fullPath, () => { mobileNavigationOpen.value = false; });
+watch(() => route.fullPath, () => {
+  mobileNavigationOpen.value = false;
+  closeRoleMenu();
+});
 const desktopLayout = window.matchMedia("(min-width: 1041px)");
 function closeDesktopDrawer() { if (desktopLayout.matches) mobileNavigationOpen.value = false; }
-onMounted(() => desktopLayout.addEventListener("change", closeDesktopDrawer));
-onBeforeUnmount(() => { desktopLayout.removeEventListener("change", closeDesktopDrawer); if (mobileNavigationOpen.value) document.body.style.overflow = previousOverflow; });
+onMounted(() => {
+  desktopLayout.addEventListener("change", closeDesktopDrawer);
+  document.addEventListener("click", closeRoleMenuOnDocument);
+});
+onBeforeUnmount(() => {
+  desktopLayout.removeEventListener("change", closeDesktopDrawer);
+  document.removeEventListener("click", closeRoleMenuOnDocument);
+  if (mobileNavigationOpen.value) document.body.style.overflow = previousOverflow;
+});
 function sidebarKeydown(event) {
   if (!mobileNavigationOpen.value) return;
   if (event.key === "Escape") { event.preventDefault(); mobileNavigationOpen.value = false; return; }
@@ -49,6 +59,8 @@ function logout() {
 const isLoginPage = computed(() => route.path === "/login");
 const switchRoleBusy = ref(false);
 const switchRoleError = ref("");
+const roleMenu = ref(null);
+const roleMenuOpen = ref(false);
 const availableRoles = computed(() => {
   const currentRole = currentUser.value?.role || "";
   const ids = [...new Set((currentUser.value?.roles || []).filter(Boolean))];
@@ -60,14 +72,53 @@ const availableRoles = computed(() => {
   return ids.map((id) => ({ id, name: roleName(id) }));
 });
 
+function closeRoleMenu() {
+  roleMenuOpen.value = false;
+}
+
+function toggleRoleMenu() {
+  if (switchRoleBusy.value) return;
+  roleMenuOpen.value = !roleMenuOpen.value;
+}
+
+function closeRoleMenuOnDocument(event) {
+  if (!roleMenu.value?.contains(event.target)) closeRoleMenu();
+}
+
+function handleRoleMenuKeydown(event) {
+  if (event.key === "Escape") {
+    closeRoleMenu();
+    event.currentTarget?.focus();
+    return;
+  }
+  if (!roleMenuOpen.value || !["ArrowDown", "ArrowUp"].includes(event.key)) return;
+  const options = [...(roleMenu.value?.querySelectorAll(".role-option") || [])];
+  if (!options.length) return;
+  event.preventDefault();
+  const current = options.indexOf(document.activeElement);
+  const offset = event.key === "ArrowDown" ? 1 : -1;
+  options[(current + offset + options.length) % options.length].focus();
+}
+
+function chooseRole(role) {
+  closeRoleMenu();
+  switchRole(role);
+}
+
 async function switchRole(role) {
   if (!role || role === currentUser.value?.role || switchRoleBusy.value) return;
+  closeRoleMenu();
   switchRoleBusy.value = true;
   switchRoleError.value = "";
   try {
+	// 先离开当前业务页，让页面级“未保存修改”守卫有机会阻止切换；
+	// 通过后再签发新身份，避免取消导航时留在无权限页面。
+	if (route.path !== "/my") {
+	  const failure = await router.push("/my");
+	  if (failure && isNavigationFailure(failure)) return;
+	}
     const data = await api.switchRole(role);
     setAuth(data.token, data.user);
-    await router.push("/my");
   } catch (error) {
     switchRoleError.value = error.message || "身份切换失败";
   } finally {
@@ -97,12 +148,36 @@ async function switchRole(role) {
           <strong>{{ currentUser.display_name || currentUser.username }}</strong>
           <span>{{ roleName(currentUser.role) }}</span>
         </div>
-        <label v-if="availableRoles.length > 1" class="role-switch" title="切换工作身份">
+        <div v-if="availableRoles.length > 1" ref="roleMenu" class="role-switch" title="切换工作身份">
           <span class="sr-only">切换工作身份</span>
-          <select :value="currentUser.role" :disabled="switchRoleBusy" @change="switchRole($event.target.value)">
-            <option v-for="role in availableRoles" :key="role.id" :value="role.id">{{ role.name }}</option>
-          </select>
-        </label>
+          <button
+            class="role-switch-trigger"
+            type="button"
+            :disabled="switchRoleBusy"
+            :aria-expanded="roleMenuOpen"
+            aria-haspopup="listbox"
+            @click.stop="toggleRoleMenu"
+            @keydown="handleRoleMenuKeydown"
+          >
+            <span>{{ roleName(currentUser.role) }}</span>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
+          </button>
+          <div v-if="roleMenuOpen" class="role-menu" role="listbox" aria-label="选择工作身份">
+            <button
+              v-for="role in availableRoles"
+              :key="role.id"
+              class="role-option"
+              :class="{ selected: role.id === currentUser.role }"
+              type="button"
+              role="option"
+              :aria-selected="role.id === currentUser.role"
+              @click="chooseRole(role.id)"
+            >
+              <span>{{ role.name }}</span>
+              <span v-if="role.id === currentUser.role" class="role-option-current">当前</span>
+            </button>
+          </div>
+        </div>
         <button class="logout-btn" type="button" @click="logout" title="退出登录">退出</button>
       </div>
       <p v-if="switchRoleError" class="role-switch-error" role="alert">{{ switchRoleError }}</p>
@@ -202,34 +277,111 @@ async function switchRole(role) {
   grid-column: 2 / 4;
   grid-row: 2;
   min-width: 0;
+  position: relative;
 }
 
-.role-switch select {
+.role-switch-trigger {
   width: 100%;
   min-width: 0;
   height: 30px;
-  padding: 0 7px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  padding: 0 8px;
   border: 1px solid #41617d;
   border-radius: 6px;
   background: #173b59;
   color: #e7f2fc;
   font-size: 11px;
   font-family: inherit;
-  color-scheme: dark;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
 }
 
-.role-switch select:hover {
+.role-switch-trigger > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.role-switch-trigger svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: #a9cee9;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.role-switch-trigger:hover,
+.role-switch-trigger[aria-expanded="true"] {
   background: #204967;
   border-color: #6eaed4;
 }
 
-.role-switch select:focus-visible {
+.role-switch-trigger:focus-visible,
+.role-option:focus-visible {
   outline: 2px solid #90cdff;
   outline-offset: 1px;
+}
+
+.role-switch-trigger:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.role-menu {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  padding: 4px;
+  border: 1px solid #41617d;
+  border-radius: 7px;
+  background: #102f4a;
+  box-shadow: 0 10px 24px rgba(5, 24, 42, 0.35);
+}
+
+.role-option {
+  width: 100%;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #d7eafa;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.role-option:hover {
+  background: #2d617f;
+  color: #fff;
+}
+
+.role-option.selected {
+  background: #1385f8;
+  color: #fff;
+  font-weight: 700;
+}
+
+.role-option-current {
+  color: #dff2ff;
+  font-size: 10px;
+  font-weight: 600;
 }
 
 .role-switch-error {

@@ -20,8 +20,18 @@ type fakeResolver struct {
 	finalRight map[string]bool     // userID -> 是否有最终把关权限
 }
 
-func (f *fakeResolver) ListReviewers(_ context.Context, bankID string) ([]string, error) {
-	return f.reviewers[bankID], nil
+func (f *fakeResolver) ListReviewers(_ context.Context, _ string) ([]string, error) {
+	seen := make(map[string]bool)
+	var result []string
+	for _, ids := range f.reviewers {
+		for _, id := range ids {
+			if !seen[id] {
+				seen[id] = true
+				result = append(result, id)
+			}
+		}
+	}
+	return result, nil
 }
 
 func (f *fakeResolver) ListReviewCandidates(_ context.Context) ([]Candidate, error) {
@@ -33,6 +43,12 @@ func (f *fakeResolver) ListReviewCandidates(_ context.Context) ([]Candidate, err
 				seen[id] = true
 				out = append(out, Candidate{ID: id, Username: id, DisplayName: id})
 			}
+		}
+	}
+	for id, enabled := range f.finalRight {
+		if enabled && !seen[id] {
+			seen[id] = true
+			out = append(out, Candidate{ID: id, Username: id, DisplayName: id})
 		}
 	}
 	return out, nil
@@ -141,7 +157,9 @@ func TestFinalizeRejectsQuestionVersionChangedDuringReview(t *testing.T) {
 	if err := questionStore.SaveQuestion(ctx, *testQuestion("bank-neike")); err != nil {
 		t.Fatal(err)
 	}
-	if err := reviewStore.SaveFlowConfig(ctx, testFlow()); err != nil {
+	flow := testFlow()
+	flow.Rounds[0].RequiredCount = 1
+	if err := reviewStore.SaveFlowConfig(ctx, flow); err != nil {
 		t.Fatal(err)
 	}
 
@@ -149,10 +167,10 @@ func TestFinalizeRejectsQuestionVersionChangedDuringReview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusApproved}); err != nil {
+	if err := svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusRejected, Opinion: "答案与指南不符"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusRejected, Opinion: "答案与指南不符"}); err != nil {
+	if err := svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusApproved}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -210,7 +228,7 @@ func testFlow() domain.ReviewFlowConfig {
 }
 
 func TestSubmitQuestionForOwnerAllowsUnclassifiedQuestion(t *testing.T) {
-	svc, reviewStore, questionStore := newTestService(nil, nil)
+	svc, reviewStore, questionStore := newTestService(map[string][]string{"": {"reviewer-1"}}, nil)
 	ctx := context.Background()
 	q := testQuestion("")
 	q.Status = domain.StatusAIReviewed
@@ -233,6 +251,75 @@ func TestSubmitQuestionForOwnerAllowsUnclassifiedQuestion(t *testing.T) {
 	stored, _ := questionStore.GetQuestion(ctx, q.ID)
 	if stored.Status != domain.StatusReviewing {
 		t.Fatalf("送审后题目应进入审核中，实际 %s", stored.Status)
+	}
+}
+
+func TestOwnerUnclassifiedQuestionAdvancesAcrossAutoMatchedRounds(t *testing.T) {
+	svc, reviewStore, questionStore := newTestService(map[string][]string{"": {"r1"}}, map[string]bool{"admin1": true})
+	ctx := context.Background()
+	q := testQuestion("")
+	q.BankIDs = nil
+	q.Status = domain.StatusAIReviewed
+	if err := questionStore.SaveQuestion(ctx, *q); err != nil {
+		t.Fatal(err)
+	}
+	flow := testFlow()
+	flow.Rounds = append(flow.Rounds, domain.RoundConfig{RoundNumber: 2, Name: "终审", RequiredCount: 1})
+	if err := reviewStore.SaveFlowConfig(ctx, flow); err != nil {
+		t.Fatal(err)
+	}
+	task, err := svc.SubmitQuestionForOwner(ctx, q.ID, flow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusApproved}); err != nil {
+		t.Fatalf("无分类题目不应在进入下一轮时失败: %v", err)
+	}
+	task, _ = reviewStore.GetTask(ctx, task.ID)
+	if task.Status != domain.StatusReviewing || task.CurrentRound != 2 || task.SubmissionBankID != "" {
+		t.Fatalf("无分类多轮任务推进异常: %+v", task)
+	}
+}
+
+func TestSubmitRejectsUnreachableAutoMatchedVoteThreshold(t *testing.T) {
+	svc, reviewStore, questionStore := newTestService(map[string][]string{"": {"r1", "r2"}}, nil)
+	ctx := context.Background()
+	q := testQuestion("")
+	q.BankIDs = nil
+	q.Status = domain.StatusAIReviewed
+	if err := questionStore.SaveQuestion(ctx, *q); err != nil {
+		t.Fatal(err)
+	}
+	flow := testFlow()
+	flow.Rounds[0].RequiredCount = 3
+	if err := reviewStore.SaveFlowConfig(ctx, flow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SubmitQuestionForOwner(ctx, q.ID, flow.ID); err == nil || !strings.Contains(err.Error(), "当前仅有 2 位可用审核人") {
+		t.Fatalf("不可达票数应在送审前被拒绝，实际: %v", err)
+	}
+	stored, _ := questionStore.GetQuestion(ctx, q.ID)
+	if stored.Status != domain.StatusAIReviewed {
+		t.Fatalf("配置错误不应改变题目状态: %s", stored.Status)
+	}
+}
+
+func TestConfiguredReviewerIsRevalidatedWhenTaskIsSubmitted(t *testing.T) {
+	svc, reviewStore, questionStore := newTestService(map[string][]string{"": {"active-reviewer"}}, nil)
+	ctx := context.Background()
+	q := testQuestion("")
+	q.BankIDs = nil
+	q.Status = domain.StatusAIReviewed
+	if err := questionStore.SaveQuestion(ctx, *q); err != nil {
+		t.Fatal(err)
+	}
+	flow := testFlow()
+	flow.Rounds[0].ExpertIDs = []string{"removed-reviewer"}
+	if err := reviewStore.SaveFlowConfig(ctx, flow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SubmitQuestionForOwner(ctx, q.ID, flow.ID); err == nil || !strings.Contains(err.Error(), "已停用、被删除或不再拥有审题权限") {
+		t.Fatalf("失效审核人不应继续收到新任务: %v", err)
 	}
 }
 
@@ -465,10 +552,12 @@ func TestFinalizeRollsBackPublishedQuestionWhenTaskUpdateFails(t *testing.T) {
 	)
 	ctx := context.Background()
 	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
-	reviewStore.SaveFlowConfig(ctx, testFlow())
+	flow := testFlow()
+	flow.Rounds[0].RequiredCount = 1
+	reviewStore.SaveFlowConfig(ctx, flow)
 	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-test")
-	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusApproved})
-	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusRejected, Opinion: "选项设置有歧义"})
+	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusRejected, Opinion: "选项设置有歧义"})
+	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusApproved})
 	beforeRecords, _ := reviewStore.ListRecordsByTaskID(ctx, task.ID)
 	reviewStore.FailNext("update_task", errors.New("injected final task failure"))
 
@@ -526,8 +615,8 @@ func TestResubmitRollsBackTaskWhenQuestionSaveFails(t *testing.T) {
 	}
 }
 
-// TestConflictFlow 测试：3位审题人投票，2通过1驳回 → 全审完 → conflict。
-func TestConflictFlow(t *testing.T) {
+// TestRejectedRoundTerminates 测试：3位审题人投票，2通过1驳回且门槛为全员 → 驳回终止。
+func TestRejectedRoundTerminates(t *testing.T) {
 	reviewers := map[string][]string{
 		"bank-neike": {"r1", "r2", "r3"},
 	}
@@ -559,26 +648,26 @@ func TestConflictFlow(t *testing.T) {
 	if task.Status != domain.StatusReviewing {
 		t.Fatalf("未审完时状态应为 reviewing，实际 %s", task.Status)
 	}
-	// r3 驳回 → 全审完 → 冲突
+	// r3 驳回 → 全审完且未达全员通过 → 驳回终止
 	if err := svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r3", Action: domain.StatusRejected, Opinion: "答案有争议"}); err != nil {
 		t.Fatalf("r3 审核失败: %v", err)
 	}
 	task, _ = svc.reviewStore.GetTask(ctx, task.ID)
-	if task.Status != domain.StatusConflict {
-		t.Fatalf("票数冲突时应为 conflict，实际 %s", task.Status)
+	if task.Status != domain.StatusRejected {
+		t.Fatalf("只有驳回且未达标时应为 rejected，实际 %s", task.Status)
 	}
 	round := task.RoundResults[0]
 	if round.ApprovedCount != 2 || round.RejectedCount != 1 {
 		t.Fatalf("票数统计错误: 通过%d 驳回%d", round.ApprovedCount, round.RejectedCount)
 	}
-	// 题目状态保持 reviewing
+	// 题目进入淘汰题库
 	q, _ := questionStore.GetQuestion(ctx, "q1")
-	if q.Status != domain.StatusReviewing {
-		t.Fatalf("冲突时题目状态应为 reviewing，实际 %s", q.Status)
+	if q.Status != domain.StatusRejected {
+		t.Fatalf("驳回终态题目应为 rejected，实际 %s", q.Status)
 	}
 }
 
-// TestFinalizeApprove 测试：冲突后把关人决断通过 → 任务与题目直接入库（published）。
+// TestFinalizeApprove 测试：最终轮完成后把关人轮外决断通过 → 任务与题目直接入库（published）。
 func TestFinalizeApprove(t *testing.T) {
 	reviewers := map[string][]string{"bank-neike": {"r1", "r2"}}
 	finalRight := map[string]bool{"admin1": true}
@@ -586,11 +675,13 @@ func TestFinalizeApprove(t *testing.T) {
 	ctx := context.Background()
 
 	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
-	svc.reviewStore.SaveFlowConfig(ctx, testFlow())
+	flow := testFlow()
+	flow.Rounds[0].RequiredCount = 1
+	svc.reviewStore.SaveFlowConfig(ctx, flow)
 
 	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-test")
-	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusApproved})
-	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusRejected, Opinion: "需要再确认"})
+	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusRejected, Opinion: "需要再确认"})
+	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusApproved})
 
 	task, _ = svc.reviewStore.GetTask(ctx, task.ID)
 	if task.Status != domain.StatusConflict {
@@ -632,11 +723,13 @@ func TestFinalizeReject(t *testing.T) {
 	ctx := context.Background()
 
 	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
-	svc.reviewStore.SaveFlowConfig(ctx, testFlow())
+	flow := testFlow()
+	flow.Rounds[0].RequiredCount = 1
+	svc.reviewStore.SaveFlowConfig(ctx, flow)
 
 	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-test")
-	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusApproved})
-	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusRejected, Opinion: "选项设置有歧义"})
+	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusRejected, Opinion: "选项设置有歧义"})
+	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusApproved})
 
 	if err := svc.Finalize(ctx, FinalizeRequest{TaskID: task.ID, ReviewerID: "admin1", Action: domain.StatusRejected, Opinion: "科学性问题，驳回"}); err != nil {
 		t.Fatalf("决断失败: %v", err)
@@ -668,11 +761,13 @@ func TestFinalizeRevision(t *testing.T) {
 	ctx := context.Background()
 
 	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
-	svc.reviewStore.SaveFlowConfig(ctx, testFlow())
+	flow := testFlow()
+	flow.Rounds[0].RequiredCount = 1
+	svc.reviewStore.SaveFlowConfig(ctx, flow)
 
 	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-test")
-	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusApproved})
-	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusRevisionRequired, Opinion: "题干缺少诱因"})
+	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusRejected, Opinion: "题干缺少诱因"})
+	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusApproved})
 
 	if err := svc.Finalize(ctx, FinalizeRequest{TaskID: task.ID, ReviewerID: "admin1", Action: domain.StatusRevisionRequired, Opinion: "题干信息不完整，退回补充"}); err != nil {
 		t.Fatalf("决断失败: %v", err)
@@ -774,7 +869,39 @@ func TestRejectThenPassAdvances(t *testing.T) {
 	}
 }
 
-// TestVetoRule 测试：一票否决流程——任一驳回直接驳回；全员通过才过轮。
+// TestRoundRevisionPriorityOverRejection 测试：本轮未达到通过票数时，
+// 只要出现需修改票，就优先退回修改，不进入最终决断；驳回票同时留痕。
+func TestRoundRevisionPriorityOverRejection(t *testing.T) {
+	reviewers := map[string][]string{"bank-neike": {"r1", "r2", "r3"}}
+	svc, _, questionStore := newTestService(reviewers, map[string]bool{"admin1": true})
+	ctx := context.Background()
+	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
+	flow := testFlow()
+	flow.Rounds[0].RequiredCount = 3
+	svc.reviewStore.SaveFlowConfig(ctx, flow)
+	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-test")
+	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusRejected, Opinion: "答案存在疑问"})
+	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusRevisionRequired, Opinion: "题干需要补充条件"})
+	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r3", Action: domain.StatusApproved})
+
+	task, _ = svc.reviewStore.GetTask(ctx, task.ID)
+	if task.Status != domain.StatusRevisionRequired {
+		t.Fatalf("含需修改票且未达标时应进入 revision_required，实际 %s", task.Status)
+	}
+	if len(task.RoundResults[0].Reviews) != 3 || task.RoundResults[0].RejectedCount != 1 || task.RoundResults[0].RevisionCount != 1 {
+		t.Fatalf("本轮票数或评语记录不完整: %+v", task.RoundResults[0])
+	}
+	q, _ := questionStore.GetQuestion(ctx, "q1")
+	if q.Status != domain.StatusAIReviewed {
+		t.Fatalf("退回修改后题目应恢复 ai_reviewed，实际 %s", q.Status)
+	}
+	decisions, _ := svc.MyDecisions(ctx, "admin1")
+	if len(decisions) != 0 {
+		t.Fatalf("退修题不应进入最终决断列表，实际 %d", len(decisions))
+	}
+}
+
+// TestVetoRule 测试：一票否决流程收齐本轮意见后裁定；有驳回且无需修改即淘汰。
 func TestVetoRule(t *testing.T) {
 	reviewers := map[string][]string{"bank-neike": {"r1", "r2", "r3"}}
 	svc, _, questionStore := newTestService(reviewers, map[string]bool{})
@@ -792,13 +919,19 @@ func TestVetoRule(t *testing.T) {
 	svc.reviewStore.SaveFlowConfig(ctx, flow)
 
 	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-veto")
-	// r1 驳回 → 直接驳回（无需等其他人）
+	// r1 驳回 → 未收齐意见，仍等待本轮其他审核人
 	if err := svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusRejected, Opinion: "一票否决"}); err != nil {
 		t.Fatalf("r1 驳回失败: %v", err)
 	}
 	task, _ = svc.reviewStore.GetTask(ctx, task.ID)
+	if task.Status != domain.StatusReviewing {
+		t.Fatalf("一票否决未收齐意见时应保持审核中，实际 %s", task.Status)
+	}
+	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusApproved})
+	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r3", Action: domain.StatusApproved})
+	task, _ = svc.reviewStore.GetTask(ctx, task.ID)
 	if task.Status != domain.StatusRejected {
-		t.Fatalf("一票否决应直接驳回，实际 %s", task.Status)
+		t.Fatalf("一票否决收齐后应驳回，实际 %s", task.Status)
 	}
 	q, _ := questionStore.GetQuestion(ctx, "q1")
 	if q.Status != domain.StatusRejected {
@@ -965,8 +1098,8 @@ func TestTwoRoundsFinalDecision(t *testing.T) {
 	}
 }
 
-// TestTwoRoundsDisagreement 测试：中途轮次出现分歧（全员投完仍有反对票）→ 该轮进入待决断，
-// 把关人决断通过后进入下一轮。（本场景门槛=全员，1人通过不会提前过轮）
+// TestTwoRoundsDisagreement 测试：中途轮次未达全员通过且只有驳回 → 驳回终止，
+// 不进入轮外最终决断，也不会继续下一轮。
 func TestTwoRoundsDisagreement(t *testing.T) {
 	reviewers := map[string][]string{"bank-neike": {"r1", "r2", "r3"}}
 	finalRight := map[string]bool{"admin1": true}
@@ -986,21 +1119,17 @@ func TestTwoRoundsDisagreement(t *testing.T) {
 	svc.reviewStore.SaveFlowConfig(ctx, flow)
 
 	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-2r")
-	// 第1轮：r1 通过、r2 驳回、r3 通过 → 全员投完有反对票 → 待决断
+	// 第1轮：r1 通过、r2 驳回、r3 通过 → 全员投完仍未达标 → 驳回终止
 	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r1", Action: domain.StatusApproved})
 	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r2", Action: domain.StatusRejected, Opinion: "有异议"})
 	svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "r3", Action: domain.StatusApproved})
 	task, _ = svc.reviewStore.GetTask(ctx, task.ID)
-	if task.Status != domain.StatusConflict {
-		t.Fatalf("第1轮分歧应进入待决断，实际 %s", task.Status)
+	if task.Status != domain.StatusRejected {
+		t.Fatalf("第1轮只有驳回且未达标应直接驳回，实际 %s", task.Status)
 	}
-	// 把关人决断通过 → 进入第2轮
-	if err := svc.Finalize(ctx, FinalizeRequest{TaskID: task.ID, ReviewerID: "admin1", Action: domain.StatusApproved}); err != nil {
-		t.Fatalf("决断失败: %v", err)
-	}
-	task, _ = svc.reviewStore.GetTask(ctx, task.ID)
-	if task.Status != domain.StatusReviewing || task.CurrentRound != 2 {
-		t.Fatalf("决断通过后应进入第2轮，实际 status=%s round=%d", task.Status, task.CurrentRound)
+	q, _ := questionStore.GetQuestion(ctx, "q1")
+	if q.Status != domain.StatusRejected {
+		t.Fatalf("中间轮次驳回后题目应进入淘汰终态，实际 %s", q.Status)
 	}
 }
 
@@ -1091,7 +1220,7 @@ func TestDuplicateVote(t *testing.T) {
 	}
 }
 
-func TestSubmissionBankSnapshotControlsReviewerRouting(t *testing.T) {
+func TestAutomaticReviewerRoutingIgnoresLegacyBankSnapshot(t *testing.T) {
 	svc, reviewStore, questionStore := newTestService(
 		map[string][]string{"bank-a": {"reviewer-a"}, "bank-b": {"reviewer-b"}},
 		map[string]bool{},
@@ -1116,19 +1245,19 @@ func TestSubmissionBankSnapshotControlsReviewerRouting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task.SubmissionBankID != "bank-b" || len(task.AssignedTo) != 1 || task.AssignedTo[0] != "reviewer-b" {
-		t.Fatalf("送审应按显式题库 bank-b 固化并分配，实际 task=%+v", task)
+	if task.SubmissionBankID != "bank-b" || len(task.AssignedTo) != 2 {
+		t.Fatalf("兼容快照可以保留，但自动分配不应再按子题库裁剪: %+v", task)
 	}
 
-	// 审核期间即使题目当前分类发生变化，下一轮仍使用任务快照 bank-b。
+	// 审核期间即使题目当前分类发生变化，下一轮仍按当前审题账号集合分配。
 	q.BankIDs = []string{"bank-a"}
 	questionStore.ForceQuestionForTest(*q)
-	if err := svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: "reviewer-b", Action: domain.StatusApproved}); err != nil {
+	if err := svc.Review(ctx, ReviewRequest{TaskID: task.ID, ExpertID: task.AssignedTo[0], Action: domain.StatusApproved}); err != nil {
 		t.Fatal(err)
 	}
 	updated, _ := reviewStore.GetTask(ctx, task.ID)
-	if updated.CurrentRound != 2 || len(updated.AssignedTo) != 1 || updated.AssignedTo[0] != "reviewer-b" {
-		t.Fatalf("下一轮审核人不应随当前分类漂移，实际 task=%+v", updated)
+	if updated.CurrentRound != 2 || len(updated.AssignedTo) != 2 {
+		t.Fatalf("下一轮审核人不应依赖当前分类，实际 task=%+v", updated)
 	}
 }
 
