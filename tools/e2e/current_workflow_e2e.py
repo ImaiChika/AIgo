@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import subprocess
 import time
 import uuid
@@ -11,6 +12,7 @@ BASE = os.environ.get("AIGO_E2E_BASE_URL", "http://127.0.0.1:5173")
 DSN = os.environ.get("AIGO_E2E_DB_DSN", "postgres://localhost:5432/aigo?sslmode=disable")
 ADMIN_USERNAME = os.environ.get("AIGO_E2E_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("AIGO_E2E_ADMIN_PASSWORD", "admin")
+SSH_HOST = os.environ.get("AIGO_E2E_SSH_HOST", "")
 suffix = uuid.uuid4().hex[:10]
 username = f"ze2e_dual_{suffix}"
 password = f"Ze2e-{suffix}-password"
@@ -21,6 +23,10 @@ initial_stem = f"男，50岁。{stem_marker}，出现持续胸痛2小时。最�
 
 
 def psql(sql):
+    if SSH_HOST:
+        command = ["docker", "exec", "aigo-postgres-1", "psql", "-U", "aigo", "-d", "aigo", "-v", "ON_ERROR_STOP=1", "-c", sql]
+        subprocess.run(["ssh", "-o", "BatchMode=yes", SSH_HOST, " ".join(shlex.quote(value) for value in command)], check=True, capture_output=True, text=True)
+        return
     subprocess.run(["psql", DSN, "-v", "ON_ERROR_STOP=1", "-c", sql], check=True, capture_output=True, text=True)
 
 
