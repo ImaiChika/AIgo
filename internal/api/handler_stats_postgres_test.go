@@ -146,8 +146,9 @@ func TestStatsHandlerScopedAndPermissionGated(t *testing.T) {
 	if err := json.Unmarshal(globalResp.Body.Bytes(), &globalPayload); err != nil {
 		t.Fatal(err)
 	}
-	if globalPayload.QuestionCount != 3 || globalPayload.TierCounts["formal"] != 2 || globalPayload.TierCounts["eliminated"] != 1 {
-		t.Fatalf("global stats included personal question or lost tiers: %+v", globalPayload)
+	// 全局统计=系统真实总量：包含管理员个人题（4 题待审核），分层完整。
+	if globalPayload.QuestionCount != 4 || globalPayload.TierCounts["working"] != 4 || globalPayload.TierCounts["formal"] != 2 || globalPayload.TierCounts["eliminated"] != 1 {
+		t.Fatalf("global stats should count true system totals: %+v", globalPayload)
 	}
 	personalResp := serveAuthJSON(t, handler, http.MethodGet, "/api/stats?scope=personal", adminToken, "198.51.100.1", nil)
 	if personalResp.Code != http.StatusOK {
