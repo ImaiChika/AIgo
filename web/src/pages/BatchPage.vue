@@ -96,6 +96,31 @@ function elapsedText(job) {
   return hours > 0 ? `${hours}:${mmss}` : mmss;
 }
 
+// 逐单元生成明细：顺序与提交的知识点展开一致，老师按知识点核对成功/失败。
+const unitRows = computed(() => {
+  const items = currentJob.value?.items || [];
+  return items.map((it, idx) => ({
+    idx: idx + 1,
+    code: it.outline_code || "—",
+    topic: it.topic || "",
+    ok: it.status === "ok",
+    error: it.status === "ok" ? "" : (it.error || "生成失败"),
+  }));
+});
+
+// 尚未出结果的单元数：排队等待或生成中。
+const pendingUnitCount = computed(() => {
+  const job = currentJob.value;
+  if (!job) return 0;
+  return Math.max(0, (job.total_count || 0) - (job.items || []).length);
+});
+
+// 任务已进队列但还没有任何单元出结果：提示并发名额等待。
+const queueWaiting = computed(() => {
+  const job = currentJob.value;
+  return !!job && isRunning(job.status) && (job.items || []).length === 0 && (job.total_count || 0) > 0;
+});
+
 // 进度百分比
 const progressPercent = computed(() => {
   if (!currentJob.value || !currentJob.value.total_count) return 0;
@@ -151,11 +176,7 @@ async function loadJobsFromDB() {
     const data = await api.batchList({ limit: 50 });
     jobHistory.value = data.jobs || [];
     if (jobHistory.value.length > 0 && !currentJob.value) {
-      currentJob.value = jobHistory.value[0];
-      // 如果任务还在运行中，自动开始轮询
-      if (isRunning(currentJob.value.status)) {
-        startPolling(currentJob.value.job_id);
-      }
+      selectJob(jobHistory.value[0]);
     }
   } catch (e) {
     console.error("加载任务历史失败:", e);
@@ -163,6 +184,27 @@ async function loadJobsFromDB() {
     // 回退到 localStorage
     const jobs = JSON.parse(localStorage.getItem("batch_jobs") || "[]");
     jobHistory.value = jobs;
+  }
+}
+
+// 选中任务：先展示列表摘要，再拉取完整状态补齐逐单元明细（明细只在
+// 状态接口返回，列表接口不带；终态任务没有轮询，必须主动水合一次）。
+function selectJob(job) {
+  if (!job) return;
+  currentJob.value = job;
+  hydrateJobDetail(job.job_id);
+  if (isRunning(job.status)) startPolling(job.job_id);
+}
+
+async function hydrateJobDetail(jobId) {
+  try {
+    const full = await api.batchStatus(jobId);
+    if (currentJob.value?.job_id !== jobId) return;
+    currentJob.value = full;
+    const idx = jobHistory.value.findIndex(j => j.job_id === jobId);
+    if (idx >= 0) jobHistory.value[idx] = full;
+  } catch (e) {
+    // 明细拉取失败静默降级：摘要信息（计数/进度）仍然可用
   }
 }
 
@@ -537,11 +579,33 @@ onBeforeUnmount(() => {
             <span>生成项：<strong>{{ currentJob.total_count }}</strong></span>
             <span>已完成：<strong class="text-success">{{ currentJob.completed }}</strong></span>
             <span>失败：<strong class="text-danger">{{ currentJob.failed }}</strong></span>
+            <span v-if="pendingUnitCount > 0 && isRunning(currentJob.status)">排队/生成中：<strong>{{ pendingUnitCount }}</strong></span>
           </div>
           <div class="progress-bar">
             <div class="progress-fill" :style="{ width: progressPercent + '%' }"></div>
           </div>
           <span class="progress-text">{{ progressPercent }}% 完成</span>
+          <p v-if="queueWaiting" class="queue-hint">
+            任务已进入本地队列：正在等待全局并发名额（上限 {{ batchRuntime?.concurrency || '—' }}）或生成首批题目；排队与生成时间均计入已用时。
+          </p>
+        </div>
+
+        <!-- 逐单元明细：按提交顺序展示每个知识点的成功/失败与原因 -->
+        <div v-if="unitRows.length" class="unit-section">
+          <div class="unit-head">
+            <span>生成明细 {{ unitRows.length }}/{{ currentJob.total_count || unitRows.length }}</span>
+            <span v-if="pendingUnitCount > 0 && isRunning(currentJob.status)" class="unit-pending">剩余 {{ pendingUnitCount }} 项排队/生成中</span>
+          </div>
+          <div class="unit-rows">
+            <div v-for="row in unitRows" :key="row.idx" class="unit-row">
+              <span class="unit-no">{{ row.idx }}</span>
+              <span class="unit-code">{{ row.code }}</span>
+              <span class="unit-topic" :title="row.topic">{{ row.topic || "—" }}</span>
+              <span v-if="row.ok" class="unit-state ok">成功</span>
+              <span v-else class="unit-state bad">失败</span>
+              <span v-if="row.error" class="unit-error" :title="row.error">{{ row.error }}</span>
+            </div>
+          </div>
         </div>
 
         <!-- 任务完成后的导入：自动触发，无需手动点击 -->
@@ -649,7 +713,7 @@ onBeforeUnmount(() => {
           </div>
           <div class="job-actions">
             <button class="ghost-button" type="button" @click="checkStatus(job.job_id)">刷新状态</button>
-            <button class="ghost-button" type="button" @click="currentJob = job">查看详情</button>
+            <button class="ghost-button" type="button" @click="selectJob(job)">查看详情</button>
           </div>
         </div>
       </div>
@@ -1007,5 +1071,54 @@ onBeforeUnmount(() => {
 }
 .job-retry-actions {
   flex-wrap: wrap;
+}
+.unit-section {
+  margin-top: 12px;
+  border: 1px solid #dce8f7;
+  border-radius: 8px;
+  background: #fbfdff;
+}
+.unit-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #e7eef8;
+  color: #3f4e63;
+  font-size: 12px;
+  font-weight: 600;
+}
+.unit-pending {
+  color: #8a97a8;
+  font-weight: 400;
+}
+.unit-rows {
+  max-height: 260px;
+  overflow-y: auto;
+}
+.unit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  border-bottom: 1px dashed #eef3fa;
+}
+.unit-row:last-child { border-bottom: none; }
+.unit-no { width: 26px; color: #8a97a8; flex: none; text-align: right; }
+.unit-code { width: 130px; color: #1f5eff; font-family: ui-monospace, Menlo, monospace; flex: none; }
+.unit-topic { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #3f4e63; }
+.unit-state { flex: none; font-weight: 600; }
+.unit-state.ok { color: #12805c; }
+.unit-state.bad { color: #c23b3b; }
+.unit-error { flex: 1.4; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #a15a5a; }
+.queue-hint {
+  margin: 8px 0 0;
+  color: #8a6d1f;
+  background: #fdf6e7;
+  border: 1px solid #f0e0b5;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
 }
 </style>
