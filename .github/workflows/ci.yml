@@ -52,10 +52,23 @@ jobs:
       - name: go test -race（存储层竞态）
         run: go test -count=1 -race ./internal/storage/... ./internal/aicheck/ ./internal/review/
 
-      - name: govulncheck（可达漏洞必须为 0）
+      - name: govulncheck（可达漏洞必须为 0；已登记的无修复例外除外）
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+          if govulncheck ./... > govulncheck.out 2>&1; then
+            echo "govulncheck clean"
+            exit 0
+          fi
+          # 临时例外（上游发修复版升级后必须移除）：GO-2026-6452 excelize
+          # GetRows 共享字符串负索引 panic，触发面为管理员上传的大纲 xlsx
+          # 解析（internal/importer/xlsx.go），Fixed in: N/A（2026-09-17 查）。
+          if grep -q "GO-2026-6452" govulncheck.out \
+            && ! grep -Eq "Vulnerability #([2-9]|[0-9]{2,}):" govulncheck.out; then
+            echo "::warning::仅存在已登记的无修复例外 GO-2026-6452（excelize），临时放行；上游发版后请升级 excelize 并移除本例外"
+            exit 0
+          fi
+          cat govulncheck.out
+          exit 1
 
   frontend:
     name: 前端构建与状态测试
