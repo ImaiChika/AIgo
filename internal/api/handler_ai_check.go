@@ -118,14 +118,26 @@ func (s *Server) handleAICheckProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 范围过滤：存活的题目逐题校验题库范围；
-	// 已淘汰的题目（检查不通过自动删除）不在任何题库中，直接放行其淘汰原因。
+	// 已淘汰的题目（检查不通过自动删除）不在任何题库中，直接放行其淘汰原因；
+	// 暂存态题目（检查未完成）对用户界面不可见，但进度状态对本人放行——
+	// 生成页/批量页正是靠本接口在检查期间展示"检查中 x/N"，内容不泄露。
 	filtered := make([]aicheck.CheckProgress, 0, len(items))
 	for _, it := range items {
 		if it.Discarded {
 			filtered = append(filtered, it)
 			continue
 		}
-		if q, status, err := s.loadScopedQuestion(r, it.QuestionID, domain.PermQuestionView); err == nil && q != nil && status == 0 {
+		q, err := s.questionStore.GetQuestion(r.Context(), it.QuestionID)
+		if err != nil || q == nil {
+			continue
+		}
+		if domain.IsStagingStatus(q.Status) {
+			if q.OwnerID != "" && q.OwnerID == auth.GetUserID(r.Context()) {
+				filtered = append(filtered, it)
+			}
+			continue
+		}
+		if s.questionInScope(r, q, domain.PermQuestionView) && s.canViewQuestion(r, q) {
 			filtered = append(filtered, it)
 		}
 	}

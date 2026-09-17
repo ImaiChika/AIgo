@@ -118,3 +118,65 @@ func TestLocalExecutorUsesSingleQuestionAPIAndImportsResults(t *testing.T) {
 		t.Fatalf("local batch owner snapshot lost: questions=%+v err=%v", questions, err)
 	}
 }
+
+// recordingChecker 记录 CheckAsync 收到的题目 ID，用于验证导入后检查触发。
+type recordingChecker struct {
+	mu    sync.Mutex
+	ids   []string
+	calls int
+}
+
+func (c *recordingChecker) CheckAsync(questionIDs ...string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	c.ids = append(c.ids, questionIDs...)
+}
+
+// TestLocalExecutorImportTriggersDraftChecker 导入落库必须由执行器统一触发首次
+// AI 检查：Web 与 CLI 共用 ImportResults，任何入口导入成功都应排队检查，
+// 且重复导入（幂等重放）不重复触发。
+func TestLocalExecutorImportTriggersDraftChecker(t *testing.T) {
+	questionStore := testutil.NewMemoryStore()
+	jobStore := &localBatchStore{}
+	gen := generator.NewService(localTestLLM{})
+	executor := NewLocalExecutor(gen, questionStore, jobStore, "test-model")
+	checker := &recordingChecker{}
+	executor.SetDraftChecker(checker)
+	ctx := storage.WithQuestionChange(context.Background(), storage.QuestionChange{Actor: "teacher", OwnerID: "owner-1"})
+	points := []domain.KnowledgePoint{{ID: "kp-1", Topic: "胸痛", Subject: "心血管系统", OutlineCode: "1.1"}}
+
+	jobID, _, err := executor.GenerateAndSubmit(ctx, points, 1, "导入触发检查")
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		job, statusErr := executor.GetJobStatus(context.Background(), jobID)
+		if statusErr == nil && job != nil && job.Status == "completed" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	result, err := executor.ImportResults(ctx, jobID, nil)
+	if err != nil || result.Saved != 1 || len(result.QuestionIDs) != 1 {
+		t.Fatalf("import: result=%+v err=%v", result, err)
+	}
+	checker.mu.Lock()
+	firstCalls, firstIDs := checker.calls, append([]string(nil), checker.ids...)
+	checker.mu.Unlock()
+	if firstCalls != 1 || len(firstIDs) != 1 || firstIDs[0] != result.QuestionIDs[0] {
+		t.Fatalf("导入后应恰好触发一次检查: calls=%d ids=%v", firstCalls, firstIDs)
+	}
+
+	// 幂等重放：第二次导入返回缓存结果，不再触发检查
+	if _, err := executor.ImportResults(ctx, jobID, nil); err != nil {
+		t.Fatalf("replay import: %v", err)
+	}
+	checker.mu.Lock()
+	defer checker.mu.Unlock()
+	if checker.calls != 1 {
+		t.Fatalf("重放导入不应重复触发检查: calls=%d", checker.calls)
+	}
+}

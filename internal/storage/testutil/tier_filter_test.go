@@ -49,9 +49,10 @@ func TestSearchQuestionsTierFilter(t *testing.T) {
 	if got := ids(storage.QuestionFilter{Tiers: []string{"formal"}}); len(got) != 1 || got[0] != "q-published" {
 		t.Fatalf("tier=formal 应仅含 q-published, got %v", got)
 	}
-	// 过程题库 = 流程中状态（同创建时间按 ID 倒序）
-	if got := ids(storage.QuestionFilter{Tiers: []string{"working"}}); len(got) != 2 || got[0] != "q-reviewed" || got[1] != "q-draft" {
-		t.Fatalf("tier=working 应含草稿与已检查, got %v", got)
+	// 过程题库 = 检查通过后的流程中状态；暂存草稿（待 AI 检查）对用户不可见
+	// （同创建时间按 ID 倒序）
+	if got := ids(storage.QuestionFilter{Tiers: []string{"working"}}); len(got) != 1 || got[0] != "q-reviewed" {
+		t.Fatalf("tier=working 应仅含检查通过的 q-reviewed, got %v", got)
 	}
 	// 淘汰题库 = rejected/archived
 	if got := ids(storage.QuestionFilter{Tiers: []string{"eliminated"}}); len(got) != 1 || got[0] != "q-rejected" {

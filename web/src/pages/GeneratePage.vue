@@ -105,6 +105,10 @@ const generationDuration = computed(() => formatDuration(generationStartedAt.val
 const checkDuration = computed(() => formatDuration(checkStartedAt.value, checkCompletedAt.value));
 const hasWorkspaceRecord = computed(() => !!generationRunId.value || generatedQuestions.value.length > 0 || !!aiProgress.value);
 
+// 检查落定（通过/淘汰/异常定格）后才展示题目内容；检查期间只显示进度。
+// 服务端同样不下发暂存题目，这里是第二道门：旧缓存快照也不会提前露出内容。
+const checksSettled = computed(() => !["generating", "recovering", "checking"].includes(workspaceStatus.value));
+
 // 展示列表：检查中被淘汰的题自动移出预览（淘汰原因单独展示）
 const displayQuestions = computed(() => {
   const discarded = new Set((aiProgress.value?.items || []).filter((i) => i.discarded).map((i) => i.question_id));
@@ -168,8 +172,10 @@ const workflowSteps = computed(() => [
   },
   {
     number: "03",
-    title: "转入待审核题库",
-	  detail: aiProgress.value ? `通过 ${aiProgress.value.passed || 0} 道，淘汰 ${aiProgress.value.discarded || 0} 道` : "质检通过后进入新题修改与送审",
+    title: "转入个人题库",
+	  detail: aiProgress.value
+	    ? `通过 ${aiProgress.value.passed || 0} 道，淘汰 ${aiProgress.value.discarded || 0} 道${(aiProgress.value.passed || 0) > 0 ? "；通过题目已进入个人题库（待审核）" : ""}`
+	    : "质检通过后进入个人题库（待审核层）",
     state: aiProgress.value?.checking > 0 ? "waiting" : aiProgress.value?.stalled || aiProgress.value?.exhausted > 0 ? "attention" : aiProgress.value ? "done" : "waiting",
   },
 ].map((step) => ({
@@ -249,6 +255,13 @@ function updateCheckTiming(snapshot) {
 
 function onCheckFinished(snapshot) {
   updateCheckTiming(snapshot);
+  progressMsg.value = snapshot?.exhausted > 0
+    ? `质量检查结束：通过 ${snapshot.passed || 0} 道，淘汰 ${snapshot.discarded || 0} 道，检查异常 ${snapshot.exhausted} 道（已阻断送审，请联系管理员）`
+    : `质量检查完成：通过 ${snapshot?.passed || 0} 道，淘汰 ${snapshot?.discarded || 0} 道`;
+  // 检查落定后回捞命题运行：通过的题目此时才随运行详情下发（暂存题目服务端不下发）。
+  if ((snapshot?.passed || 0) > 0 && generatedQuestions.value.length < snapshot.passed) {
+    refreshGenerationRun();
+  }
   persistWorkspace();
 }
 
@@ -303,9 +316,14 @@ function applyGenerationRun(data, { restoring = false } = {}) {
   ) {
     showToast(`已生成 ${generatedQuestions.value.length} 道题（质量检查进行中）`);
   }
-  progressMsg.value = `已生成 ${generationQuestionIds.value.length} 道题，正在自动检查质量`;
+  progressMsg.value = checksSettled.value
+    ? (progressMsg.value || `已生成 ${generationQuestionIds.value.length} 道题`)
+    : `已生成 ${generationQuestionIds.value.length} 道题，正在自动检查质量`;
   checkStartedAt.value ||= generationCompletedAt.value;
-  startCheckTracking(generationQuestionIds.value, restoring);
+  // 检查已落定（如检查完成后回捞）时不重启进度轮询，避免状态反复与循环回捞
+  if (!checkCompletedAt.value) {
+    startCheckTracking(generationQuestionIds.value, restoring);
+  }
   loadStats();
   persistWorkspace();
   return true;
@@ -505,8 +523,8 @@ onBeforeUnmount(() => {
   </div>
   <div class="main-grid">
     <div class="editor-column">
-      <!-- 多题切换（数字直达 + 左右切换；被淘汰的题自动移出） -->
-      <section v-if="displayQuestions.length" class="panel question-nav">
+      <!-- 多题切换（检查落定后才出现；检查中被淘汰的题自动移出） -->
+      <section v-if="checksSettled && displayQuestions.length" class="panel question-nav">
         <button class="ghost-button" type="button" :disabled="displayIndex <= 0" @click="prevDisplay">←</button>
         <button
           v-for="(q, i) in displayQuestions"
@@ -523,15 +541,22 @@ onBeforeUnmount(() => {
         <span class="nav-info">第 {{ displayIndex + 1 }} / {{ displayQuestions.length }} 题</span>
       </section>
 
-      <!-- 生成结果（只读展示：AI 出题内容不可编辑，检查通过后进入题库） -->
+      <!-- 生成结果（只读展示：检查落定后才展示通过题目；检查期间仅显示进度） -->
       <section class="panel">
         <div class="section-heading">
           <span class="dot blue"></span>
           <h2>题目预览</h2>
-          <small v-if="answer">正确答案：{{ answer }}</small>
-          <AICheckScoreButton v-if="currentQuestionId" class="preview-ai-score" :question-id="currentQuestionId" />
+          <small v-if="answer && checksSettled">正确答案：{{ answer }}</small>
+          <AICheckScoreButton v-if="currentQuestionId && checksSettled" class="preview-ai-score" :question-id="currentQuestionId" />
         </div>
-        <template v-if="stem">
+        <div v-if="!checksSettled" class="preview-empty">
+          <span class="preview-empty-mark">质检</span>
+          <div>
+            <strong>AI 质量检查进行中</strong>
+            <p>检查通过后题目才会在此展示并进入个人题库；未通过的题目将被自动淘汰，淘汰原因见下方说明。</p>
+          </div>
+        </div>
+        <template v-else-if="stem">
           <p class="readonly-stem">{{ stem }}</p>
           <div class="readonly-options">
             <div v-for="(opt, index) in options" :key="opt.id" class="readonly-option" :class="{ correct: optionLabel(index) === answer }">
@@ -683,7 +708,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <section v-if="stem" class="preview-card">
+        <section v-if="stem && checksSettled" class="preview-card">
           <div class="section-heading compact">
             <span class="dot blue"></span>
             <h3>题目预览</h3>

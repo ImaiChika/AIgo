@@ -46,12 +46,10 @@ const visibleTiers = computed(() => (isGlobalScope.value ? GLOBAL_TIER_DEFS : PE
 const requestedTier = typeof route.query.tier === "string" ? route.query.tier : "";
 const activeTier = ref(visibleTiers.value.some((tier) => tier.key === requestedTier) ? requestedTier : (visibleTiers.value[0]?.key || ""));
 
-// 各分类下可选的状态筛选
+// 各分类下可选的状态筛选（暂存态 ai_draft/auto_checked 检查通过前不可见，无筛选项）
 const TIER_STATUS_OPTIONS = {
   formal: [{ value: "published", label: "已通过" }],
   working: [
-    { value: "ai_draft", label: "AI草稿" },
-    { value: "auto_checked", label: "已初评" },
     { value: "ai_reviewed", label: "AI已检查" },
     { value: "reviewing", label: "审核中" },
     { value: "conflict", label: "待决断" },

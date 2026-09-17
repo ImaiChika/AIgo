@@ -35,8 +35,12 @@ func (s *Server) visibleTiers(r *http.Request) []domain.QuestionTier {
 
 // canViewQuestion 将生命周期分层权限与用户的分类子题库边界一起校验。
 // 三个逻辑题库的查看权限彼此独立，不能再借用 question:view 读取正式/淘汰题。
+// 暂存态（AI 检查未通过）对任何人都不可见：题目在通过检查前不暴露给用户界面。
 func (s *Server) canViewQuestion(r *http.Request, q *domain.A2Question) bool {
 	if q == nil {
+		return false
+	}
+	if domain.IsStagingStatus(q.Status) {
 		return false
 	}
 	userID := auth.GetUserID(r.Context())
@@ -124,6 +128,7 @@ func (s *Server) personalAxisVisible(r *http.Request, q *domain.A2Question, perm
 }
 
 // loadViewableQuestion 用题目所属生命周期分层自动选择正确的查看权限。
+// 暂存态题目（AI 检查未通过）以 404 应答：既不暴露内容，也不确认其存在。
 func (s *Server) loadViewableQuestion(r *http.Request, id string) (*domain.A2Question, int, error) {
 	q, err := s.questionStore.GetQuestion(r.Context(), id)
 	if err != nil {
@@ -131,6 +136,9 @@ func (s *Server) loadViewableQuestion(r *http.Request, id string) (*domain.A2Que
 	}
 	if q == nil {
 		return nil, 404, fmt.Errorf("题目不存在")
+	}
+	if domain.IsStagingStatus(q.Status) {
+		return nil, 404, fmt.Errorf("题目尚未通过 AI 质量检查，暂不可见")
 	}
 	if !s.canViewQuestion(r, q) {
 		return nil, 403, fmt.Errorf("无权访问%s题目（超出权限或分类子题库范围）", q.Tier().Name())

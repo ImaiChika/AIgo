@@ -130,16 +130,14 @@ func TestArchiveDeletionPolicy(t *testing.T) {
 		}
 	}
 
-	// 2. 无审核史的草稿 → 物理删除
+	// 2. 无审核史的草稿 → 暂存期（AI 检查未完成）对用户不可见，也不可经 API 删除；
+	// 不合格草稿由 AI 检查自动淘汰，人工不接触暂存内容。
 	resp = deleteQuestion(t, "del-draft")
-	if resp.Code != http.StatusOK {
-		t.Fatalf("draft 删除应 200，实际 %d", resp.Code)
+	if resp.Code != http.StatusForbidden && resp.Code != http.StatusNotFound {
+		t.Fatalf("暂存草稿删除应被拒绝，实际 %d", resp.Code)
 	}
-	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil || payload.Archived {
-		t.Fatalf("draft 删除应返回 archived=false: %s", resp.Body.String())
-	}
-	if q, _ := store.GetQuestion(ctx, "del-draft"); q != nil {
-		t.Fatal("无审核史的草稿应被物理删除")
+	if q, _ := store.GetQuestion(ctx, "del-draft"); q == nil {
+		t.Fatal("暂存草稿不应被物理删除")
 	}
 
 	// 3. 有审核史的 ai_reviewed → 归档

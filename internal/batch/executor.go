@@ -22,6 +22,8 @@ type Capabilities struct {
 	Model         string `json:"model,omitempty"`
 	Message       string `json:"message"`
 	Endpoint      string `json:"-"`
+	// Concurrency 是执行器的全局并发上限，前端用于提示排队行为。
+	Concurrency int `json:"concurrency,omitempty"`
 }
 
 // Executor 隔离 AIgo 批量任务语义与具体执行方式。
@@ -54,6 +56,9 @@ type BatchJob struct {
 	ImportedAt string `json:"imported_at,omitempty"`
 	// Tracked 表示该任务在本地 batch_jobs 有记录（导入幂等可用）。
 	Tracked bool `json:"tracked,omitempty"`
+	// Items 是逐单元生成明细（顺序与提交的知识点展开顺序一致），仅任务状态
+	// 查询返回，供前端展示每个知识点的成功/失败与原因；列表接口不携带。
+	Items []ImportItem `json:"items,omitempty"`
 }
 
 // ImportResult 导入结果详情。
@@ -69,6 +74,7 @@ type ImportResult struct {
 // ImportItem 单条导入结果。
 type ImportItem struct {
 	OutlineCode string `json:"outline_code"` // 大纲代码
+	Topic       string `json:"topic,omitempty"` // 大纲要点主题（执行期记录，供前端展示）
 	Count       int    `json:"count"`        // 导入题目数
 	Status      string `json:"status"`       // "ok" / "failed"
 	Error       string `json:"error"`        // 失败原因

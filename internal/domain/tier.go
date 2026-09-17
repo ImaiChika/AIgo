@@ -5,7 +5,8 @@ package domain
 //
 //   - 正式题库（formal）：通过全部审核环节并决断入库（published）的定稿题。
 //     只有正式题库可导出文档；除自动入库、权限者删除/撤回外，其他功能不得再操作。
-//   - 待审核题库（working）：AI 检查前后、送审、退回修改等流程中的题目。
+//   - 待审核题库（working）：AI 检查通过后进入送审、退回修改等流程的题目；
+//     检查前的暂存态（ai_draft/auto_checked）对用户不可见，不算入本层可见集合。
 //   - 淘汰题库（eliminated）：终态留档题（驳回锁定、归档）。
 //     AI 检查不通过的题目会被物理删除并留淘汰档案（AICheckDiscard），不进入任何题库。
 type QuestionTier string
@@ -31,8 +32,18 @@ func (t QuestionTier) Name() string {
 	return string(t)
 }
 
+// IsStagingStatus 判断题目是否处于 AI 检查前的暂存态。
+// 暂存态题目（ai_draft 草稿、遗留 auto_checked）对全部用户界面不可见：
+// 仅在 AI 质量检查通过（ai_reviewed）后才进入可见题库；检查不通过会被
+// 物理删除并留淘汰档案。产品语义：客户只能看到检查通过的题目。
+func IsStagingStatus(status QuestionStatus) bool {
+	return status == StatusAIDraft || status == StatusAutoChecked
+}
+
 // TierForStatus 按审核状态推导题目所属题库分层。
 // 唯一事实来源：所有分层过滤、权限判断都必须经由本函数，禁止各处自行维护状态清单。
+// 注意：暂存态（ai_draft/auto_checked）仍归 working——供内部流转（检查、恢复）
+// 使用；但 TierStatuses(working) 不包含它们，即暂存题不出现在任何用户可见查询里。
 func TierForStatus(status QuestionStatus) QuestionTier {
 	switch CanonicalLifecycleStatus(status) {
 	case StatusPublished:
@@ -47,7 +58,9 @@ func TierForStatus(status QuestionStatus) QuestionTier {
 	}
 }
 
-// TierStatuses 返回分层的全部成员状态（与 TierForStatus 互为反函数）。
+// TierStatuses 返回分层在用户可见查询中的成员状态。
+// working 分层刻意不含暂存态（ai_draft/auto_checked）：待检题目对用户不可见，
+// 通过 AI 检查变为 ai_reviewed 后才随本分层出现（2026-09-17 产品口径）。
 func TierStatuses(tier QuestionTier) []QuestionStatus {
 	switch tier {
 	case TierFormal:
@@ -56,7 +69,7 @@ func TierStatuses(tier QuestionTier) []QuestionStatus {
 		return []QuestionStatus{StatusRejected, StatusArchived}
 	default:
 		return []QuestionStatus{
-			StatusAIDraft, StatusAutoChecked, StatusAIReviewed,
+			StatusAIReviewed,
 			StatusReviewing, StatusConflict, StatusRevisionRequired,
 		}
 	}

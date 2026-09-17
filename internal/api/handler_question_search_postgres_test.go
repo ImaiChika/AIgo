@@ -66,16 +66,16 @@ func TestQuestionSearchEndpointsPaged(t *testing.T) {
 	handler := server.Handler()
 	adminToken := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.1")
 
-	// 列表：数据库端分页
-	list := serveAuthJSON(t, handler, http.MethodGet, "/api/questions?page=2&page_size=2", adminToken, "198.51.100.1", nil)
+	// 列表：数据库端分页（暂存草稿 q1/q3/q5 对用户不可见，仅剩 q4、q2）
+	list := serveAuthJSON(t, handler, http.MethodGet, "/api/questions?page=1&page_size=2", adminToken, "198.51.100.1", nil)
 	if list.Code != http.StatusOK {
 		t.Fatalf("list status=%d body=%s", list.Code, list.Body.String())
 	}
 	page := decodeQuestionPage(t, list.Body.String())
-	if page.Total != 5 || page.Page != 2 || page.PageSize != 2 || !page.HasMore || len(page.Questions) != 2 {
+	if page.Total != 2 || page.Page != 1 || page.PageSize != 2 || page.HasMore || len(page.Questions) != 2 {
 		t.Fatalf("unexpected list page: %+v", page)
 	}
-	if page.Questions[0].ID != "q3" || page.Questions[1].ID != "q2" {
+	if page.Questions[0].ID != "q4" || page.Questions[1].ID != "q2" {
 		t.Fatalf("list page order wrong: %s, %s", page.Questions[0].ID, page.Questions[1].ID)
 	}
 
@@ -84,37 +84,37 @@ func TestQuestionSearchEndpointsPaged(t *testing.T) {
 	if byStem.Total != 1 || len(byStem.Questions) != 1 || byStem.Questions[0].ID != "q2" {
 		t.Fatalf("keyword search wrong: %+v", byStem)
 	}
-	// "100%" 必须按字面匹配（LIKE 转义），只命中 q5
+	// "100%" 必须按字面匹配（LIKE 转义）；唯一命中 q5 是暂存草稿，同样不可见
 	byPercent := decodeQuestionPage(t, serveAuthJSON(t, handler, http.MethodGet, "/api/questions/search?q=100%25", adminToken, "198.51.100.1", nil).Body.String())
-	if byPercent.Total != 1 || byPercent.Questions[0].ID != "q5" {
-		t.Fatalf("percent keyword search wrong: %+v", byPercent)
+	if byPercent.Total != 0 {
+		t.Fatalf("percent keyword search should hide staging draft: %+v", byPercent)
 	}
 	bySystem := decodeQuestionPage(t, serveAuthJSON(t, handler, http.MethodGet, "/api/questions/search?q=%E4%BC%A0%E6%9F%93%E7%97%85", adminToken, "198.51.100.1", nil).Body.String())
-	if bySystem.Total != 1 || bySystem.Questions[0].ID != "q1" {
-		t.Fatalf("system keyword search wrong: %+v", bySystem)
+	if bySystem.Total != 0 {
+		t.Fatalf("system keyword search should hide staging draft: %+v", bySystem)
 	}
 	classifiable := decodeQuestionPage(t, serveAuthJSON(t, handler, http.MethodGet, "/api/questions/search?classifiable=true", adminToken, "198.51.100.1", nil).Body.String())
-	if classifiable.Total != 3 {
-		t.Fatalf("classifiable search should exclude reviewing/formal/eliminated questions: %+v", classifiable)
+	if classifiable.Total != 0 {
+		t.Fatalf("classifiable search should hide staging drafts (no ai_reviewed seeded): %+v", classifiable)
 	}
 
-	// 搜索：等值条件组合（状态 + 专业多选）→ ai_draft 且内科/外科：q5、q3、q1
+	// 搜索：显式按暂存状态筛选 → 一律空页（待检题目对用户不可见，含管理员）
 	byStatus := decodeQuestionPage(t, serveAuthJSON(t, handler, http.MethodGet, "/api/questions/search?status=ai_draft&profession=%E5%86%85%E7%A7%91,%E5%A4%96%E7%A7%91", adminToken, "198.51.100.1", nil).Body.String())
-	if byStatus.Total != 3 || len(byStatus.Questions) != 3 || byStatus.Questions[0].ID != "q5" || byStatus.Questions[1].ID != "q3" || byStatus.Questions[2].ID != "q1" {
-		t.Fatalf("status+profession search wrong: %+v", byStatus)
+	if byStatus.Total != 0 || len(byStatus.Questions) != 0 {
+		t.Fatalf("status=ai_draft search should be empty (staging invisible): %+v", byStatus)
 	}
 
-	// 搜索：大纲代码前缀
+	// 搜索：大纲代码前缀（q5/q1 均为暂存草稿，不可见）
 	byOutline := decodeQuestionPage(t, serveAuthJSON(t, handler, http.MethodGet, "/api/questions/search?outline_code=110.4.3", adminToken, "198.51.100.1", nil).Body.String())
-	if byOutline.Total != 2 || byOutline.Questions[0].ID != "q5" || byOutline.Questions[1].ID != "q1" {
-		t.Fatalf("outline search wrong: %+v", byOutline)
+	if byOutline.Total != 0 {
+		t.Fatalf("outline search should hide staging drafts: %+v", byOutline)
 	}
 
-	// 题库题目列表（多对多 + 关键词）：题库列表仅覆盖待审核题库，
-	// 命中的是待审核的 q1；formal 的 q2（胃溃疡）不应出现在 bank-a 列表中。
+	// 题库题目列表（多对多 + 关键词）：题库列表仅覆盖检查通过的待审核题；
+	// 暂存的 q1（心肌梗死）在检查通过前同样不可见；formal 的 q2 密封不可见。
 	inBank := decodeQuestionPage(t, serveAuthJSON(t, handler, http.MethodGet, "/api/banks/bank-a/questions?q=%E5%BF%83%E8%82%8C%E6%A2%97%E6%AD%BB", adminToken, "198.51.100.1", nil).Body.String())
-	if inBank.Total != 1 || inBank.Questions[0].ID != "q1" {
-		t.Fatalf("bank question search wrong: %+v", inBank)
+	if inBank.Total != 0 {
+		t.Fatalf("bank question search wrong (staging draft should be hidden): %+v", inBank)
 	}
 	formalInBank := decodeQuestionPage(t, serveAuthJSON(t, handler, http.MethodGet, "/api/banks/bank-a/questions?q=%E8%83%83%E6%BA%83%E7%96%A1", adminToken, "198.51.100.1", nil).Body.String())
 	if formalInBank.Total != 0 {

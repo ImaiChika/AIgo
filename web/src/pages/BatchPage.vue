@@ -588,16 +588,20 @@ onBeforeUnmount(() => {
 
       <p v-if="importResult.simulated" class="result-summary simulated-result">{{ importResult.message }}</p>
       <p v-else class="result-summary">
-        成功导入 <b>{{ importRows.length }}</b> 题<template v-if="importResult.failed > 0">，失败 <b class="text-danger">{{ importResult.failed }}</b> 项</template>
+        已入库 <b>{{ importRows.length }}</b> 题<template v-if="importResult.failed > 0">，失败 <b class="text-danger">{{ importResult.failed }}</b> 项</template>
       </p>
-      <p v-if="aiProgress && aiProgress.checking > 0" class="result-check">AI 检查中（已完成 {{ aiProgress.total - aiProgress.checking }}/{{ aiProgress.total }}），只有通过检查的题目才能点击查看</p>
+      <p v-if="aiProgress && aiProgress.checking > 0" class="result-check">AI 检查中（已完成 {{ aiProgress.total - aiProgress.checking }}/{{ aiProgress.total }}）：通过检查的题目才会进入个人题库并展示内容</p>
       <p v-else-if="aiProgress && aiProgress.stalled" class="result-check">AI 检查仍在后台进行，可稍后查看结果</p>
-      <p v-else-if="checkDone" class="result-check">AI 检查完成：通过 {{ aiProgress.passed }}<template v-if="aiProgress.issues"> · 有问题 {{ aiProgress.issues }}</template><template v-if="aiProgress.exhausted"> · 检查异常 {{ aiProgress.exhausted }}</template><template v-if="aiProgress.discarded"> · 淘汰 {{ aiProgress.discarded }}</template></p>
+      <p v-else-if="checkDone" class="result-check">
+        AI 检查完成：通过 {{ aiProgress.passed }}<template v-if="aiProgress.issues"> · 有问题 {{ aiProgress.issues }}</template><template v-if="aiProgress.exhausted"> · 检查异常 {{ aiProgress.exhausted }}</template><template v-if="aiProgress.discarded"> · 淘汰 {{ aiProgress.discarded }}</template>
+        <template v-if="aiProgress.passed > 0">；通过的题目已进入个人题库（待审核）</template>
+        <RouterLink v-if="aiProgress.passed > 0" class="inline-link" to="/bank">去题库查看</RouterLink>
+      </p>
 
       <div class="result-list">
         <div v-for="row in passedRows" :key="row.id" class="result-row" :class="{ clickable: row.passed }" @click="row.passed && openQuestion(row.id)">
           <span class="row-no">{{ row.no }}</span>
-          <span class="row-stem">{{ row.stem || row.id }}</span>
+          <span class="row-stem">{{ row.stem || (row.passed ? row.id : "检查通过后展示题目内容") }}</span>
           <span v-if="row.passed" class="row-state passed">已通过</span>
           <span v-else-if="row.checking" class="row-state checking">检查中</span>
           <span v-else-if="row.exhausted" class="row-state failed">检查失败</span>

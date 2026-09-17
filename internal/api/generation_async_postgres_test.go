@@ -20,11 +20,12 @@ import (
 	"aigo/internal/llm"
 	"aigo/internal/pipeline"
 	"aigo/internal/review"
+	"aigo/internal/storage/postgres"
 )
 
 // generationHandlerTestServer 在 authHandlerTestServer 基础上补齐命题链路依赖
 // （pipeline + fake LLM + 题库/审计），用于验证异步提交 → worker 执行 → 轮询恢复。
-func generationHandlerTestServer(t *testing.T) (*Server, func()) {
+func generationHandlerTestServer(t *testing.T) (*Server, *postgres.Store, func()) {
 	t.Helper()
 	server, store, cleanup := authHandlerTestServer(t)
 	pipe := pipeline.New(generator.NewService(&fakeAPILLM{}), evaluator.NewService(), review.NewService(store, store, store, nil), nil, store)
@@ -39,7 +40,7 @@ func generationHandlerTestServer(t *testing.T) (*Server, func()) {
 	checker.SetAutoCheckEnabled(true)
 	server.aiCheckSvc = checker
 	pipe.SetDraftChecker(checker)
-	return server, cleanup
+	return server, store, cleanup
 }
 
 // fakeAPILLM 返回固定单题生成结果（与 pipeline 测试的 fakeLLM 内容一致）。
@@ -74,7 +75,7 @@ func serveGenerateJSON(t *testing.T, handler http.Handler, method, path, token s
 // 3) worker 执行后 GET 运行返回 succeeded 与已落库题目；
 // 4) 题目以 ai_draft 草稿保存。
 func TestGenerateAsyncSubmitAndWorkerCompletion(t *testing.T) {
-	server, cleanup := generationHandlerTestServer(t)
+	server, store, cleanup := generationHandlerTestServer(t)
 	defer cleanup()
 	handler := server.Handler()
 	token := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.7")
@@ -166,11 +167,19 @@ func TestGenerateAsyncSubmitAndWorkerCompletion(t *testing.T) {
 	if final.Run.Status != "succeeded" {
 		t.Fatalf("worker 执行应成功，实际 %s（%s）", final.Run.Status, final.Run.Error)
 	}
-	if len(final.Questions) != 1 || len(final.Run.QIDs) != 1 {
+	if len(final.Run.QIDs) != 1 {
 		t.Fatalf("运行应包含 1 道题: run=%+v", final.Run)
 	}
-	q := final.Questions[0]
-	if q.ID != final.Run.QIDs[0] || q.Status != "ai_draft" {
-		t.Fatalf("题目应以 ai_draft 草稿保存: %+v", q)
+	// 新口径：暂存草稿（AI 检查未完成）不下发题目内容——生成页在检查落定后
+	// 才回捞到通过的题目；题目本体仍在库中等待检查。
+	if len(final.Questions) != 0 {
+		t.Fatalf("检查完成前运行详情不应下发暂存题目: %+v", final.Questions)
+	}
+	stored, err := store.GetQuestion(ctx, final.Run.QIDs[0])
+	if err != nil || stored == nil {
+		t.Fatalf("读取暂存题目失败: %v", err)
+	}
+	if stored.Status != domain.StatusAIDraft {
+		t.Fatalf("题目应以 ai_draft 草稿保存: %+v", stored)
 	}
 }

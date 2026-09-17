@@ -834,7 +834,8 @@ func questionFilterWhere(f storage.QuestionFilter) (string, []any) {
 				for _, status := range statuses {
 					switch status {
 					case string(domain.QuestionSharePending):
-						legacyStatuses = append(legacyStatuses, "'ai_draft'", "'auto_checked'", "'ai_reviewed'", "'reviewing'", "'conflict'", "'revision_required'")
+						// 暂存态（ai_draft/auto_checked）对用户不可见，不进入全局待审核视图
+						legacyStatuses = append(legacyStatuses, "'ai_reviewed'", "'reviewing'", "'conflict'", "'revision_required'")
 					case string(domain.QuestionShareApproved):
 						legacyStatuses = append(legacyStatuses, "'published'")
 					case string(domain.QuestionShareRejected):

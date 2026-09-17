@@ -40,6 +40,26 @@ func TestTierStatusesRoundTrip(t *testing.T) {
 	}
 }
 
+// 暂存态（AI 检查前）不得出现在任何用户可见分层集合中：
+// 待检题目对用户不可见，通过检查（ai_reviewed）后才随 working 分层出现。
+func TestStagingStatusHiddenFromTierStatuses(t *testing.T) {
+	for _, status := range []QuestionStatus{StatusAIDraft, StatusAutoChecked} {
+		if !IsStagingStatus(status) {
+			t.Errorf("IsStagingStatus(%s) 应为 true", status)
+		}
+		for _, tier := range []QuestionTier{TierFormal, TierWorking, TierEliminated} {
+			for _, member := range TierStatuses(tier) {
+				if member == status {
+					t.Errorf("TierStatuses(%s) 不应包含暂存态 %s", tier, status)
+				}
+			}
+		}
+	}
+	if IsStagingStatus(StatusAIReviewed) || IsStagingStatus(StatusReviewing) {
+		t.Error("非暂存状态不应被判定为暂存")
+	}
+}
+
 func TestParseTier(t *testing.T) {
 	for _, valid := range []string{"formal", "working", "eliminated"} {
 		if _, ok := ParseTier(valid); !ok {

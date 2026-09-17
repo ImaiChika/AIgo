@@ -204,10 +204,12 @@ func (s *Server) respondGenerationRun(w http.ResponseWriter, ctx context.Context
 	for _, id := range run.QuestionIDs {
 		question, err := s.questionStore.GetQuestion(ctx, id)
 		if err != nil {
-			writeError(w, 500, "读取命题结果失败")
+			writeJSON(w, 500, "读取命题结果失败")
 			return
 		}
-		if question != nil {
+		// 暂存态（AI 检查未通过）不下发：检查通过后前端回捞本接口才能拿到题目；
+		// 检查淘汰的题目已物理删除，天然不在结果中。
+		if question != nil && !domain.IsStagingStatus(question.Status) {
 			questions = append(questions, *question)
 		}
 	}
@@ -727,6 +729,19 @@ func (s *Server) handleMyNewQuestions(w http.ResponseWriter, r *http.Request) {
 //
 // 返回 (filter, false) 表示响应已写出，调用方应立即返回。
 func (s *Server) applyTierScope(w http.ResponseWriter, r *http.Request, filter storage.QuestionFilter) (storage.QuestionFilter, bool) {
+	// 暂存态（AI 检查未通过）对用户不可见：显式按暂存状态筛选一律返回空页，
+	// 包括本人题目与管理员——待检内容只经检查进度接口暴露状态，不暴露题目。
+	if domain.IsStagingStatus(domain.QuestionStatus(filter.Status)) {
+		page, pageSize := questionPageParams(r)
+		writeJSON(w, 200, map[string]any{
+			"questions": []domain.A2Question{},
+			"total":     0,
+			"page":      page,
+			"page_size": pageSize,
+			"has_more":  false,
+		})
+		return filter, false
+	}
 	filter, ok := s.applyQuestionScope(w, r, filter)
 	if !ok {
 		return filter, false

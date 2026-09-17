@@ -144,49 +144,15 @@ func (p *Pipeline) EvaluateSample(ctx context.Context) error {
 		return err
 	}
 	if len(questions) == 0 {
-		return fmt.Errorf("题库为空，请先运行 generate 或 import 导入题目")
+		return fmt.Errorf("题库为空，请先运行 generate 生成题目")
 	}
 
 	q := questions[len(questions)-1]
+	// 纯诊断：只输出规则评估报告，不修改题目状态。
+	// 题目状态推进统一由 AI 质量检查负责（通过→ai_reviewed；不通过→淘汰删除），
+	// 规则校验也已并入检查流程（ValidateForReview），CLI 评估不再单独改状态。
 	report := p.evaluator.Evaluate(q)
-
-	// 评估后更新状态为 auto_checked
-	q.Status = domain.StatusAutoChecked
-	q.UpdatedAt = time.Now()
-	if err := p.store.SaveQuestion(ctx, q); err != nil {
-		return fmt.Errorf("保存评估结果失败: %w", err)
-	}
-
 	return printJSON(report)
-}
-
-// ImportXlsx 从 xlsx 文件导入题目到题库。
-func (p *Pipeline) ImportXlsx(ctx context.Context, path string) error {
-	rows, err := importer.ReadXlsx(path, true)
-	if err != nil {
-		return fmt.Errorf("读取xlsx失败: %w", err)
-	}
-	fmt.Printf("读取到 %d 行原始数据\n", len(rows))
-
-	questions, errs := importer.ConvertToQuestions(rows)
-	if len(errs) > 0 {
-		fmt.Printf("转换警告 (%d 条):\n", len(errs))
-		for _, e := range errs {
-			fmt.Printf("  - %v\n", e)
-		}
-	}
-	fmt.Printf("有效题目: %d 道\n", len(questions))
-
-	importCtx := storage.WithQuestionChange(ctx, storage.QuestionChange{Actor: "import", ChangeType: "excel_import", ChangeNote: "Excel批量导入题目"})
-	count, err := p.store.SaveQuestions(importCtx, questions)
-	if err != nil {
-		return fmt.Errorf("批量存储失败: %w", err)
-	}
-	fmt.Printf("成功导入 %d 道题目到题库\n", count)
-
-	total, _ := p.store.Count(ctx)
-	fmt.Printf("题库当前总量: %d 道\n", total)
-	return nil
 }
 
 // ListQuestions 列出题库中的所有题目摘要。
@@ -210,7 +176,7 @@ func (p *Pipeline) ListQuestions(ctx context.Context) error {
 	return nil
 }
 
-// EvaluateByID 根据 ID 评估指定题目。
+// EvaluateByID 根据 ID 诊断评估指定题目（只输出报告，不改状态）。
 func (p *Pipeline) EvaluateByID(ctx context.Context, id string) error {
 	q, err := p.store.GetQuestion(ctx, id)
 	if err != nil {
@@ -220,13 +186,6 @@ func (p *Pipeline) EvaluateByID(ctx context.Context, id string) error {
 		return fmt.Errorf("未找到 ID=%s 的题目", id)
 	}
 	report := p.evaluator.Evaluate(*q)
-
-	q.Status = domain.StatusAutoChecked
-	q.UpdatedAt = time.Now()
-	if err := p.store.SaveQuestion(ctx, *q); err != nil {
-		return fmt.Errorf("保存评估结果失败: %w", err)
-	}
-
 	return printJSON(report)
 }
 

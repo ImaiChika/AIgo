@@ -135,12 +135,6 @@ func run(ctx context.Context, args []string) error {
 	genSvc := generator.NewService(client)
 	// genSvc.Brief = true  // 精简模式：解析限制200字，节省token
 
-	// 批量任务复用单题生成 API：每道题独立调用 generator，结果和进度落库，
-	// 不再绑定 Qwen 平台的 Files/Batches 批量协议；Web 与 CLI 共用同一执行器。
-	var batchSvc batch.Executor = batch.NewLocalExecutor(genSvc, pgStore, pgStore, cfg.Qwen.Model)
-	batchInfo := batchSvc.Capabilities()
-	fmt.Printf("批量推理: %s / %s（可用=%v）\n", batchInfo.Backend, batchInfo.Model, batchInfo.Available)
-
 	// 创建 AI 检查服务（使用 LLM 检查题目质量）。
 	// 检查端点默认与实时推理共用；配置 AIGO_AICHECK_* 后可指向独立模型/端点
 	// （如实时走云端、检查走自部署本地模型）。
@@ -149,6 +143,15 @@ func run(ctx context.Context, args []string) error {
 	aiCheckSvc.SetAutoCheckEnabled(cfg.AICheck.AutoEnabled)
 	aiCheckSvc.CheckTimeout = cfg.AICheck.Timeout
 	aiCheckSvc.MaxAttempts = cfg.AICheck.MaxAttempts
+
+	// 批量任务复用单题生成 API：每道题独立调用 generator，结果和进度落库，
+	// 不再绑定 Qwen 平台的 Files/Batches 批量协议；Web 与 CLI 共用同一执行器。
+	// 导入落库后的首次 AI 检查由执行器内部统一触发（SetDraftChecker）。
+	localExecutor := batch.NewLocalExecutor(genSvc, pgStore, pgStore, cfg.Qwen.Model)
+	localExecutor.SetDraftChecker(aiCheckSvc)
+	var batchSvc batch.Executor = localExecutor
+	batchInfo := batchSvc.Capabilities()
+	fmt.Printf("批量推理: %s / %s（可用=%v）\n", batchInfo.Backend, batchInfo.Model, batchInfo.Available)
 
 	pipe := pipeline.New(genSvc, evaluator.NewService(), reviewSvc, kpSvc, pgStore)
 	pipe.SetDraftChecker(aiCheckSvc)
@@ -179,6 +182,9 @@ func run(ctx context.Context, args []string) error {
 
 	// ===== 批量生成和导出 =====
 	case "generate-all":
+		if !aiCheckSvc.AutomaticReady() {
+			return fmt.Errorf("AI 质量检查服务未就绪，已停止出题；请先配置检查端点后再试")
+		}
 		countPerPoint := 1
 		if len(args) > 2 {
 			fmt.Sscanf(args[2], "%d", &countPerPoint)
@@ -235,6 +241,23 @@ func run(ctx context.Context, args []string) error {
 		aiCheckSvc.StartWorkers(workerCtx, cfg.AICheck.Concurrency)
 		// 启动单题生成后台 worker：消费 pending 命题运行（请求快照已落库，可恢复/重试）
 		pipe.StartGenerationWorkers(workerCtx, 2)
+		// 暂存题补扫：AI 检查前的题目对用户不可见，新流程（ai_draft）中因进程
+		// 中断等原因丢失检查任务的必须补建，否则会永远停留在不可见状态。
+		// CheckAsync 自带幂等（已有结果/任务即跳过）。
+		// 注意：只补扫 ai_draft——auto_checked 是旧版 evaluate 命令的历史遗留状态，
+		// 不再产生新数据，成批补扫会把存量库拖入数十小时的检查 backlog。
+		if questions, err := pgStore.ListQuestions(workerCtx); err == nil {
+			stagingIDs := make([]string, 0)
+			for _, q := range questions {
+				if q.Status == domain.StatusAIDraft {
+					stagingIDs = append(stagingIDs, q.ID)
+				}
+			}
+			if len(stagingIDs) > 0 {
+				aiCheckSvc.CheckAsync(stagingIDs...)
+				fmt.Printf("已为 %d 道暂存题目补排 AI 质量检查\n", len(stagingIDs))
+			}
+		}
 		fmt.Printf("AI 质量检查: 自动触发=%v 并发=%d 模型=%s 送审强制前置=%v\n",
 			cfg.AICheck.AutoEnabled, cfg.AICheck.Concurrency, cfg.AICheck.Client.Model, cfg.ReviewRequireAI)
 
@@ -283,15 +306,15 @@ func run(ctx context.Context, args []string) error {
 		return nil
 
 	case "import":
-		if len(args) < 3 {
-			return fmt.Errorf("用法: aigo import <xlsx文件路径>")
-		}
-		return pipe.ImportXlsx(ctx, args[2])
+		return fmt.Errorf("题目不再支持从文件导入：题目唯一来源是 AI 生成（单题/批量推理），知识大纲请使用 kp-import")
 
 	case "list":
 		return pipe.ListQuestions(ctx)
 
 	case "generate":
+		if !aiCheckSvc.AutomaticReady() {
+			return fmt.Errorf("AI 质量检查服务未就绪，已停止出题；请先配置检查端点后再试")
+		}
 		return pipe.GenerateSample(ctx)
 
 	case "evaluate":
@@ -538,6 +561,9 @@ func run(ctx context.Context, args []string) error {
 		if !batchInfo.Available {
 			return fmt.Errorf("批量生成不可用: %s", batchInfo.Message)
 		}
+		if !aiCheckSvc.AutomaticReady() {
+			return fmt.Errorf("AI 质量检查服务未就绪，已停止批量出题；请先配置检查端点后再试")
+		}
 		fmt.Printf("批量执行器: %s / %s\n", batchInfo.Backend, batchInfo.Model)
 		fmt.Printf("知识点: %d 个, 每点 %d 题\n", len(points), countPerPoint)
 		fmt.Println("正在提交任务...")
@@ -622,11 +648,6 @@ func run(ctx context.Context, args []string) error {
 		fmt.Println("")
 		fmt.Println("batch-run 使用当前部署配置的批量执行器。")
 		fmt.Println("详见：go run ./cmd/aigo help")
-		return nil
-
-	case "batch-urls":
-		batchInfo := batchSvc.Capabilities()
-		fmt.Printf("批量执行器: %s / %s @ %s（可用=%v）\n", batchInfo.Backend, batchInfo.Model, batchInfo.Endpoint, batchInfo.Available)
 		return nil
 
 	case "show":
@@ -743,12 +764,11 @@ func printUsage() {
 基础命令:
   go run ./cmd/aigo migrate                       将数据库迁移到当前程序版本
   go run ./cmd/aigo doctor                        检查框架状态
-  go run ./cmd/aigo import <file.xlsx>            从 xlsx 导入题目
   go run ./cmd/aigo list                          列出题库摘要
   go run ./cmd/aigo show <题目ID>                 查看题目详情
   go run ./cmd/aigo generate                      调 API 生成新题(需 Key)
-  go run ./cmd/aigo evaluate                      评估最后一道题
-  go run ./cmd/aigo eval-id <题目ID>              评估指定题目
+  go run ./cmd/aigo evaluate                      诊断评估最后一道题(不改状态)
+  go run ./cmd/aigo eval-id <题目ID>              诊断评估指定题目(不改状态)
 
 AI 质量检查（LLM 评分；serve 模式下生成/导入/编辑后自动执行）:
 
@@ -798,11 +818,9 @@ Environment:
 	QWEN_MODEL          云端模型 ID 或本地 served-model-name
 	QWEN_API_KEY        云端/自建网关实时推理凭证
 	QWEN_LOCAL_API_KEY  本地实时端点独立凭证；无鉴权时可留空
-	DASHSCOPE_API_KEY   百炼凭证（云端实时、云端批量）
-	QWEN_BATCH_BACKEND  auto（默认）/ dashscope / local（CLI兼容）/ disabled
-		QWEN_BATCH_API_KEY  独立百炼 Batch 凭证（可选）
-		AIGO_HTTP_ADDR       HTTP 监听地址（默认 127.0.0.1:8080）
-		AIGO_WEB_DIST_DIR    Vite 生产构建目录（空=仅提供 API）
-		AIGO_ENV_FILE        外部 dotenv 路径（-=禁用 dotenv）
+	DASHSCOPE_API_KEY   百炼凭证（云端实时推理）
+	AIGO_HTTP_ADDR       HTTP 监听地址（默认 127.0.0.1:8080）
+	AIGO_WEB_DIST_DIR    Vite 生产构建目录（空=仅提供 API）
+	AIGO_ENV_FILE        外部 dotenv 路径（-=禁用 dotenv）
 `)
 }

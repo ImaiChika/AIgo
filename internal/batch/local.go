@@ -17,6 +17,12 @@ import (
 // localSingleAPIBackend 是本地批量执行器的 backend 标识。
 const localSingleAPIBackend = "local_single_api"
 
+// DraftChecker 批量导入落库后的自动 AI 检查入口，由 aicheck.Service 实现。
+// 通过 SetDraftChecker 注入，使执行器与检查实现解耦；nil 时不触发（仅测试）。
+type DraftChecker interface {
+	CheckAsync(questionIDs ...string)
+}
+
 // LocalExecutor 把批量任务拆成多个单题生成请求。它不使用百炼 Files/Batches，
 // 每道题复用单题 generator.Service，任务进度和生成结果快照落在 batch_jobs。
 // 执行受全局信号量约束：新提交、重启恢复、失败项重跑共用同一并发上限，
@@ -26,6 +32,8 @@ type LocalExecutor struct {
 	questionStore storage.QuestionStore
 	batchJobStore storage.BatchJobStore
 	model         string
+	// checker 批量导入落库后的自动检查入口（见 SetDraftChecker）。
+	checker DraftChecker
 
 	// MaxConcurrency 全局同时执行的生成请求数上限（信号量容量）。
 	// 零值时由 NewLocalExecutor 置为 2；测试可调小调大。
@@ -66,6 +74,11 @@ func NewLocalExecutor(gen *generator.Service, questionStore storage.QuestionStor
 	return executor
 }
 
+// SetDraftChecker 注入导入后的自动 AI 检查服务。
+// 触发点收敛在 ImportResults 内部：Web 与 CLI 共用同一执行器，任何入口导入
+// 成功后都会排队检查，不会再出现某条链路落库后无人检查的缺口。
+func (s *LocalExecutor) SetDraftChecker(c DraftChecker) { s.checker = c }
+
 func (s *LocalExecutor) Capabilities() Capabilities {
 	available := s.generator != nil
 	message := fmt.Sprintf("每道题单独调用单题生成 API，任务结果保存在本地，不使用 Qwen 批量平台；全局并发上限 %d", s.concurrency())
@@ -78,6 +91,7 @@ func (s *LocalExecutor) Capabilities() Capabilities {
 		ExecutionMode: localSingleAPIBackend,
 		Model:         s.model,
 		Message:       message,
+		Concurrency:   s.concurrency(),
 	}
 }
 
@@ -210,7 +224,7 @@ func (s *LocalExecutor) runQueue(jobID string, units []domain.KnowledgePoint, pe
 
 // generateUnit 执行单个生成单元：占用并发名额，按退避策略重试可重试错误。
 func (s *LocalExecutor) generateUnit(ctx context.Context, point domain.KnowledgePoint) ImportItem {
-	item := ImportItem{OutlineCode: point.OutlineCode}
+	item := ImportItem{OutlineCode: point.OutlineCode, Topic: point.Topic}
 	s.sem <- struct{}{}
 	defer func() { <-s.sem }()
 
@@ -410,6 +424,14 @@ func (s *LocalExecutor) GetJobStatus(ctx context.Context, jobID string) (*BatchJ
 		return nil, fmt.Errorf("本地单题批量任务不存在: %s", jobID)
 	}
 	result := localBatchJob(*job)
+	// 状态查询携带逐单元明细（含失败原因），供前端展示每个知识点的进度；
+	// 列表接口不解析结果快照，避免多任务列表的重复解析开销。
+	var outputItems struct {
+		Items []ImportItem `json:"items"`
+	}
+	if json.Unmarshal([]byte(job.OutputJSON), &outputItems) == nil {
+		result.Items = outputItems.Items
+	}
 	return &result, nil
 }
 
@@ -485,6 +507,11 @@ func (s *LocalExecutor) ImportResults(ctx context.Context, jobID string, _ []dom
 	payload, _ := json.Marshal(result)
 	if err := s.batchJobStore.SaveBatchJobImportResult(ctx, jobID, string(payload)); err != nil {
 		return nil, err
+	}
+	// 导入即检查：落库成功的题目立刻排队首次 AI 质量检查（幂等，重复导入重放不重复入队）。
+	// 触发点在执行器内部而非调用方 handler，保证 Web 与 CLI 两条链路行为一致。
+	if s.checker != nil && len(result.QuestionIDs) > 0 {
+		s.checker.CheckAsync(result.QuestionIDs...)
 	}
 	return result, nil
 }

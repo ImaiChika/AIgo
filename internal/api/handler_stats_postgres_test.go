@@ -91,20 +91,29 @@ func TestStatsHandlerAggregates(t *testing.T) {
 		t.Fatalf("decode stats: %v body=%s", err, resp.Body.String())
 	}
 
-	// 管理员全范围：待审核层 3 题
-	if payload.QuestionCount != 3 {
-		t.Fatalf("question_count=%d, want 3", payload.QuestionCount)
+	// 管理员全范围：待审核层 = 检查通过后的过程题（2 题）；暂存草稿不可见也不计数
+	if payload.QuestionCount != 2 {
+		t.Fatalf("question_count=%d, want 2", payload.QuestionCount)
 	}
-	if payload.StatusDistribution["ai_reviewed"] != 1 || payload.StatusDistribution["reviewing"] != 1 || payload.StatusDistribution["ai_draft"] != 1 {
+	// 状态分布同样按可见口径统计：暂存 ai_draft 不出现
+	if payload.StatusDistribution["ai_reviewed"] != 1 || payload.StatusDistribution["reviewing"] != 1 {
 		t.Fatalf("status_distribution wrong: %v", payload.StatusDistribution)
 	}
-	if payload.TierCounts["working"] != 3 || payload.TierCounts["formal"] != 2 || payload.TierCounts["eliminated"] != 1 {
+	if payload.StatusDistribution["ai_draft"] != 0 {
+		t.Fatalf("暂存草稿不应出现在状态分布: %v", payload.StatusDistribution)
+	}
+	if payload.TierCounts["working"] != 2 || payload.TierCounts["formal"] != 2 || payload.TierCounts["eliminated"] != 1 {
 		t.Fatalf("tier_counts wrong: %v", payload.TierCounts)
 	}
-	if payload.BankDistribution["stats-bank-a"] != 2 || payload.BankDistribution["待归类"] != 1 {
+	if payload.BankDistribution["stats-bank-a"] != 2 {
 		t.Fatalf("bank_distribution wrong: %v", payload.BankDistribution)
 	}
-	if payload.ProfessionDistribution["内科"] != 2 || payload.ProfessionDistribution["外科"] != 1 {
+	// 暂存草稿（未分类）不可见，不应产生“待归类”桶
+	if payload.BankDistribution["待归类"] != 0 {
+		t.Fatalf("staging draft should not appear as 待归类: %v", payload.BankDistribution)
+	}
+	// 专业分布：内科 = w1、w2、f2；外科暂存草稿 w3 不可见
+	if payload.ProfessionDistribution["内科"] != 2 || payload.ProfessionDistribution["外科"] != 0 {
 		t.Fatalf("profession_distribution wrong: %v", payload.ProfessionDistribution)
 	}
 	if len(payload.CreationTrend) == 0 {
@@ -146,8 +155,9 @@ func TestStatsHandlerScopedAndPermissionGated(t *testing.T) {
 	if err := json.Unmarshal(globalResp.Body.Bytes(), &globalPayload); err != nil {
 		t.Fatal(err)
 	}
-	// 全局统计=系统真实总量：包含管理员个人题（4 题待审核），分层完整。
-	if globalPayload.QuestionCount != 4 || globalPayload.TierCounts["working"] != 4 || globalPayload.TierCounts["formal"] != 2 || globalPayload.TierCounts["eliminated"] != 1 {
+	// 全局统计=系统真实总量（可见口径）：管理员个人题（ai_reviewed）计入待审核；
+	// 暂存草稿（stats-w3）对用户不可见，不计入任何分层。
+	if globalPayload.QuestionCount != 3 || globalPayload.TierCounts["working"] != 3 || globalPayload.TierCounts["formal"] != 2 || globalPayload.TierCounts["eliminated"] != 1 {
 		t.Fatalf("global stats should count true system totals: %+v", globalPayload)
 	}
 	personalResp := serveAuthJSON(t, handler, http.MethodGet, "/api/stats?scope=personal", adminToken, "198.51.100.1", nil)

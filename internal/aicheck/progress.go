@@ -72,7 +72,11 @@ func (s *Service) ProgressByQuestionIDs(ctx context.Context, questionIDs []strin
 		if q, err := s.questionStore.GetQuestion(ctx, id); err == nil && q != nil {
 			item.QuestionStatus = string(q.Status)
 			item.QuestionVer = q.Version
-			item.StemSummary = stemSummary(q.ClinicalStem, 60)
+			// 暂存态（检查未完成）不暴露题干预览：待检内容对用户不可见；
+			// 通过后（ai_reviewed+）才下发摘要；淘汰题走下方 discard 分支的留档摘要。
+			if !domain.IsStagingStatus(q.Status) {
+				item.StemSummary = stemSummary(q.ClinicalStem, 60)
+			}
 		}
 		if task, ok := tasks[id]; ok {
 			item.TaskStatus = task.Status
