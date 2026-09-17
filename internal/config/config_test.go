@@ -182,12 +182,6 @@ func TestFromEnvCloudKeepsLegacyDefaults(t *testing.T) {
 	if cfg.Qwen.Model != DefaultQwenCloudModel {
 		t.Errorf("cloud model = %q", cfg.Qwen.Model)
 	}
-	if cfg.Batch.APIKey != "dash-key" || cfg.Batch.Model != DefaultQwenCloudModel {
-		t.Errorf("batch config = %#v", cfg.Batch)
-	}
-	if !cfg.Batch.EnableThinking {
-		t.Error("batch thinking default should stay enabled")
-	}
 }
 
 func TestFromEnvCloudKeepsQwenAPIKeyAliasForDashScopeServices(t *testing.T) {
@@ -198,12 +192,9 @@ func TestFromEnvCloudKeepsQwenAPIKeyAliasForDashScopeServices(t *testing.T) {
 	if cfg.Qwen.APIKey != "legacy-qwen-key" {
 		t.Errorf("realtime key = %q", cfg.Qwen.APIKey)
 	}
-	if cfg.Batch.APIKey != "legacy-qwen-key" {
-		t.Errorf("legacy key not preserved for DashScope batch: %q", cfg.Batch.APIKey)
-	}
 }
 
-func TestFromEnvLocalDoesNotLeakDashScopeKeyAndKeepsCloudBatchIndependent(t *testing.T) {
+func TestFromEnvLocalDoesNotLeakDashScopeKey(t *testing.T) {
 	clearInferenceEnv(t)
 	t.Setenv("QWEN_DEPLOYMENT", "local")
 	t.Setenv("QWEN_BASE_URL", "http://qwen.internal:8000/v1")
@@ -220,21 +211,6 @@ func TestFromEnvLocalDoesNotLeakDashScopeKeyAndKeepsCloudBatchIndependent(t *tes
 	if cfg.Qwen.Model != "Qwen/Qwen3.5-35B-A3B" {
 		t.Errorf("local model = %q", cfg.Qwen.Model)
 	}
-	if cfg.Batch.APIKey != "dash-secret" {
-		t.Errorf("batch key should remain DashScope key, got %q", cfg.Batch.APIKey)
-	}
-	if cfg.Batch.BaseURL != DefaultDashScopeBaseURL {
-		t.Errorf("local realtime URL leaked into batch URL: %q", cfg.Batch.BaseURL)
-	}
-	if cfg.Batch.Model != DefaultQwenCloudModel {
-		t.Errorf("local realtime model leaked into cloud batch model: %q", cfg.Batch.Model)
-	}
-	if cfg.Batch.Backend != "local" {
-		t.Errorf("local deployment must not auto-enable cloud batch, backend = %q", cfg.Batch.Backend)
-	}
-	if cfg.Batch.APIKey != "dash-secret" {
-		t.Errorf("DashScope batch key = %q", cfg.Batch.APIKey)
-	}
 }
 
 func TestFromEnvMapsThinkingAndLocalGatewayKey(t *testing.T) {
@@ -244,7 +220,6 @@ func TestFromEnvMapsThinkingAndLocalGatewayKey(t *testing.T) {
 	t.Setenv("QWEN_MODEL", "aigo-question-generator")
 	t.Setenv("QWEN_LOCAL_API_KEY", "gateway-key")
 	t.Setenv("QWEN_ENABLE_THINKING", "false")
-	t.Setenv("QWEN_BATCH_ENABLE_THINKING", "0")
 
 	cfg := FromEnv()
 	if cfg.Qwen.APIKey != "gateway-key" {
@@ -252,9 +227,6 @@ func TestFromEnvMapsThinkingAndLocalGatewayKey(t *testing.T) {
 	}
 	if cfg.Qwen.EnableThinking == nil || *cfg.Qwen.EnableThinking {
 		t.Errorf("Qwen thinking = %#v", cfg.Qwen.EnableThinking)
-	}
-	if cfg.Batch.EnableThinking {
-		t.Error("batch thinking should be disabled")
 	}
 }
 
@@ -283,35 +255,6 @@ func TestFromEnvCustomCloudGatewayKeyIsNotReusedForDashScope(t *testing.T) {
 	if cfg.Qwen.APIKey != "gateway-key" {
 		t.Errorf("realtime gateway key = %q", cfg.Qwen.APIKey)
 	}
-	if cfg.Batch.APIKey != "" {
-		t.Fatalf("gateway key leaked to DashScope batch: %q", cfg.Batch.APIKey)
-	}
-}
-
-func TestFromEnvCustomGatewayDoesNotReceiveDashScopeBatchKey(t *testing.T) {
-	clearInferenceEnv(t)
-	t.Setenv("QWEN_DEPLOYMENT", "cloud")
-	t.Setenv("QWEN_BASE_URL", "https://model-gateway.internal/v1")
-	t.Setenv("QWEN_MODEL", "aigo-question-generator")
-	t.Setenv("QWEN_API_KEY", "gateway-key")
-	t.Setenv("DASHSCOPE_API_KEY", "dash-key")
-
-	cfg := FromEnv()
-	if cfg.Qwen.APIKey != "gateway-key" {
-		t.Errorf("realtime key = %q", cfg.Qwen.APIKey)
-	}
-	if cfg.Batch.APIKey != "dash-key" {
-		t.Errorf("batch key = %q", cfg.Batch.APIKey)
-	}
-	if cfg.Batch.BaseURL == "https://model-gateway.internal/v1" {
-		t.Fatal("DashScope batch key would be sent to custom realtime gateway")
-	}
-	if cfg.Batch.BaseURL != DefaultDashScopeBaseURL {
-		t.Errorf("batch base URL = %q", cfg.Batch.BaseURL)
-	}
-	if cfg.Batch.Model != DefaultQwenCloudModel {
-		t.Errorf("custom served model leaked into DashScope batch model: %q", cfg.Batch.Model)
-	}
 }
 
 func TestIsDashScopeURLAllowlist(t *testing.T) {
@@ -337,15 +280,12 @@ func TestIsDashScopeURLAllowlist(t *testing.T) {
 	}
 }
 
-func TestInvalidDeploymentFailsClosedAndCannotAutoEnableCloudBatch(t *testing.T) {
+func TestInvalidDeploymentFailsClosed(t *testing.T) {
 	clearInferenceEnv(t)
 	t.Setenv("QWEN_DEPLOYMENT", "locla")
 	t.Setenv("DASHSCOPE_API_KEY", "dash-key")
 
 	cfg := FromEnv()
-	if cfg.Batch.Backend != "local" {
-		t.Fatalf("invalid non-cloud deployment auto-enabled backend %q", cfg.Batch.Backend)
-	}
 	if err := cfg.ValidateInference(); err == nil {
 		t.Fatal("invalid deployment should fail validation")
 	}

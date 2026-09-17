@@ -1,6 +1,42 @@
-import { getToken, clearAuth } from "./auth.js";
+import { getToken, clearAuth, setAuth } from "./auth.js";
 
 const BASE = "/api";
+
+// 防止恢复流程里的请求再次 401 时递归触发。
+let recoveringIdentity = false;
+
+// 当前工作身份被管理员撤销时，自动切换到账号剩余身份并刷新页面，
+// 而不是整体登出；账号已无任何身份时才回登录页并提示。
+async function recoverIdentity() {
+  if (recoveringIdentity) return;
+  recoveringIdentity = true;
+  try {
+    const meRes = await fetch(`${BASE}/auth/me`, {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    });
+    if (!meRes.ok) throw new Error("读取身份失败");
+    const user = await meRes.json();
+    const target = (user.role || "").trim() || (user.roles || [])[0] || "";
+    if (!target) {
+      clearAuth();
+      window.location.href = "/login?revoked=1";
+      return;
+    }
+    const swRes = await fetch(`${BASE}/auth/switch-role`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${getToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ role: target }),
+    });
+    if (!swRes.ok) throw new Error("切换身份失败");
+    const data = await swRes.json();
+    setAuth(data.token, data.user);
+    sessionStorage.setItem("aigo_identity_recovered", data.user?.role || target);
+    window.location.reload();
+  } catch (e) {
+    clearAuth();
+    window.location.href = "/login?revoked=1";
+  }
+}
 
 async function request(path, options = {}) {
   const token = getToken();
@@ -16,6 +52,17 @@ async function request(path, options = {}) {
   const res = await fetch(`${BASE}${path}`, { ...options, headers });
 
   if (res.status === 401 && !path.startsWith("/auth/login")) {
+    let message = "";
+    try {
+      const body = await res.json();
+      message = body.error || "";
+    } catch (e) {
+      message = "";
+    }
+    if (message.includes("重新选择身份")) {
+      await recoverIdentity();
+      throw new Error(message);
+    }
     clearAuth();
     window.location.href = "/login";
     throw new Error("登录已过期");

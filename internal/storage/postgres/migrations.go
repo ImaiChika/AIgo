@@ -19,7 +19,7 @@ var baselineSchemaSQL string
 
 const (
 	// LatestSchemaVersion 是当前程序能够使用的最新数据库版本。
-	LatestSchemaVersion int64 = 29
+	LatestSchemaVersion int64 = 30
 	// migrationLockKey 在同一 PostgreSQL 数据库内串行化所有 AIgo Schema 迁移。
 	migrationLockKey int64 = 0x4149474f5f4d4947 // "AIGO_MIG"
 )
@@ -398,6 +398,15 @@ func configuredMigrations(schemaSQL string) []migration {
 				 ) ranked WHERE rn > 1
 			 ) duplicate WHERE t.id=duplicate.id`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_check_tasks_one_per_question ON ai_check_tasks(question_id)`,
+		}},
+		{Version: 30, Name: "adapt_legacy_accounts_and_purge_remote_batch", Statements: []string{
+			// 旧 expert 模板历史上“可出题可审题”，模板收敛后保留其审题默认身份，
+			// 同时补挂命题教师附加身份，存量账号可继续双身份切换，无需逐个手工补。
+			`UPDATE users SET roles = array_append(roles, 'teacher')
+			 WHERE 'expert' = ANY(roles) AND NOT ('teacher' = ANY(roles))`,
+			// DashScope 云端批量执行器已弃置：历史批量任务（含未导入结果）按用户
+			// 决定一并移除，避免任务列表出现无法查询/导入的孤儿记录。
+			`DELETE FROM batch_jobs WHERE backend IS NULL OR backend <> 'local_single_api'`,
 		}},
 	}
 }

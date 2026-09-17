@@ -11,7 +11,6 @@ type ConfigPurpose string
 const (
 	PurposeGeneration ConfigPurpose = "generation"
 	PurposeAICheck    ConfigPurpose = "ai_check"
-	PurposeBatch      ConfigPurpose = "batch"
 )
 
 // RuntimeConfigResolver 在每次请求前解析当前活动的模型配置。

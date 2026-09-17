@@ -272,35 +272,36 @@ func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 	original := *existing
 
 	var req struct {
-		ClinicalStem string `json:"clinical_stem"` // 题干
-		Options      []struct {
+		ClinicalStem *string `json:"clinical_stem"` // 题干；nil=未提供（不修改），非 nil（含空串）=按值更新
+		Options      *[]struct {
 			Label string `json:"label"` // 选项标签 A-E
 			Text  string `json:"text"`  // 选项内容
 		} `json:"options"`
-		Answer       string `json:"answer"`        // 正确答案
-		Explanation  string `json:"explanation"`   // 解析
-		ChangeReason string `json:"change_reason"` // 修改原因（可选）
+		Answer       *string `json:"answer"`        // 正确答案
+		Explanation  *string `json:"explanation"`   // 解析（可为空串，表示清空解析）
+		ChangeReason string  `json:"change_reason"` // 修改原因（可选）
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, 400, "请求格式错误: "+err.Error())
 		return
 	}
 
-	// 按字段更新（空值表示不修改）
-	if req.ClinicalStem != "" {
-		existing.ClinicalStem = req.ClinicalStem
+	// 仅更新请求中明确提供的字段；指针区分“未传”与“显式清空”，
+	// 保证出题人清空解析等可选字段能真正落库而不是被静默丢弃。
+	if req.ClinicalStem != nil {
+		existing.ClinicalStem = *req.ClinicalStem
 	}
-	if len(req.Options) > 0 {
-		existing.Options = make([]domain.Option, len(req.Options))
-		for i, o := range req.Options {
+	if req.Options != nil {
+		existing.Options = make([]domain.Option, len(*req.Options))
+		for i, o := range *req.Options {
 			existing.Options[i] = domain.Option{Label: o.Label, Text: o.Text}
 		}
 	}
-	if req.Answer != "" {
-		existing.Answer = req.Answer
+	if req.Answer != nil {
+		existing.Answer = *req.Answer
 	}
-	if req.Explanation != "" {
-		existing.Explanation = req.Explanation
+	if req.Explanation != nil {
+		existing.Explanation = *req.Explanation
 	}
 	if err := existing.Validate(); err != nil {
 		writeError(w, 400, err.Error())

@@ -20,7 +20,6 @@ x-aigo-environment: &aigo-environment
   QWEN_BASE_URL: ${QWEN_BASE_URL:-}
   QWEN_MODEL: ${QWEN_MODEL:-}
   QWEN_ENABLE_THINKING: ${QWEN_ENABLE_THINKING:-auto}
-  QWEN_BATCH_BACKEND: ${QWEN_BATCH_BACKEND:-disabled}
   TZ: ${TZ:-Asia/Shanghai}
 
 x-aigo-secrets: &aigo-secrets

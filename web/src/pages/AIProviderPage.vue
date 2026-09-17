@@ -18,10 +18,6 @@ const emptyForm = () => ({
   clear_api_key: false,
   generation_model: "qwen3.5-flash",
   check_model: "qwen3.5-flash",
-  batch_api_key: "",
-  clear_batch_api_key: false,
-  batch_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-  batch_model: "qwen3.5-flash",
   active: true,
 });
 const form = ref(emptyForm());
@@ -69,10 +65,6 @@ function startEdit(provider) {
     clear_api_key: false,
     generation_model: provider.generation_model,
     check_model: provider.check_model || provider.generation_model,
-    batch_api_key: "",
-    clear_batch_api_key: false,
-    batch_base_url: provider.batch_base_url || provider.base_url,
-    batch_model: provider.batch_model || provider.generation_model,
     active: provider.active,
   };
   showForm.value = true;
@@ -105,10 +97,6 @@ async function saveProvider() {
       clear_api_key: form.value.clear_api_key,
       generation_model: form.value.generation_model.trim(),
       check_model: (form.value.check_model || form.value.generation_model).trim(),
-      batch_api_key: form.value.batch_api_key.trim(),
-      clear_batch_api_key: form.value.clear_batch_api_key,
-      batch_base_url: form.value.batch_base_url.trim(),
-      batch_model: (form.value.batch_model || form.value.generation_model).trim(),
       active: form.value.active,
     };
     if (editingId.value) {
@@ -191,7 +179,6 @@ onMounted(loadProviders);
           <span class="status-pill active">已启用</span>
           <span>出题：{{ activeProvider.generation_model }}</span>
           <span>检查：{{ activeProvider.check_model }}</span>
-          <span>批量：{{ activeProvider.batch_model || activeProvider.generation_model }}</span>
         </div>
       </div>
       <div v-else class="status-empty">
@@ -217,8 +204,8 @@ onMounted(loadProviders);
             <tr v-for="provider in providers" :key="provider.id">
               <td><strong>{{ provider.name }}</strong><small>{{ provider.deployment === 'local' ? '本地 / 网关' : '云端' }}</small></td>
               <td class="url-cell" :title="provider.base_url">{{ provider.base_url }}</td>
-              <td><span>出题：{{ provider.generation_model }}</span><small>检查：{{ provider.check_model }}</small><small>批量：{{ provider.batch_model || provider.generation_model }}</small></td>
-              <td><span :class="provider.api_key_configured ? 'key-ok' : 'key-missing'">实时：{{ provider.api_key_configured ? provider.api_key_masked : '未配置' }}</span><small>批量：{{ provider.batch_api_key_configured ? provider.batch_api_key_masked : '跟随实时密钥' }}</small></td>
+              <td><span>出题：{{ provider.generation_model }}</span><small>检查：{{ provider.check_model }}</small></td>
+              <td><span :class="provider.api_key_configured ? 'key-ok' : 'key-missing'">实时：{{ provider.api_key_configured ? provider.api_key_masked : '未配置' }}</span></td>
               <td><span class="status-pill" :class="provider.active ? 'active' : 'inactive'">{{ provider.active ? '使用中' : '未启用' }}</span></td>
               <td class="actions-cell">
                 <button v-if="!provider.active" class="text-button" type="button" :disabled="saving" @click="activateProvider(provider)">启用</button>
@@ -234,8 +221,7 @@ onMounted(loadProviders);
     <section class="ai-config-note">
       <strong>使用说明</strong>
       <p>生成模型和检查模型默认填写相同值；如果检查模型留空，后端会自动使用生成模型。保存或切换配置后，新生成和新进入队列的 AI 检查会使用新配置，无需重启服务。</p>
-      <div class="batch-config-summary"><span>CLI 批量兼容配置</span><strong>Web 端使用本地单题 API 队列</strong><small>批量地址、批量 API Key 和批量模型仅供 CLI 兼容命令使用；Web 批量逐题调用实时生成服务，不使用 Files/Batches。</small></div>
-      <p>当前配置仅超级管理员可查看和修改。Web 批量任务逐题调用单题 API；CLI 的旧批量命令仍保留独立兼容执行器。</p>
+      <p>当前配置仅超级管理员可查看和修改。Web 与 CLI 的批量任务均逐题调用单题生成 API，不使用 Files/Batches 批量协议。</p>
     </section>
 
     <div v-if="showForm" class="modal-overlay" @click.self="closeForm">
@@ -252,15 +238,6 @@ onMounted(loadProviders);
           <label v-if="editingId" class="clear-key-check"><input v-model="form.clear_api_key" type="checkbox" /> 清空已保存密钥（本次输入不会保存）</label>
           <label class="field"><span>AI 生成模型 <b>*</b></span><input v-model="form.generation_model" placeholder="qwen3.5-flash" /></label>
           <label class="field"><span>AI 检查模型 <b>*</b></span><input v-model="form.check_model" placeholder="默认与生成模型相同" /><button class="inline-link" type="button" @click="useSameModel">使用生成模型</button></label>
-          <div class="full-field batch-form-section">
-            <div class="batch-form-title">CLI 批量兼容配置 <small>Web 端使用本地单题 API 队列</small></div>
-            <div class="batch-form-grid">
-              <label class="field"><span>批量 API 地址</span><input v-model="form.batch_base_url" placeholder="默认与 API 地址相同" /></label>
-              <label class="field"><span>批量模型</span><input v-model="form.batch_model" placeholder="默认与生成模型相同" /></label>
-              <label class="field full-field"><span>批量 API Key <em v-if="editingId">留空保留当前密钥</em></span><input v-model="form.batch_api_key" type="password" autocomplete="new-password" :placeholder="editingId ? '留空表示不替换已保存密钥' : '可选；默认使用实时 API Key'" :disabled="form.clear_batch_api_key" /></label>
-              <label v-if="editingId" class="clear-key-check"><input v-model="form.clear_batch_api_key" type="checkbox" /> 清空批量 API Key</label>
-            </div>
-          </div>
         </div>
         <label class="active-check"><input v-model="form.active" type="checkbox" /> 保存后立即启用此配置</label>
         <p class="form-hint">地址只接受 http/https 完整地址，例如百炼兼容接口通常以 <code>/v1</code> 结尾。API Key 不会回显到页面。</p>
@@ -308,10 +285,6 @@ onMounted(loadProviders);
 .ai-config-note { border: 1px solid #e7edf4; border-radius: 8px; padding: 14px 16px; color: #68798d; background: #fff; font-size: 12px; line-height: 1.65; }
 .ai-config-note strong { color: #44566e; }
 .ai-config-note p { margin: 5px 0 0; }
-.batch-config-summary { display: grid; gap: 3px; margin-top: 12px; border: 1px solid #dce8f7; border-left: 3px solid #12b981; border-radius: 6px; padding: 9px 11px; background: #f6fcf9; }
-.batch-config-summary span { color: #6e7b8f; font-size: 11px; }
-.batch-config-summary strong { color: #16724f; font-size: 12px; }
-.batch-config-summary small { color: #718197; font-size: 11px; line-height: 1.55; }
 .modal-overlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; background: rgba(18, 35, 55, .42); }
 .ai-form-card { width: min(650px, 100%); max-height: calc(100vh - 40px); overflow-y: auto; border: 1px solid #dce6f0; border-radius: 10px; padding: 22px; background: #fff; box-shadow: 0 22px 50px rgba(18, 35, 55, .18); }
 .form-title-row { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 19px; }
@@ -325,10 +298,6 @@ onMounted(loadProviders);
 .field input, .field select { width: 100%; min-height: 38px; border: 1px solid #d7e1ec; border-radius: 6px; padding: 0 10px; color: #172033; background: #fff; outline: none; font-size: 13px; }
 .field input:focus, .field select:focus { border-color: #68aee7; box-shadow: 0 0 0 3px rgba(19, 133, 248, .09); }
 .full-field { grid-column: 1 / -1; }
-.batch-form-section { border: 1px solid #dce8f7; border-left: 3px solid #12b981; border-radius: 7px; padding: 11px 12px; background: #f7fcfa; }
-.batch-form-title { margin-bottom: 10px; color: #16724f; font-size: 12px; font-weight: 700; }
-.batch-form-title small { margin-left: 5px; color: #718197; font-size: 11px; font-weight: 400; }
-.batch-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .clear-key-check, .active-check { display: flex; align-items: center; gap: 7px; margin-top: 10px; color: #65778c; font-size: 12px; }
 .clear-key-check { color: #a23b4b; }
 .inline-link { position: absolute; right: 5px; bottom: 5px; border: 0; padding: 4px 6px; color: #1472c4; background: #fff; font-size: 11px; }
@@ -340,5 +309,5 @@ onMounted(loadProviders);
   .ai-config-intro .primary-button { align-self: flex-start; }
   .status-meta { align-items: flex-start; flex-wrap: wrap; text-align: left; }
 }
-@media (max-width: 560px) { .form-grid, .batch-form-grid { grid-template-columns: 1fr; } .full-field { grid-column: auto; } .ai-form-card { padding: 17px; } }
+@media (max-width: 560px) { .form-grid { grid-template-columns: 1fr; } .full-field { grid-column: auto; } .ai-form-card { padding: 17px; } }
 </style>

@@ -43,3 +43,32 @@
   .workspace-heading { gap: 9px; }
   .topbar .workspace-heading h1 { font-size: 19px; }
 }
+
+/* 工作身份被管理员撤销后自动切换身份的顶部提示条 */
+.identity-recovered-banner {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(640px, calc(100vw - 32px));
+  padding: 9px 12px 9px 16px;
+  border: 1px solid #f3d19e;
+  border-radius: 8px;
+  background: #fdf6ec;
+  color: #8c5a13;
+  font-size: 13px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+}
+.identity-recovered-banner button {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+}

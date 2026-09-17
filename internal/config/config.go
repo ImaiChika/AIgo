@@ -23,17 +23,6 @@ const (
 	DefaultQwenCloudModel   = "qwen3.5-flash"
 )
 
-// BatchConfig 描述批量出题执行器。批量端点与实时文本端点分开配置，
-// 从而支持“实时推理先迁本地、批量暂时保留百炼”的渐进迁移。
-type BatchConfig struct {
-	Backend        string // auto / dashscope / local（CLI兼容）/ disabled
-	APIKey         string // DashScope 批量 API Key
-	BaseURL        string // DashScope OpenAI-compatible base URL
-	Model          string // 批量任务使用的云端模型
-	Profile        string // 脱敏端点配置档名称（审计；多 profile 路由待后续 registry）
-	EnableThinking bool   // 批量任务是否开启思考模式
-}
-
 // AICheckConfig 描述 AI 质量检查的自动执行配置。
 // 检查调用同样走 llm.Client（OpenAI 兼容），Client 默认完全沿用 Qwen 实时配置；
 // 未来自部署检查服务可通过 AIGO_AICHECK_* 独立指定，实现生成与检查用不同模型/端点。
@@ -48,7 +37,6 @@ type AICheckConfig struct {
 // Config 系统配置，包含千问 API 配置和数据库配置。
 type Config struct {
 	Qwen              llm.QwenConfig // 千问实时推理配置（云端或本地）
-	Batch             BatchConfig    // 批量出题执行器配置
 	AICheck           AICheckConfig  // AI 质量检查自动执行配置
 	ReviewRequireAI   bool           // 送审是否强制要求 AI 检查通过（AIGO_REVIEW_REQUIRE_AI_CHECK，默认开）
 	DB                DBConfig       // 数据库配置
@@ -85,12 +73,7 @@ func (c Config) ValidateInference() error {
 	default:
 		return fmt.Errorf("AIGO_AICHECK_DEPLOYMENT 仅支持 cloud 或 local，当前为 %q", c.AICheck.Client.Deployment)
 	}
-	switch c.Batch.Backend {
-	case "auto", "dashscope", "local", "disabled", "none":
-		return nil
-	default:
-		return fmt.Errorf("QWEN_BATCH_BACKEND 不支持 %q", c.Batch.Backend)
-	}
+	return nil
 }
 
 // DBConfig 数据库配置。
@@ -105,7 +88,6 @@ var secretEnvironmentNames = []string{
 	"DASHSCOPE_API_KEY",
 	"QWEN_API_KEY",
 	"QWEN_LOCAL_API_KEY",
-	"QWEN_BATCH_API_KEY",
 	"AIGO_AICHECK_API_KEY",
 }
 
@@ -150,26 +132,6 @@ func Load() (Config, error) {
 			qwenAPIKey = firstNonEmpty(qwenAPIKey, dashScopeAPIKey)
 			dashScopeAPIKey = firstNonEmpty(dashScopeAPIKey, qwenAPIKey)
 		}
-	}
-
-	batchBaseURL := strings.TrimSpace(os.Getenv("QWEN_BATCH_BASE_URL"))
-	if batchBaseURL == "" && deployment == llm.DeploymentCloud && isDashScopeURL(qwenBaseURL) {
-		// 只在已确认实时端点属于百炼时继承，避免把百炼 Batch Key
-		// 发送到自建 QWEN_BASE_URL 的 /files、/batches。
-		batchBaseURL = qwenBaseURL
-	}
-	batchBaseURL = firstNonEmpty(batchBaseURL, DefaultDashScopeBaseURL)
-
-	batchModel := strings.TrimSpace(os.Getenv("QWEN_BATCH_MODEL"))
-	if batchModel == "" && deployment == llm.DeploymentCloud && isDashScopeURL(qwenBaseURL) {
-		batchModel = qwenModel
-	}
-	batchModel = firstNonEmpty(batchModel, DefaultQwenCloudModel)
-	batchBackend := strings.ToLower(strings.TrimSpace(firstNonEmpty(os.Getenv("QWEN_BATCH_BACKEND"), "auto")))
-	if batchBackend == "auto" && deployment != llm.DeploymentCloud {
-		// 本地部署默认禁止题目内容外发。若处于渐进迁移期仍需百炼 Batch，
-		// 必须显式设置 QWEN_BATCH_BACKEND=dashscope。
-		batchBackend = "local"
 	}
 
 	// AI 检查端点默认与实时推理共用一套配置；设置任一 AIGO_AICHECK_* 即启用独立覆盖。
@@ -224,14 +186,6 @@ func Load() (Config, error) {
 			Model:          qwenModel,
 			EnableThinking: optionalBool(os.Getenv("QWEN_ENABLE_THINKING")),
 			HTTPTimeout:    300 * time.Second,
-		},
-		Batch: BatchConfig{
-			Backend:        batchBackend,
-			APIKey:         firstNonEmpty(strings.TrimSpace(os.Getenv("QWEN_BATCH_API_KEY")), dashScopeAPIKey),
-			BaseURL:        batchBaseURL,
-			Model:          batchModel,
-			Profile:        firstNonEmpty(strings.TrimSpace(os.Getenv("QWEN_BATCH_PROFILE")), "dashscope-default"),
-			EnableThinking: boolWithDefault(os.Getenv("QWEN_BATCH_ENABLE_THINKING"), true),
 		},
 		AICheck: AICheckConfig{
 			AutoEnabled: boolWithDefault(os.Getenv("AIGO_AICHECK_AUTO"), true),

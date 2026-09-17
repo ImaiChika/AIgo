@@ -1856,7 +1856,7 @@ func jsonOrEmptyArray(value string) string {
 func (s *Store) SaveBatchJob(ctx context.Context, job storage.BatchJobRecord) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO batch_jobs (id, backend, backend_profile, model, job_name, status, total_count, completed, failed, output_file_id, points_json, owner_id, output_json, created_at, updated_at)
-		VALUES ($1,COALESCE(NULLIF($2,''),'dashscope'),COALESCE(NULLIF($3,''),'dashscope-default'),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW())
+		VALUES ($1,COALESCE(NULLIF($2,''),'local_single_api'),COALESCE(NULLIF($3,''),'local-default'),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW())
 		ON CONFLICT (id) DO UPDATE SET
 			backend=COALESCE(NULLIF(EXCLUDED.backend,''),batch_jobs.backend),
 			backend_profile=COALESCE(NULLIF(EXCLUDED.backend_profile,''),batch_jobs.backend_profile),

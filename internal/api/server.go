@@ -97,8 +97,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/auth/register-enabled", s.handleRegisterEnabled)
 
 	// === 认证（需登录） ===
-	mux.HandleFunc("GET /api/auth/me", s.requireAuth("", s.handleMe))
-	mux.HandleFunc("POST /api/auth/switch-role", s.requireAuth("", s.handleSwitchRole))
+	mux.HandleFunc("GET /api/auth/me", s.requireAuthAllowRevokedRole(s.handleMe))
+	mux.HandleFunc("POST /api/auth/switch-role", s.requireAuthAllowRevokedRole(s.handleSwitchRole))
 	mux.HandleFunc("PUT /api/auth/profile", s.requireAuth("", s.handleUpdateProfile))
 	mux.HandleFunc("POST /api/auth/change-password", s.requireAuth("", s.handleChangePassword))
 	mux.HandleFunc("GET /api/my/summary", s.requireAuth("", s.handleMySummary))
@@ -195,7 +195,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/export/docx", s.requireAuth(domain.PermQuestionDownload, s.handleExportDocx))
 	mux.HandleFunc("GET /api/export/download/{filename}", s.requireAuth(domain.PermQuestionDownload, s.handleDownloadExport))
 
-	// === 批量推理（执行器可替换；当前保留 DashScope，实现已为本地队列预留接口）===
+	// === 批量推理（逐题调用单题生成 API，本地队列落库）===
 	mux.HandleFunc("GET /api/batch/capabilities", s.requireAuth(domain.PermBatchRun, s.handleBatchCapabilities))
 	mux.HandleFunc("POST /api/batch/submit", s.requireAuth(domain.PermBatchRun, s.handleBatchSubmit))
 	mux.HandleFunc("GET /api/batch/list", s.requireAuth(domain.PermBatchRun, s.handleBatchList))
@@ -273,15 +273,10 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	globalStats := requestedStatsScope == "global" || (requestedStatsScope == "" && s.hasPermission(r, domain.PermQuestionViewGlobal))
 	legacyStats := requestedStatsScope == ""
 	// 题库范围一次取回：统计权限与待审核层查看权限必须同时具备（与原逐题校验语义一致）。
-	// 全局统计额外按分享状态筛选，不能把管理员个人题目混进全局指标。
+	// 全局统计即系统真实总量：不再按分享状态筛题，各分层总量与分布覆盖全部用户。
 	statsScope := s.bankScopeEvalFor(ctx, userID, domain.PermStatsView)
 	viewScope := s.bankScopeEvalFor(ctx, userID, domain.PermQuestionView)
 	workingFilter := tierFilter(domain.TierWorking, statsScope, viewScope)
-	if globalStats && workingFilter != nil {
-		workingFilter.Tiers = nil
-		workingFilter.GlobalStatuses = []string{string(domain.QuestionSharePending)}
-		workingFilter.IncludeLegacyGlobal = true
-	}
 	if workingFilter != nil && !globalStats {
 		workingFilter.OwnerID = userID
 		workingFilter.IncludeLegacyOwner = legacyStats
@@ -352,11 +347,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		if filter == nil {
 			continue
 		}
-		if globalStats {
-			filter.Tiers = nil
-			filter.GlobalStatuses = []string{string(globalShareStatusForTier(tier))}
-			filter.IncludeLegacyGlobal = true
-		} else {
+		if !globalStats {
 			filter.OwnerID = userID
 			filter.IncludeLegacyOwner = legacyStats
 		}
@@ -431,6 +422,18 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 // action 为空字符串时只需登录成功即可，不检查具体权限。
 // 权限从数据库实时查询（角色模板权限 ∪ 直接分配权限），同时校验账号启用状态。
 func (s *Server) requireAuth(action string, handler http.HandlerFunc) http.HandlerFunc {
+	return s.requireAuthWithOptions(action, false, handler)
+}
+
+// requireAuthAllowRevokedRole 跳过“token 中的身份仍被分配”校验，仅供
+// switch-role / me 使用：账号本身仍然有效，当前身份被管理员撤销后，
+// 用户仍可读取剩余身份并重新选择身份，而不是被强制退出重新登录。
+// 被撤销的旧身份不会注入 context（按空角色走默认身份解析），其权限随之失效。
+func (s *Server) requireAuthAllowRevokedRole(handler http.HandlerFunc) http.HandlerFunc {
+	return s.requireAuthWithOptions("", true, handler)
+}
+
+func (s *Server) requireAuthWithOptions(action string, allowRevokedRole bool, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 从 Authorization 头提取 Bearer token
 		authHeader := r.Header.Get("Authorization")
@@ -469,8 +472,12 @@ func (s *Server) requireAuth(action string, handler http.HandlerFunc) http.Handl
 				}
 			}
 			if !assigned {
-				writeError(w, 401, "当前身份已被管理员撤销，请重新选择身份")
-				return
+				if !allowRevokedRole {
+					writeError(w, 401, "当前身份已被管理员撤销，请重新选择身份")
+					return
+				}
+				// 以空角色继续：后续 handler 按默认身份解析，已撤销身份的权限不生效。
+				claims.Role = ""
 			}
 		}
 

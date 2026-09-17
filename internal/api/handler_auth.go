@@ -481,6 +481,41 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "角色不存在")
 		return
 	}
+	// 收回审题/把关权限前，确认持有该角色的用户没有被审核流程或进行中任务引用，
+	// 防止角色模板编辑绕过用户级的审核人生命周期保护（与 handleUpdateUser 同口径）。
+	if !existing.IsBuiltin && s.reviewSvc != nil {
+		losesReview := slices.Contains(existing.Permissions, domain.PermReviewDo) && !slices.Contains(req.Permissions, domain.PermReviewDo)
+		losesFinal := slices.Contains(existing.Permissions, domain.PermReviewFinal) && !slices.Contains(req.Permissions, domain.PermReviewFinal)
+		if losesReview || losesFinal {
+			users, userErr := s.authSvc.ListUsers()
+			if userErr != nil {
+				writeError(w, http.StatusInternalServerError, "检查角色持有用户失败")
+				return
+			}
+			seen := map[string]bool{}
+			var references []string
+			for _, u := range users {
+				if !slices.Contains(u.Roles, id) {
+					continue
+				}
+				refs, refErr := s.reviewSvc.UserAssignmentReferences(r.Context(), u.ID)
+				if refErr != nil {
+					writeError(w, http.StatusInternalServerError, "检查审核任务引用失败")
+					return
+				}
+				for _, ref := range refs {
+					if !seen[ref] {
+						seen[ref] = true
+						references = append(references, ref)
+					}
+				}
+			}
+			if len(references) > 0 {
+				writeError(w, http.StatusConflict, "该角色仍被审核流程或进行中任务引用的用户持有，请先调整："+strings.Join(references, "；"))
+				return
+			}
+		}
+	}
 	existing.Name = req.Name
 	existing.Description = req.Description
 	existing.Permissions = req.Permissions

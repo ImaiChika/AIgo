@@ -97,19 +97,12 @@ func run(ctx context.Context, args []string) error {
 		store:              pgStore,
 		generationFallback: cfg.Qwen,
 		checkFallback:      cfg.AICheck.Client,
-		batchFallback: llm.QwenConfig{
-			Deployment:  llm.DeploymentCloud,
-			APIKey:      cfg.Batch.APIKey,
-			BaseURL:     cfg.Batch.BaseURL,
-			Model:       cfg.Batch.Model,
-			HTTPTimeout: 120 * time.Second,
-		},
 	}
 	client := llm.NewDynamicQwenClient(qwenResolver, llm.PurposeGeneration, cfg.Qwen)
 
 	// 初始化认证服务（JWT 密钥从配置读取，通过 JWT_SECRET 环境变量设置）
 	authSvc := auth.NewService(pgStore.DB(), cfg.JWTSecret, 24*time.Hour)
-	// 写入内置角色模板（超级管理员/管理员/审题专家/命题教师）
+	// 写入内置角色模板（超级管理员/管理员/审题老师/命题教师）
 	if err := authSvc.InitBuiltinRoles(ctx); err != nil {
 		fmt.Printf("初始化内置角色失败: %v\n", err)
 	}
@@ -142,25 +135,9 @@ func run(ctx context.Context, args []string) error {
 	genSvc := generator.NewService(client)
 	// genSvc.Brief = true  // 精简模式：解析限制200字，节省token
 
-	// Web 服务批量任务复用单题生成 API：每道题独立调用 generator，结果和进度
-	// 落库，不再绑定 Qwen Files/Batches。CLI 的 batch-run 仍保留历史 DashScope
-	// 执行器，避免改变既有命令行为。
-	batchCfg := batch.DashScopeConfig{
-		APIKey:         cfg.Batch.APIKey,
-		BaseURL:        cfg.Batch.BaseURL,
-		Model:          cfg.Batch.Model,
-		Profile:        cfg.Batch.Profile,
-		EnableThinking: cfg.Batch.EnableThinking,
-	}
-	var batchSvc batch.Executor
-	if args[1] == "serve" {
-		batchSvc = batch.NewLocalExecutor(genSvc, pgStore, pgStore, cfg.Qwen.Model)
-	} else {
-		batchSvc, err = batch.NewExecutor(cfg.Batch.Backend, batchCfg, pgStore, pgStore)
-	}
-	if err != nil {
-		return err
-	}
+	// 批量任务复用单题生成 API：每道题独立调用 generator，结果和进度落库，
+	// 不再绑定 Qwen 平台的 Files/Batches 批量协议；Web 与 CLI 共用同一执行器。
+	var batchSvc batch.Executor = batch.NewLocalExecutor(genSvc, pgStore, pgStore, cfg.Qwen.Model)
 	batchInfo := batchSvc.Capabilities()
 	fmt.Printf("批量推理: %s / %s（可用=%v）\n", batchInfo.Backend, batchInfo.Model, batchInfo.Available)
 
@@ -445,7 +422,7 @@ func run(ctx context.Context, args []string) error {
 		}
 		return pipe.PublishQuestion(ctx, args[2])
 
-	// ===== 批量推理（执行器可替换；当前实现保留 DashScope）=====
+	// ===== 批量推理（逐题调用单题生成 API）=====
 	case "batch-run":
 		// 提交批量任务到当前执行器
 		// 用法: aigo batch-run [选项]
@@ -621,14 +598,10 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 
-		var result *batch.ImportResult
-		if statusErr == nil {
-			result, err = batchSvc.ImportResults(ctx, id, allKPs)
-		} else if direct, ok := batchSvc.(batch.DirectOutputImporter); ok {
-			result, err = direct.DownloadAndImport(ctx, id, allKPs)
-		} else {
+		if statusErr != nil {
 			return statusErr
 		}
+		result, err := batchSvc.ImportResults(ctx, id, allKPs)
 		if err != nil {
 			return err
 		}
@@ -687,20 +660,17 @@ func commandRequiresInferenceConfig(command string) bool {
 }
 
 // databaseQwenResolver 将数据库中的活动配置适配成 llm 所需的实时配置。
-// 批量推理仍使用 cfg.Batch 的独立配置，不经过这里。
+// 批量推理逐题复用实时生成配置，不再有独立的批量端点。
 type databaseQwenResolver struct {
 	store              storage.AIProviderConfigStore
 	generationFallback llm.QwenConfig
 	checkFallback      llm.QwenConfig
-	batchFallback      llm.QwenConfig
 }
 
 func (r databaseQwenResolver) ResolveQwenConfig(ctx context.Context, purpose llm.ConfigPurpose) (llm.QwenConfig, bool, error) {
 	fallback := r.generationFallback
 	if purpose == llm.PurposeAICheck {
 		fallback = r.checkFallback
-	} else if purpose == llm.PurposeBatch {
-		fallback = r.batchFallback
 	}
 	if r.store == nil {
 		return fallback, false, nil
@@ -717,10 +687,6 @@ func (r databaseQwenResolver) ResolveQwenConfig(ctx context.Context, purpose llm
 	apiKey := config.APIKey
 	if purpose == llm.PurposeAICheck {
 		model = config.CheckModel
-	} else if purpose == llm.PurposeBatch {
-		model = config.BatchModel
-		baseURL = config.BatchBaseURL
-		apiKey = config.BatchAPIKey
 	}
 	if strings.TrimSpace(model) == "" {
 		model = fallback.Model
@@ -766,9 +732,6 @@ func bootstrapAIProviderConfig(ctx context.Context, store storage.AIProviderConf
 		APIKey:          cfg.Qwen.APIKey,
 		GenerationModel: cfg.Qwen.Model,
 		CheckModel:      checkModel,
-		BatchAPIKey:     cfg.Batch.APIKey,
-		BatchBaseURL:    cfg.Batch.BaseURL,
-		BatchModel:      cfg.Batch.Model,
 		Active:          true,
 		Source:          "env-bootstrap",
 	})
@@ -802,16 +765,8 @@ AI 质量检查（LLM 评分；serve 模式下生成/导入/编辑后自动执�
   go run ./cmd/aigo kp-search <关键词>            搜索知识点
   go run ./cmd/aigo kp-stats                      知识点统计
 
-批量推理（batch.dashscope 域名，5折优惠，同步等待）:
-  go run ./cmd/aigo batch [选项]                  批量生成题目
-    --limit N          只处理前 N 个知识点
-    --skip-existing    跳过已有题目的知识点
-    --ids id1,id2      只处理指定知识点
-    --count N          每个知识点生成几道题（默认1）
-  go run ./cmd/aigo batch-urls                    显示批量推理 URL
-
-批量推理（执行器由部署配置决定；当前支持 DashScope）:
-  go run ./cmd/aigo batch-run [选项]              提交批量任务到云端
+批量推理（逐题调用单题生成 API，任务落本地库，不使用云端批量协议）:
+  go run ./cmd/aigo batch-run [选项]              提交批量任务
     --limit N          只处理前 N 个知识点
     --skip-existing    跳过已有题目的知识点（默认开启）
     --ids id1,id2      只处理指定知识点

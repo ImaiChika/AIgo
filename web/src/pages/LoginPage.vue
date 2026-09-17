@@ -1,10 +1,11 @@
 <script setup>
 import { onMounted, ref } from "vue";
-import { useRouter } from "vue-router";
+import { useRouter, useRoute } from "vue-router";
 import { api } from "../api.js";
 import { setAuth } from "../auth.js";
 
 const router = useRouter();
+const route = useRoute();
 const mode = ref("login"); // login | register
 const registerEnabled = ref(false);
 const username = ref("");
@@ -16,6 +17,10 @@ const success = ref("");
 const loading = ref(false);
 
 onMounted(async () => {
+  // 工作身份被管理员撤销且账号已无可切换身份时，引导重新登录。
+  if (route.query.revoked) {
+    error.value = "当前身份已被管理员撤销，请重新登录";
+  }
   try {
     const res = await fetch("/api/auth/register-enabled");
     const data = await res.json();

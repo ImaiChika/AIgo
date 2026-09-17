@@ -17,6 +17,7 @@ function openProfile() {
 
 const mobileNavigationOpen = ref(false);
 const sidebar = ref(null), menuButton = ref(null);
+const identityRecoveredNotice = ref("");
 const activeGroup = computed(() => visibleNavigation(hasPerm).find(g => g.items.some(item => navigationItemActive(item, route.path))));
 const inGeneration = computed(() => route.matched.some(record => record.name === "generation"));
 const batchMode = computed(() => route.name === "generation-batch");
@@ -35,6 +36,12 @@ function closeDesktopDrawer() { if (desktopLayout.matches) mobileNavigationOpen.
 onMounted(() => {
   desktopLayout.addEventListener("change", closeDesktopDrawer);
   document.addEventListener("click", closeRoleMenuOnDocument);
+  // 工作身份被撤销后由 api.js 自动切换到剩余身份并刷新，这里提示一次。
+  const recoveredRole = sessionStorage.getItem("aigo_identity_recovered");
+  if (recoveredRole) {
+    sessionStorage.removeItem("aigo_identity_recovered");
+    identityRecoveredNotice.value = `原工作身份已被管理员撤销，已自动切换为「${roleName(recoveredRole) || recoveredRole}」；可在左下角切换身份。`;
+  }
 });
 onBeforeUnmount(() => {
   desktopLayout.removeEventListener("change", closeDesktopDrawer);
@@ -132,6 +139,10 @@ async function switchRole(role) {
     <router-view />
   </div>
   <div v-else class="app-shell" :class="{ 'mobile-navigation-open': mobileNavigationOpen }">
+    <div v-if="identityRecoveredNotice" class="identity-recovered-banner">
+      <span>{{ identityRecoveredNotice }}</span>
+      <button type="button" aria-label="关闭提示" @click="identityRecoveredNotice = ''">×</button>
+    </div>
     <div v-if="mobileNavigationOpen" class="navigation-backdrop" aria-hidden="true" @click="mobileNavigationOpen = false"></div>
     <aside ref="sidebar" class="sidebar" id="application-navigation" :role="mobileNavigationOpen ? 'dialog' : undefined" :aria-modal="mobileNavigationOpen || undefined" aria-label="应用导航" @keydown="sidebarKeydown">
       <div class="brand">

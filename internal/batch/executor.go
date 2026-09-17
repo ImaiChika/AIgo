@@ -4,11 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
-	"strings"
 
 	"aigo/internal/domain"
-	"aigo/internal/storage"
 )
 
 // ErrUnavailable 表示当前部署未启用可用的批量执行器。
@@ -27,9 +24,9 @@ type Capabilities struct {
 	Endpoint      string `json:"-"`
 }
 
-// Executor 隔离 AIgo 批量任务语义与具体推理平台协议。
-// 当前 DashScope 实现使用 Files + Batches；未来本地队列、vLLM 或其他
-// 执行器只需实现本接口，无需修改 API handler 和前端任务流程。
+// Executor 隔离 AIgo 批量任务语义与具体执行方式。
+// 当前唯一实现是 LocalExecutor：每道题单独调用单题生成 API，
+// 不再绑定 Qwen 平台的 Files + Batches 批量协议。
 type Executor interface {
 	GenerateAndSubmit(ctx context.Context, points []domain.KnowledgePoint, countPerPoint int, jobName string) (jobID string, requestCount int, err error)
 	GetJobStatus(ctx context.Context, jobID string) (*BatchJob, error)
@@ -38,184 +35,54 @@ type Executor interface {
 	Capabilities() Capabilities
 }
 
-// DirectOutputImporter 仅用于兼容历史 CLI 直接传 DashScope output_file_id 的用法。
-// 新的业务/API 路径应始终按 AIgo jobID 调用 Executor.ImportResults。
-type DirectOutputImporter interface {
-	DownloadAndImport(ctx context.Context, outputFileID string, points []domain.KnowledgePoint) (*ImportResult, error)
+// BatchJob 批量任务状态。
+type BatchJob struct {
+	JobID        string `json:"job_id"`
+	OwnerID      string `json:"owner_id,omitempty"` // 提交任务的用户；管理员查看他人任务时用于只读标识
+	Backend      string `json:"backend,omitempty"`
+	Model        string `json:"model,omitempty"`
+	JobName      string `json:"job_name"` // 自定义任务名称
+	Status       string `json:"status"`   // pending/in_progress/completed/failed/cancelled
+	TotalCount   int    `json:"total_count"`
+	Completed    int    `json:"completed"`
+	Failed       int    `json:"failed"`
+	OutputFileID string `json:"output_file_id"`
+	CreatedAt    int64  `json:"created_at"`
+	Error        string `json:"error,omitempty"`
+	// ImportedAt 非空表示结果已完成导入（导入幂等）；前端据此决定是否触发自动导入。
+	ImportedAt string `json:"imported_at,omitempty"`
+	// Tracked 表示该任务在本地 batch_jobs 有记录（导入幂等可用）。
+	Tracked bool `json:"tracked,omitempty"`
 }
 
-// RoutingExecutor 把稳定的 AIgo job ref 路由到对应 provider。
-// DashScope 保留历史原始 ID；未来非 legacy 后端使用 "backend:provider_job_id"。
-// 因此将默认执行器切到 local 后，只要仍注册 DashScope adapter，旧云端任务
-// 依然可以查询和导入，不会被误发给新的本地后端。
-type RoutingExecutor struct {
-	defaultBackend  string
-	defaultExecutor Executor
-	legacyBackend   string
-	routes          map[string]Executor
+// ImportResult 导入结果详情。
+type ImportResult struct {
+	Saved       int          `json:"saved"`        // 实际成功入库题目数
+	Failed      int          `json:"failed"`       // 失败请求行数（不是题目数）
+	Items       []ImportItem `json:"items"`        // 每条导入详情
+	QuestionIDs []string     `json:"question_ids"` // 本次入库的题目 ID，用于触发 AI 自动检查
+	Simulated   bool         `json:"simulated,omitempty"`
+	Message     string       `json:"message,omitempty"`
 }
 
-func newRoutingExecutor(defaultBackend string, defaultExecutor Executor, legacyBackend string, routes map[string]Executor) *RoutingExecutor {
-	return &RoutingExecutor{
-		defaultBackend:  strings.ToLower(strings.TrimSpace(defaultBackend)),
-		defaultExecutor: defaultExecutor,
-		legacyBackend:   strings.ToLower(strings.TrimSpace(legacyBackend)),
-		routes:          routes,
-	}
+// ImportItem 单条导入结果。
+type ImportItem struct {
+	OutlineCode string `json:"outline_code"` // 大纲代码
+	Count       int    `json:"count"`        // 导入题目数
+	Status      string `json:"status"`       // "ok" / "failed"
+	Error       string `json:"error"`        // 失败原因
 }
 
-func FormatJobRef(backend, providerJobID string) string {
-	backend = strings.ToLower(strings.TrimSpace(backend))
-	providerJobID = strings.TrimSpace(providerJobID)
-	if backend == "" || providerJobID == "" {
-		return providerJobID
+// batchPointID 返回任务内知识点的稳定标识：历史大纲（无版本）按大纲代码，
+// 版本化大纲按知识点 ID，保证跨版本快照不串位。
+func batchPointID(p domain.KnowledgePoint) string {
+	if p.OutlineCode != "" && (p.VersionID == "" || p.VersionID == domain.LegacyKnowledgeVersion) {
+		return p.OutlineCode
 	}
-	if backend == "dashscope" {
-		// 保持现有 API/CLI 返回值以及复制到百炼控制台的 ID 完全兼容。
-		if parsedBackend, parsedID, explicit := ParseJobRef(providerJobID); explicit && parsedBackend == backend {
-			return parsedID
-		}
-		return providerJobID
-	}
-	if parsedBackend, _, explicit := ParseJobRef(providerJobID); explicit && parsedBackend == backend {
-		return providerJobID
-	}
-	return backend + ":" + providerJobID
+	return p.ID
 }
 
-func ParseJobRef(jobRef string) (backend, providerJobID string, explicit bool) {
-	jobRef = strings.TrimSpace(jobRef)
-	backend, providerJobID, found := strings.Cut(jobRef, ":")
-	if !found || strings.TrimSpace(backend) == "" || strings.TrimSpace(providerJobID) == "" {
-		return "", jobRef, false
-	}
-	return strings.ToLower(strings.TrimSpace(backend)), strings.TrimSpace(providerJobID), true
-}
-
-func (r *RoutingExecutor) Capabilities() Capabilities {
-	return r.defaultExecutor.Capabilities()
-}
-
-func (r *RoutingExecutor) GenerateAndSubmit(ctx context.Context, points []domain.KnowledgePoint, countPerPoint int, jobName string) (string, int, error) {
-	providerJobID, count, err := r.defaultExecutor.GenerateAndSubmit(ctx, points, countPerPoint, jobName)
-	if err != nil {
-		return "", 0, err
-	}
-	return FormatJobRef(r.defaultBackend, providerJobID), count, nil
-}
-
-func (r *RoutingExecutor) route(jobRef string) (string, string, Executor, error) {
-	backend, providerJobID, explicit := ParseJobRef(jobRef)
-	if !explicit {
-		backend = r.legacyBackend
-	}
-	executor := r.routes[backend]
-	if executor == nil {
-		return "", "", nil, fmt.Errorf("%w: 任务 %q 的执行器 %q 未配置", ErrUnavailable, jobRef, backend)
-	}
-	return backend, providerJobID, executor, nil
-}
-
-func (r *RoutingExecutor) GetJobStatus(ctx context.Context, jobRef string) (*BatchJob, error) {
-	backend, providerJobID, executor, err := r.route(jobRef)
-	if err != nil {
-		return nil, err
-	}
-	job, err := executor.GetJobStatus(ctx, providerJobID)
-	if err != nil {
-		return nil, err
-	}
-	job.JobID = FormatJobRef(backend, providerJobID)
-	job.Backend = backend
-	return job, nil
-}
-
-func (r *RoutingExecutor) ImportResults(ctx context.Context, jobRef string, points []domain.KnowledgePoint) (*ImportResult, error) {
-	_, providerJobID, executor, err := r.route(jobRef)
-	if err != nil {
-		return nil, err
-	}
-	return executor.ImportResults(ctx, providerJobID, points)
-}
-
-func (r *RoutingExecutor) ListJobs(ctx context.Context, name, status string, limit int) ([]BatchJob, error) {
-	jobsByRef := make(map[string]BatchJob)
-	var firstErr error
-	for backend, executor := range r.routes {
-		jobs, err := executor.ListJobs(ctx, name, status, limit)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		for _, job := range jobs {
-			if job.Backend != "" && job.Backend != backend {
-				continue // adapter 不得把其他 provider 的共享存储记录冒充为自己的任务
-			}
-			job.JobID = FormatJobRef(backend, job.JobID)
-			job.Backend = backend
-			jobsByRef[job.JobID] = job
-		}
-	}
-	if len(jobsByRef) == 0 && firstErr != nil {
-		return nil, firstErr
-	}
-	jobs := make([]BatchJob, 0, len(jobsByRef))
-	for _, job := range jobsByRef {
-		jobs = append(jobs, job)
-	}
-	sort.Slice(jobs, func(i, j int) bool { return jobs[i].CreatedAt > jobs[j].CreatedAt })
-	if limit > 0 && len(jobs) > limit {
-		jobs = jobs[:limit]
-	}
-	return jobs, nil
-}
-
-func (r *RoutingExecutor) DownloadAndImport(ctx context.Context, outputFileID string, points []domain.KnowledgePoint) (*ImportResult, error) {
-	executor := r.routes["dashscope"]
-	direct, ok := executor.(DirectOutputImporter)
-	if !ok {
-		return nil, fmt.Errorf("%w: 未配置 DashScope 结果下载器", ErrUnavailable)
-	}
-	return direct.DownloadAndImport(ctx, outputFileID, points)
-}
-
-// NewExecutor 根据部署配置选择批量执行器。local 值特意保留为不可用占位，
-// 直到 AIgo 本地持久队列或经验证的推理引擎适配器落地；绝不把本地
-// /v1/chat/completions 误当成 DashScope Files + Batches API。
-func NewExecutor(backend string, cfg DashScopeConfig, questionStore storage.QuestionStore, batchJobStore storage.BatchJobStore) (Executor, error) {
-	backend = strings.ToLower(strings.TrimSpace(backend))
-	dashScopeExecutor := NewDashScopeService(cfg, questionStore, batchJobStore)
-	routes := make(map[string]Executor)
-	if strings.TrimSpace(cfg.APIKey) != "" {
-		routes["dashscope"] = dashScopeExecutor
-	}
-	if backend == "" || backend == "auto" {
-		if strings.TrimSpace(cfg.APIKey) == "" {
-			unavailable := NewUnavailableExecutor("disabled", "未配置 DASHSCOPE_API_KEY，云端批量已停用；本地批量执行器尚未接入")
-			return newRoutingExecutor("disabled", unavailable, "dashscope", routes), nil
-		}
-		backend = "dashscope"
-	}
-
-	var active Executor
-	switch backend {
-	case "dashscope":
-		active = dashScopeExecutor
-	case "local":
-		active = NewUnavailableExecutor("local", "本地实时推理可用，但本地批量任务队列尚未实现；请暂用单题生成或将批量后端设为 dashscope")
-	case "disabled", "none":
-		backend = "disabled"
-		active = NewUnavailableExecutor("disabled", "当前部署已停用批量生成")
-	default:
-		return nil, fmt.Errorf("不支持的 QWEN_BATCH_BACKEND: %q", backend)
-	}
-	return newRoutingExecutor(backend, active, "dashscope", routes), nil
-}
-
-// UnavailableExecutor 是明确的能力占位实现，防止本地实时端点被误当成
-// 支持 DashScope /files 和 /batches 的服务。
+// UnavailableExecutor 是明确的能力占位实现，用于批量生成被部署停用的场景。
 type UnavailableExecutor struct {
 	info Capabilities
 }
