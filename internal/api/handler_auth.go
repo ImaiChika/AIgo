@@ -417,6 +417,33 @@ func (s *Server) syncUserToExperts(r *http.Request, user *auth.User) {
 	}
 }
 
+// handleResetUserPassword 管理员重置用户密码。
+// 请求：{"new_password": ""}（空=生成随机初始口令）；响应只回一次新口令。
+// 被重置账号的既有 token 维持 24 小时自然过期。
+func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	var req struct {
+		NewPassword string `json:"new_password"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, "请求格式错误")
+		return
+	}
+	newPassword, target, err := s.authSvc.ResetUserPasswordAs(r.Context(), auth.GetUserID(r.Context()), userID, req.NewPassword)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, auth.ErrPermissionDenied) {
+			status = http.StatusForbidden
+		} else if errors.Is(err, auth.ErrProtectedAccount) || errors.Is(err, auth.ErrSuperAdminOnly) {
+			status = http.StatusForbidden
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	s.auditSvc.LogUser(r.Context(), target.Username, auth.GetUsername(r.Context()), "reset_password")
+	writeJSON(w, 200, map[string]any{"username": target.Username, "new_password": newPassword})
+}
+
 // handleListRoles 列出所有角色模板。
 func (s *Server) handleListRoles(w http.ResponseWriter, r *http.Request) {
 	roles, err := s.authSvc.ListRoles(r.Context())

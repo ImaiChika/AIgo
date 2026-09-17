@@ -863,6 +863,41 @@ func (s *Service) ChangePassword(userID, oldPassword, newPassword string) error 
 	return err
 }
 
+// ResetUserPasswordAs 管理员重置目标账号密码。
+// newPublicKey 为空时生成随机初始口令并返回（仅此一次，不入库明文）；
+// 提供时须至少 8 位。被重置账号的既有 token 维持 24 小时自然过期，
+// 不做强制失效；如需立即封禁应改用“停用账号”。
+func (s *Service) ResetUserPasswordAs(ctx context.Context, actorID, userID, newPublicKey string) (string, *User, error) {
+	if err := s.validateUserMutation(ctx, actorID, userID, "", nil, nil, nil); err != nil {
+		return "", nil, err
+	}
+	target, err := s.GetUserByID(userID)
+	if err != nil {
+		return "", nil, err
+	}
+	if target == nil {
+		return "", nil, fmt.Errorf("用户不存在")
+	}
+	if len(newPublicKey) == 0 {
+		buf := make([]byte, 12)
+		if _, err := rand.Read(buf); err != nil {
+			return "", nil, err
+		}
+		newPublicKey = base64.RawURLEncoding.EncodeToString(buf)
+	}
+	if len(newPublicKey) < 8 {
+		return "", nil, fmt.Errorf("新密码至少8位")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPublicKey), bcrypt.DefaultCost)
+	if err != nil {
+		return "", nil, err
+	}
+	if _, err := s.db.Exec(`UPDATE users SET password_hash=$1, updated_at=NOW() WHERE id=$2`, string(hash), userID); err != nil {
+		return "", nil, err
+	}
+	return newPublicKey, target, nil
+}
+
 // UpdateDisplayName 修改用户昵称。
 func (s *Service) UpdateDisplayName(userID, displayName string) error {
 	_, err := s.db.Exec("UPDATE users SET display_name=$1, updated_at=NOW() WHERE id=$2", displayName, userID)
@@ -956,8 +991,25 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
+// userHasMountedRoles 判断账号当前是否挂载了至少一个角色模板。
+// 用于空角色 token 的 fail-closed 判定：账号后续被分配角色时，
+// 早期签发的无身份 token 不得再按“全部身份并集”获得权限。
+func (s *Service) userHasMountedRoles(ctx context.Context, userID string) (bool, error) {
+	var role string
+	var roles []string
+	if err := s.db.QueryRowContext(ctx, `SELECT role, roles FROM users WHERE id=$1`, userID).Scan(&role, (*pqArrayScanner)(&roles)); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return len(normalizeRoleIDs(role, roles)) > 0, nil
+}
+
 // IsSuperAdmin 判断用户当前是否挂载唯一的超级管理员角色。
-// 不依据权限并集判断，防止普通角色或直接权限伪造最高身份。
+// 请求路径（HTTP 上下文）按 token 中的当前身份判定；服务层/CLI 无角色上下文
+// 调用时回库判定。请求层的空角色 fail-closed 由 HasPermission/GetBankScope
+// 与 server.requireSuperAdmin 承担，这里不重复拦截。
 func (s *Service) IsSuperAdmin(ctx context.Context, userID string) (bool, error) {
 	if activeRole := GetRole(ctx); activeRole != "" {
 		return activeRole == domain.RoleSuperAdmin, nil
@@ -977,6 +1029,19 @@ func (s *Service) IsSuperAdmin(ctx context.Context, userID string) (bool, error)
 func (s *Service) HasPermission(ctx context.Context, userID, perm string) (bool, error) {
 	if perm == domain.PermRoleManage {
 		return s.IsSuperAdmin(ctx, userID)
+	}
+	// fail-closed：请求上下文带用户但 token 未携带当前身份（多为注册后未分配
+	// 角色期间签发），且账号现已挂载角色时，拒绝按“全部身份并集”放行，防止旧
+	// token 在管理员分配角色后同时获得出题+审题能力、绕过身份互斥。重新登录或
+	// 经 switch-role 选择身份后即恢复。服务层/CLI 调用（无用户上下文）不受限。
+	if GetRole(ctx) == "" && GetUserID(ctx) != "" {
+		mounted, err := s.userHasMountedRoles(ctx, userID)
+		if err != nil {
+			return false, err
+		}
+		if mounted {
+			return false, nil
+		}
 	}
 	perms, _, _, err := s.effectivePermissionsForRole(ctx, userID, GetRole(ctx))
 	if err != nil {
@@ -1015,6 +1080,17 @@ func (s *Service) HasPermissionInBank(ctx context.Context, userID, perm, bankID 
 func (s *Service) GetBankScope(ctx context.Context, userID, perm string) (scope []string, fullScope bool, hasPerm bool, err error) {
 	if perm == domain.PermRoleManage && GetRole(ctx) != "" && GetRole(ctx) != domain.RoleSuperAdmin {
 		return nil, false, false, nil
+	}
+	// 与 HasPermission 同一口径：请求上下文带用户但无角色、且账号已挂角色时
+	// fail-closed；服务层/CLI 调用（无用户上下文）不受限。
+	if GetRole(ctx) == "" && GetUserID(ctx) != "" {
+		mounted, mountedErr := s.userHasMountedRoles(ctx, userID)
+		if mountedErr != nil {
+			return nil, false, false, mountedErr
+		}
+		if mounted {
+			return nil, false, false, nil
+		}
 	}
 	perms, _, bankIDs, permissionErr := s.effectivePermissionsForRole(ctx, userID, GetRole(ctx))
 	if permissionErr != nil {

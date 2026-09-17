@@ -132,6 +132,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/users", s.requireAuth(domain.PermUserManage, s.handleListUsers))
 	mux.HandleFunc("POST /api/users", s.requireAuth(domain.PermUserManage, s.handleCreateUser))
 	mux.HandleFunc("PUT /api/users/{id}", s.requireAuth(domain.PermUserManage, s.handleUpdateUser))
+	mux.HandleFunc("POST /api/users/{id}/reset-password", s.requireAuth(domain.PermUserManage, s.handleResetUserPassword))
 	mux.HandleFunc("DELETE /api/users/{id}", s.requireAuth(domain.PermUserManage, s.handleDeleteUser))
 
 	// === 统计（需统计分析权限） ===
@@ -509,6 +510,11 @@ func (s *Server) requireAuthWithOptions(action string, allowRevokedRole bool, ha
 // 授予了其他全部业务权限，也不能通过伪造权限点访问 AI API Key 配置。
 func (s *Server) requireSuperAdmin(handler http.HandlerFunc) http.HandlerFunc {
 	return s.requireAuth("", func(w http.ResponseWriter, r *http.Request) {
+		// 空角色旧 token（账号事后被挂 super_admin）不视为超管，要求重登/选身份。
+		if auth.GetRole(r.Context()) == "" {
+			writeError(w, http.StatusForbidden, "当前登录未选择工作身份，请重新登录后再操作")
+			return
+		}
 		ok, err := s.authSvc.IsSuperAdmin(r.Context(), auth.GetUserID(r.Context()))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "超级管理员身份校验失败")

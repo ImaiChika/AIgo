@@ -147,6 +147,11 @@ export const api = {
       body: JSON.stringify(params),
     }),
   deleteUser: (id) => request(`/users/${id}`, { method: "DELETE" }),
+  resetUserPassword: (id, params) =>
+    request(`/users/${id}/reset-password`, {
+      method: "POST",
+      body: JSON.stringify(params || {}),
+    }),
 
   // 统计
   stats: (scope = "") => request(`/stats${scope ? `?scope=${encodeURIComponent(scope)}` : ""}`),

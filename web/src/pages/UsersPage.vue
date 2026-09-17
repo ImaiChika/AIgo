@@ -13,6 +13,7 @@ const loading = ref(false);
 const showCreate = ref(false);
 const expandedRow = ref(""); // 展开权限矩阵的用户ID
 const rolePickerUserId = ref("");
+const passwordGranted = ref(null); // 刚重置成功的 {username, password}，仅展示一次
 
 const newUser = ref({
   username: "",
@@ -170,6 +171,18 @@ async function deleteUser(u) {
   }
 }
 
+async function resetPassword(u) {
+  if (isProtectedUser(u)) return;
+  if (!confirm(`确定重置「${u.username}」的登录密码？将生成随机初始口令；该账号已登录的会话在 token 过期前仍有效。`)) return;
+  try {
+    const data = await api.resetUserPassword(u.id, {});
+    passwordGranted.value = { username: data.username, password: data.new_password };
+    showToast(`已重置 ${u.username} 的密码`);
+  } catch (e) {
+    showToast("重置失败: " + e.message);
+  }
+}
+
 // 用户直接分配的权限（区别于角色模板权限）
 function directPerms(u) {
   return u.direct_permissions || [];
@@ -268,6 +281,7 @@ onMounted(loadAll);
                 <button class="expand-btn" type="button" @click="expandedRow = expandedRow === u.id ? '' : u.id">
                   {{ expandedRow === u.id ? "收起权限" : "分配权限" }}
                 </button>
+                <button v-if="!isProtectedUser(u)" class="expand-btn" type="button" @click="resetPassword(u)">重置密码</button>
                 <button v-if="!isProtectedUser(u)" class="delete-user-btn" type="button" @click="deleteUser(u)">删除</button>
               </td>
             </tr>
@@ -300,6 +314,18 @@ onMounted(loadAll);
         </tbody>
       </table>
     </section>
+
+    <div v-if="passwordGranted" class="modal-overlay" @click.self="passwordGranted = null">
+      <div class="password-granted-card" role="dialog" aria-label="新密码">
+        <div class="form-title-row">
+          <div><p class="eyebrow">重置成功</p><h3>{{ passwordGranted.username }} 的新密码</h3></div>
+          <button class="modal-close" type="button" aria-label="关闭" @click="passwordGranted = null">×</button>
+        </div>
+        <p class="granted-password">{{ passwordGranted.password }}</p>
+        <p class="granted-note">请立即把该初始口令告知本人，并提醒首次使用后尽快在「个人设置」中修改；此口令不会再次显示。</p>
+        <button class="primary-button" type="button" @click="passwordGranted = null">我已保存</button>
+      </div>
+    </div>
   </div>
 
   <div class="toast" :class="{ show: toast }" role="status" aria-live="polite">{{ toast }}</div>
@@ -684,5 +710,67 @@ onMounted(loadAll);
     min-width: 0;
     overflow-wrap: anywhere;
   }
+}
+</style>
+
+<style scoped>
+/* 重置密码成功后的一次性口令展示 */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 32, 55, 0.45);
+}
+.form-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.form-title-row .eyebrow {
+  margin: 0 0 2px;
+  color: #6e7b8f;
+  font-size: 11px;
+}
+.form-title-row h3 {
+  margin: 0;
+  font-size: 17px;
+}
+.modal-close {
+  border: none;
+  background: transparent;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  color: #6e7b8f;
+  padding: 2px 6px;
+}
+.password-granted-card {
+  background: #fff;
+  border-radius: 10px;
+  padding: 18px 20px;
+  width: min(460px, calc(100vw - 40px));
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+.granted-password {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px dashed #9db7d8;
+  border-radius: 6px;
+  background: #f4f8fd;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 15px;
+  letter-spacing: 1px;
+  word-break: break-all;
+  user-select: all;
+}
+.granted-note {
+  margin: 0 0 14px;
+  color: #718197;
+  font-size: 12px;
+  line-height: 1.6;
 }
 </style>

@@ -88,6 +88,8 @@ function actionText(action) {
     expert_delete: "删专家",
     user_create: "建账号",
     user_register: "自主注册",
+    user_update_permissions: "改权限",
+    user_reset_password: "重置密码",
     auth_login_failed: "登录失败",
     auth_rate_limited: "登录限速",
   };

@@ -129,10 +129,13 @@ const coveragePct = computed(() => {
   return (((stats.value?.kp_covered || 0) / total) * 100).toFixed(1) + "%";
 });
 
-// AI 检查通过率（通过 / 全部检查结论）
+// AI 检查通过率（通过 / 全部检查结论 + 淘汰留档）。
+// 淘汰题的检查结果行随题目删除级联清除，仅剩 ai_check_discards 档案；
+// 分母必须并入 discarded，否则未通过检查的题不进分母，通过率虚高。
 const aiPassRate = computed(() => {
   const v = stats.value?.ai_check?.verdicts || {};
-  const total = (v.pass || 0) + (v.issues_found || 0) + (v.reject || 0);
+  const discarded = stats.value?.ai_check?.discarded || 0;
+  const total = (v.pass || 0) + (v.issues_found || 0) + (v.reject || 0) + discarded;
   if (!total) return null;
   return (((v.pass || 0) / total) * 100).toFixed(1) + "%";
 });
