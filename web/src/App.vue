@@ -1,10 +1,10 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { useRouter, useRoute, isNavigationFailure } from "vue-router";
-import { currentUser, hasPerm, roleName, clearAuth, setAuth } from "./auth.js";
+import { currentUser, hasPerm, roleName, clearAuth, setAuth, updateUser, isLoggedIn } from "./auth.js";
 import { api } from "./api.js";
 import SidebarNavigation from "./components/SidebarNavigation.vue";
-import { visibleNavigation, navigationItemActive } from "./navigation.js";
+import { visibleNavigation, navigationItemActive, permissionAllowed } from "./navigation.js";
 import "./navigation-shell.css";
 
 const router = useRouter();
@@ -30,22 +30,63 @@ watch(mobileNavigationOpen, async open => {
 watch(() => route.fullPath, () => {
   mobileNavigationOpen.value = false;
   closeRoleMenu();
+  refreshCurrentUser();
+});
+
+// ===== 在线权限刷新：管理员调整授权后，无需重新登录即见菜单与守卫变化 =====
+let meRefreshBusy = false;
+let meRefreshedAt = 0;
+const ME_REFRESH_MIN_INTERVAL = 15_000; // 聚焦/导航可能密集触发，按节流合并
+
+async function refreshCurrentUser() {
+  if (meRefreshBusy || isLoginPage.value || !isLoggedIn.value) return;
+  if (Date.now() - meRefreshedAt < ME_REFRESH_MIN_INTERVAL) return;
+  meRefreshBusy = true;
+  try {
+    const fresh = await api.me();
+    // 只覆盖同一账号：期间若已切换账号，以本地新登录态为准。
+    if (fresh?.id && fresh.id === currentUser.value?.id) updateUser(fresh);
+  } catch (e) {
+    // 服务端不可达时降级沿用本地快照，不打扰当前操作。
+  } finally {
+    meRefreshBusy = false;
+    meRefreshedAt = Date.now();
+  }
+}
+
+function onWindowMeRefresh() {
+  if (document.visibilityState === "visible") refreshCurrentUser();
+}
+
+// 权限变化后（在线刷新或跨页签同步），当前页若无权限则回到我的数据。
+watch(() => currentUser.value?.permissions, async (next, prev) => {
+  if (isLoginPage.value || !currentUser.value) return;
+  if (JSON.stringify(next) === JSON.stringify(prev)) return;
+  if (route.meta?.perm && !permissionAllowed(route.meta.perm, hasPerm)) {
+    // 无权限页回退；若页面级离开守卫（未保存修改）拦截，则尊重用户选择留在原页。
+    await router.push("/my");
+  }
 });
 const desktopLayout = window.matchMedia("(min-width: 1041px)");
 function closeDesktopDrawer() { if (desktopLayout.matches) mobileNavigationOpen.value = false; }
 onMounted(() => {
   desktopLayout.addEventListener("change", closeDesktopDrawer);
   document.addEventListener("click", closeRoleMenuOnDocument);
+  window.addEventListener("focus", onWindowMeRefresh);
+  document.addEventListener("visibilitychange", onWindowMeRefresh);
   // 工作身份被撤销后由 api.js 自动切换到剩余身份并刷新，这里提示一次。
   const recoveredRole = sessionStorage.getItem("aigo_identity_recovered");
   if (recoveredRole) {
     sessionStorage.removeItem("aigo_identity_recovered");
     identityRecoveredNotice.value = `原工作身份已被管理员撤销，已自动切换为「${roleName(recoveredRole) || recoveredRole}」；可在左下角切换身份。`;
   }
+  refreshCurrentUser();
 });
 onBeforeUnmount(() => {
   desktopLayout.removeEventListener("change", closeDesktopDrawer);
   document.removeEventListener("click", closeRoleMenuOnDocument);
+  window.removeEventListener("focus", onWindowMeRefresh);
+  document.removeEventListener("visibilitychange", onWindowMeRefresh);
   if (mobileNavigationOpen.value) document.body.style.overflow = previousOverflow;
 });
 function sidebarKeydown(event) {

@@ -52,6 +52,38 @@ export function setAuth(tokenStr, userObj) {
   localStorage.setItem("aigo_user", JSON.stringify(userObj));
 }
 
+// updateUser 只刷新当前账号的用户信息（角色/权限），不动 token 与工作区。
+// 供 /api/auth/me 在线刷新使用：管理员调整授权后，菜单与路由守卫即时生效。
+export function updateUser(userObj) {
+  if (!userObj || !userObj.id) return;
+  user.value = userObj;
+  localStorage.setItem("aigo_user", JSON.stringify(userObj));
+}
+
+// syncFromStorage 把 localStorage 的最新登录态同步进内存响应式状态。
+// 供跨标签页 storage 事件使用：其他页签登录/登出/切换身份后，本页签
+// 不刷新页面也能跟上（storage 事件只在别的页签触发，天然无回环）。
+function syncFromStorage() {
+  const storedToken = localStorage.getItem("aigo_token") || "";
+  let storedUser = null;
+  try {
+    storedUser = JSON.parse(localStorage.getItem("aigo_user") || "null");
+  } catch (e) {
+    storedUser = null;
+  }
+  if (storedToken === token.value && JSON.stringify(storedUser) === JSON.stringify(user.value)) return;
+  token.value = storedToken;
+  user.value = storedUser;
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (event.key === "aigo_token" || event.key === "aigo_user" || event.key === null) {
+      syncFromStorage();
+    }
+  });
+}
+
 export function clearAuth() {
   clearGenerationWorkspace(user.value?.id);
   token.value = "";
