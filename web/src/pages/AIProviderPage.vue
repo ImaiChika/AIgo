@@ -271,7 +271,7 @@ onMounted(loadProviders);
 </template>
 
 <style scoped>
-.ai-config-page { display: grid; gap: 16px; max-width: 1220px; }
+.ai-config-page { display: grid; gap: 16px; width: 100%; max-width: 1220px; min-width: 0; }
 .ai-config-intro { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
 .ai-config-intro h2 { margin: 3px 0 7px; font-size: 23px; color: #172033; }
 .eyebrow { margin: 0; color: #7c8da3; font-size: 11px; letter-spacing: .08em; }
@@ -290,6 +290,7 @@ onMounted(loadProviders);
 .status-pill.active { border-color: #bce5d5; color: #17734f; background: #f1fbf7; }
 .status-pill.inactive { color: #78889a; background: #f9fbfd; }
 .section-heading { margin-bottom: 10px; }
+.ai-provider-list, .provider-table-wrap { min-width: 0; max-width: 100%; }
 .provider-table-wrap { overflow-x: auto; }
 .provider-table { width: 100%; border-collapse: collapse; min-width: 820px; }
 .provider-table th { padding: 10px 9px; border-bottom: 1px solid #e5ebf3; color: #7d8ca0; font-size: 11px; font-weight: 600; text-align: left; white-space: nowrap; }

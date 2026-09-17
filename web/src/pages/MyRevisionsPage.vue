@@ -643,4 +643,20 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", warnBeforeUnloa
   place-items: center;
   color: #6e7b8f;
 }
+
+@media (max-width: 900px) {
+  .revisions-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .revisions-list-panel,
+  .revision-list {
+    max-height: none;
+  }
+
+  .revisions-list-panel,
+  .empty-panel {
+    min-width: 0;
+  }
+}
 </style>
