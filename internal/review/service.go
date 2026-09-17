@@ -61,15 +61,7 @@ func NewService(expertStore storage.ExpertStore, reviewStore storage.ReviewStore
 // revision_required 在新模型下仅作为审核任务上的标记保留（题目本体已恢复 ai_reviewed），
 // 白名单保留它以兼容存量数据。
 func (s *Service) submittableStatuses() map[domain.QuestionStatus]bool {
-	if s.RequireAICheck {
-		return map[domain.QuestionStatus]bool{
-			domain.StatusAIReviewed:       true,
-			domain.StatusRevisionRequired: true,
-		}
-	}
 	return map[domain.QuestionStatus]bool{
-		domain.StatusAIDraft:          true,
-		domain.StatusAutoChecked:      true,
 		domain.StatusAIReviewed:       true,
 		domain.StatusRevisionRequired: true,
 	}
@@ -169,6 +161,7 @@ func (s *Service) createFlowLocked(ctx context.Context, flow domain.ReviewFlowCo
 	}
 	// 当前流程不再绑定分类子题库；BankID 只为读取旧记录保留。
 	flow.BankID = ""
+	flow.Archived = false
 	if err := s.validateFlow(ctx, flow); err != nil {
 		return err
 	}
@@ -176,38 +169,9 @@ func (s *Service) createFlowLocked(ctx context.Context, flow domain.ReviewFlowCo
 	return s.reviewStore.SaveFlowConfig(ctx, flow)
 }
 
-// UpdateFlow 更新审核流程配置。有进行中的任务引用该流程时禁止修改。
+// UpdateFlow 审核流程创建后不可修改；需要调整时归档旧流程并新建。
 func (s *Service) UpdateFlow(ctx context.Context, flow domain.ReviewFlowConfig) error {
-	release, err := s.reviewStore.AcquireReviewMutationLock(ctx)
-	if err != nil {
-		return err
-	}
-	err = s.updateFlowLocked(ctx, flow)
-	if releaseErr := release(); err == nil {
-		err = releaseErr
-	}
-	return err
-}
-
-func (s *Service) updateFlowLocked(ctx context.Context, flow domain.ReviewFlowConfig) error {
-	existing, _ := s.reviewStore.GetFlowConfig(ctx, flow.ID)
-	if existing == nil {
-		return fmt.Errorf("流程 %s 不存在", flow.ID)
-	}
-	// 进行中的任务引用该流程时禁止修改，防止轮次变化破坏审核任务
-	activeCount, err := s.reviewStore.CountActiveTasksByFlow(ctx, flow.ID)
-	if err != nil {
-		return fmt.Errorf("检查流程引用失败: %w", err)
-	}
-	if activeCount > 0 {
-		return fmt.Errorf("流程 %s 有 %d 个进行中的审核任务，暂不能修改", flow.ID, activeCount)
-	}
-	// 编辑旧流程时同步清除历史分类约束，避免新任务重新依赖子题库。
-	flow.BankID = ""
-	if err := s.validateFlow(ctx, flow); err != nil {
-		return err
-	}
-	return s.reviewStore.SaveFlowConfig(ctx, flow)
+	return fmt.Errorf("审核流程创建后不可修改；请删除旧流程并新建")
 }
 
 // validateFlow 校验流程配置（名称、轮次、审核人、通过人数、把关人）。
@@ -232,11 +196,7 @@ func (s *Service) validateFlow(ctx context.Context, flow domain.ReviewFlowConfig
 	for i := range flow.Rounds {
 		round := &flow.Rounds[i]
 		if len(round.ExpertIDs) == 0 {
-			// 审核人留空：提交时按当前启用账号的审题权限自动匹配
-			// required_count 保留用户配置（0 = 全员，提交时按实际匹配人数确定）
-			if round.RequiredCount < 0 {
-				round.RequiredCount = 0
-			}
+			return fmt.Errorf("第 %d 轮「%s」必须至少选择一名审题老师", round.RoundNumber, round.Name)
 		} else {
 			// 专家去重：同一轮不能出现重复专家
 			seen := make(map[string]bool)
@@ -297,7 +257,17 @@ func (s *Service) LoadFlowsFromFile(ctx context.Context, path string) (int, erro
 
 // ListFlows 列出所有审核流程。
 func (s *Service) ListFlows(ctx context.Context) ([]domain.ReviewFlowConfig, error) {
-	return s.reviewStore.ListFlowConfigs(ctx)
+	flows, err := s.reviewStore.ListFlowConfigs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	active := make([]domain.ReviewFlowConfig, 0, len(flows))
+	for _, flow := range flows {
+		if !flow.Archived {
+			active = append(active, flow)
+		}
+	}
+	return active, nil
 }
 
 // UserAssignmentReferences 返回仍依赖指定账号的审核流程或进行中任务。
@@ -374,14 +344,15 @@ func (s *Service) deleteFlowLocked(ctx context.Context, id string) error {
 	if activeCount > 0 {
 		return fmt.Errorf("流程 %s 有 %d 个进行中的审核任务，无法删除", id, activeCount)
 	}
-	totalCount, err := s.reviewStore.CountTasksByFlow(ctx, id)
+	flow, err := s.reviewStore.GetFlowConfig(ctx, id)
 	if err != nil {
-		return fmt.Errorf("检查流程历史引用失败: %w", err)
+		return err
 	}
-	if totalCount > 0 {
-		return fmt.Errorf("流程 %s 有 %d 个历史审核任务引用，无法删除（历史记录需保留）", id, totalCount)
+	if flow == nil {
+		return fmt.Errorf("流程 %s 不存在", id)
 	}
-	return s.reviewStore.DeleteFlowConfig(ctx, id)
+	flow.Archived = true
+	return s.reviewStore.SaveFlowConfig(ctx, *flow)
 }
 
 // ===== 审核操作 =====
@@ -431,7 +402,7 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 	allowedStatuses := s.submittableStatuses()
 	if !allowedStatuses[q.Status] {
 		switch {
-		case s.RequireAICheck && (q.Status == domain.StatusAIDraft || q.Status == domain.StatusAutoChecked):
+		case q.Status == domain.StatusAIDraft || q.Status == domain.StatusAutoChecked:
 			return nil, fmt.Errorf("%w: 题目 %s 尚未通过 AI 质量检查（当前状态 %s），请等待自动检查完成后再提交审核", domain.ErrReviewNotSubmittable, questionID, q.Status)
 		case q.Status == domain.StatusRejected:
 			return nil, fmt.Errorf("%w: 题目 %s 已被驳回（终态锁定），不允许修改或重新提交审核", domain.ErrReviewNotSubmittable, questionID)
@@ -453,8 +424,11 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 	}
 
 	existing, _ := s.reviewStore.GetTaskByQuestionID(ctx, questionID)
+	if flow.Archived && (existing == nil || existing.Status != domain.StatusRevisionRequired) {
+		return nil, fmt.Errorf("%w: 审核流程 %s 已删除，不再接受新题", domain.ErrReviewNotSubmittable, flowID)
+	}
 	if existing != nil {
-		// 如果是"需修改"状态，恢复为审核中（保持原轮，清空本轮投票重新审核，进入新一批次）
+		// 退修完成后始终沿用原流程并从第一轮重新审核，进入新一批次。
 		if existing.Status == domain.StatusRevisionRequired {
 			if q.Version <= existing.QuestionVersion {
 				return nil, fmt.Errorf("%w: 题目已退回修改，但当前仍是送审版本 %d；请先在「待我修改」中提交新版本后再送审", domain.ErrReviewNotSubmittable, existing.QuestionVersion)
@@ -462,17 +436,17 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 			if existing.FlowID != flowID {
 				return nil, fmt.Errorf("%w: 题目已按审核流程 %s 退回修改，修改后需沿用原流程重新送审", domain.ErrReviewNotSubmittable, existing.FlowID)
 			}
-			roundIdx := existing.CurrentRound - 1
-			if roundIdx < 0 || roundIdx >= len(flow.Rounds) {
-				return nil, fmt.Errorf("审核流程 %s 不包含第 %d 轮", flowID, existing.CurrentRound)
+			if len(flow.Rounds) == 0 {
+				return nil, fmt.Errorf("审核流程 %s 没有有效轮次", flowID)
 			}
-			assigned, err := s.resolveReviewers(ctx, flow.Rounds[roundIdx].ExpertIDs)
+			assigned, err := s.resolveReviewers(ctx, flow.Rounds[0].ExpertIDs)
 			if err != nil {
 				return nil, err
 			}
-			if _, err := resolvedRequiredCount(flow.Rounds[roundIdx], assigned, flow.VoteRule); err != nil {
+			if _, err := resolvedRequiredCount(flow.Rounds[0], assigned, flow.VoteRule); err != nil {
 				return nil, err
 			}
+			existing.CurrentRound = 1
 			existing.Status = domain.StatusReviewing
 			existing.FlowID = flowID
 			existing.SubmissionBankID = submissionBankID
@@ -480,12 +454,9 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 			existing.FinalReviewerIDs = flow.FinalReviewerIDs
 			existing.QuestionPrevStatus = q.Status // 保留本次重新送审前的状态快照
 			existing.QuestionVersion = q.Version
-			if roundIdx >= 0 && roundIdx < len(existing.RoundResults) {
-				existing.RoundResults[roundIdx].Reviews = nil
-				existing.RoundResults[roundIdx].ApprovedCount = 0
-				existing.RoundResults[roundIdx].RejectedCount = 0
-				existing.RoundResults[roundIdx].RevisionCount = 0
-				existing.RoundResults[roundIdx].Passed = false
+			existing.RoundResults = make([]domain.RoundResult, len(flow.Rounds))
+			for i := range existing.RoundResults {
+				existing.RoundResults[i].RoundNumber = i + 1
 			}
 			existing.FinalDecision = nil
 			existing.Attempt++
@@ -508,7 +479,7 @@ func (s *Service) submitQuestionLocked(ctx context.Context, questionID, flowID, 
 		}
 	}
 
-	// 解析第一轮审核人（显式配置优先，否则按审题权限自动匹配）
+	// 解析第一轮显式配置的审核人，并重新校验账号仍然有效。
 	assigned, err := s.resolveReviewers(ctx, flow.Rounds[0].ExpertIDs)
 	if err != nil {
 		return nil, err
@@ -576,14 +547,7 @@ func (s *Service) resolveReviewers(ctx context.Context, configured []string) ([]
 		}
 		return append([]string(nil), configured...), nil
 	}
-	reviewers, err := s.users.ListReviewers(ctx, "")
-	if err != nil {
-		return nil, fmt.Errorf("查询审题人失败: %w", err)
-	}
-	if len(reviewers) == 0 {
-		return nil, fmt.Errorf("没有可用的审题老师：请为启用账号分配审题权限，或在流程中显式指定审核人")
-	}
-	return reviewers, nil
+	return nil, fmt.Errorf("审核流程每轮必须显式配置至少一名审题老师")
 }
 
 func resolvedRequiredCount(round domain.RoundConfig, assigned []string, voteRule string) (int, error) {
@@ -1654,6 +1618,54 @@ func (s *Service) finalizeLocked(ctx context.Context, req FinalizeRequest) error
 		return nil
 	}
 	return nil
+}
+
+// ReturnPublishedForRevision 将正式题撤回到原生成者的“待我修改”。原审核任务
+// 保留流程与历史记录，修改产生新版本后从原流程第一轮重新提交。
+func (s *Service) ReturnPublishedForRevision(ctx context.Context, questionID, reviewerID, reviewerName, reason string) error {
+	return s.withReviewMutation(ctx, func(txCtx context.Context) error {
+		q, err := s.questionStore.GetQuestion(txCtx, questionID)
+		if err != nil {
+			return err
+		}
+		if q == nil {
+			return fmt.Errorf("题目 %s 不存在", questionID)
+		}
+		if q.Status != domain.StatusPublished {
+			return fmt.Errorf("仅已通过题目可以撤回修改")
+		}
+		task, err := s.reviewStore.GetTaskByQuestionID(txCtx, questionID)
+		if err != nil {
+			return err
+		}
+		if task == nil || task.Status != domain.StatusPublished {
+			return fmt.Errorf("题目缺少已完成的原审核流程，无法安全撤回")
+		}
+		now := time.Now()
+		comment := &domain.ReviewComment{Other: strings.TrimSpace(reason)}
+		if comment.IsEmpty() {
+			comment.Other = "正式题撤回修改"
+		}
+		decision := domain.ExpertReview{
+			ExpertID: reviewerID, ExpertName: reviewerName, Conclusion: domain.StatusRevisionRequired,
+			Opinion: comment.Flatten(), Comment: comment, ReviewedAt: now,
+		}
+		task.FinalDecision = &decision
+		task.Status = domain.StatusRevisionRequired
+		task.UpdatedAt = now
+		if err := s.reviewStore.SaveRecord(txCtx, domain.ReviewRecord{
+			ID: fmt.Sprintf("rec-unpublish-%s-%d", task.ID, now.UnixNano()), TaskID: task.ID,
+			QuestionID: questionID, RoundNumber: task.CurrentRound, Attempt: attemptOrOne(task.Attempt),
+			ExpertID: reviewerID, ExpertName: reviewerName, Conclusion: domain.StatusRevisionRequired,
+			Opinion: decision.Opinion, Comment: comment, CreatedAt: now,
+		}); err != nil {
+			return err
+		}
+		if err := s.reviewStore.UpdateTask(txCtx, *task); err != nil {
+			return err
+		}
+		return s.updateQuestionStatus(txCtx, questionID, domain.StatusAIReviewed)
+	})
 }
 
 // GetTask 获取审核任务详情。

@@ -224,8 +224,8 @@ func TestOutcomeStoreInjectedFailureRollsBackAtomically(t *testing.T) {
 	}
 }
 
-// 已进入人工流程的题目重检通过：只留检查结果，不改状态。
-func TestOutcomeStoreRecheckKeepsHumanFlowStatus(t *testing.T) {
+// 已进入人工流程的题目禁止复检。
+func TestOutcomeStoreRejectsHumanFlowRecheck(t *testing.T) {
 	svc, stub := newOutcomeTestService(&recordingClient{})
 	ctx := context.Background()
 	q := testDraft("q-reviewing", 1)
@@ -234,21 +234,20 @@ func TestOutcomeStoreRecheckKeepsHumanFlowStatus(t *testing.T) {
 		t.Fatalf("准备题目失败: %v", err)
 	}
 
-	if _, err := svc.CheckQuestion(ctx, q.ID); err != nil {
-		t.Fatalf("检查失败: %v", err)
+	if _, err := svc.CheckQuestion(ctx, q.ID); err == nil {
+		t.Fatal("审核中题目不应允许复检")
 	}
 	saved, _ := stub.GetQuestion(ctx, q.ID)
 	if saved == nil || saved.Status != domain.StatusReviewing {
 		t.Fatalf("审核中的题目状态不得被 AI 检查改动，实际 %+v", saved)
 	}
-	steps := stub.appliedSteps()
-	if len(steps) != 1 || steps[0] != "result" {
-		t.Fatalf("重检只应保存结果，实际动作: %v", steps)
+	if steps := stub.appliedSteps(); len(steps) != 0 {
+		t.Fatalf("拒绝复检不应落库，实际动作: %v", steps)
 	}
 }
 
-// 不通过的结论作用于已进入人工流程的题目：只留结果，不淘汰、不删除。
-func TestOutcomeStoreFailKeepsNonDraftQuestion(t *testing.T) {
+// 已通过首次检查的题目禁止复检。
+func TestOutcomeStoreRejectsReviewedQuestionRecheck(t *testing.T) {
 	svc, stub := newOutcomeTestService(&failingCheckClient{})
 	ctx := context.Background()
 	q := testDraft("q-reviewed-fail", 1)
@@ -257,8 +256,8 @@ func TestOutcomeStoreFailKeepsNonDraftQuestion(t *testing.T) {
 		t.Fatalf("准备题目失败: %v", err)
 	}
 
-	if _, err := svc.CheckQuestion(ctx, q.ID); err != nil {
-		t.Fatalf("检查失败: %v", err)
+	if _, err := svc.CheckQuestion(ctx, q.ID); err == nil {
+		t.Fatal("已检查题目不应允许复检")
 	}
 	if saved, _ := stub.GetQuestion(ctx, q.ID); saved == nil {
 		t.Fatal("非草稿题目不得被 AI 检查删除")
@@ -267,7 +266,7 @@ func TestOutcomeStoreFailKeepsNonDraftQuestion(t *testing.T) {
 	if len(discards) != 0 {
 		t.Fatal("非草稿题目不得产生淘汰档案")
 	}
-	if r, _ := stub.reviews.GetLatestByQuestionID(ctx, q.ID); r == nil {
-		t.Fatal("检查结果应留档")
+	if r, _ := stub.reviews.GetLatestByQuestionID(ctx, q.ID); r != nil {
+		t.Fatal("拒绝复检不应生成第二份结果")
 	}
 }

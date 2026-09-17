@@ -68,15 +68,16 @@ type ReviewFlowConfig struct {
 	FinalReviewerIDs []string      `json:"final_reviewer_ids,omitempty"` // 最终把关管理员（空=任意有最终把关权限者）
 	VoteRule         string        `json:"vote_rule,omitempty"`          // 投票规则（""/veto）
 	Rounds           []RoundConfig `json:"rounds"`                       // 各轮配置
+	Archived         bool          `json:"archived,omitempty"`           // 已删除归档，仅供历史任务沿用原流程
 	CreatedAt        time.Time     `json:"created_at"`                   // 创建时间
 }
 
 // RoundConfig 单轮审核配置。
-// ExpertIDs 为空时，提交审核自动收集当前启用且有审题权限的用户作为本轮审核人。
+// 每轮必须显式选择至少一名当前启用且有审题权限的用户。
 type RoundConfig struct {
 	RoundNumber   int      `json:"round_number"`   // 第几轮
 	Name          string   `json:"name"`           // 轮次名称（如"命题教师初审"）
-	ExpertIDs     []string `json:"expert_ids"`     // 本轮审核人 ID 列表（空=按审题权限自动匹配）
+	ExpertIDs     []string `json:"expert_ids"`     // 本轮审核人 ID 列表（必填）
 	RequiredCount int      `json:"required_count"` // 需要几位通过（达标立即过轮；未达标收齐意见后裁定；0=全部）
 	CanModify     bool     `json:"can_modify"`     // 是否允许直接修改题目
 	PassCondition string   `json:"pass_condition"` // 通过条件说明

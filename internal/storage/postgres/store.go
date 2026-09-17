@@ -1302,23 +1302,23 @@ func (s *Store) DeleteExpert(ctx context.Context, id string) error {
 func (s *Store) SaveFlowConfig(ctx context.Context, f domain.ReviewFlowConfig) error {
 	rounds, _ := json.Marshal(f.Rounds)
 	_, err := s.execContext(ctx, `
-		INSERT INTO review_flows (id, name, description, subject, bank_id, final_reviewer_ids, vote_rule, rounds, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		INSERT INTO review_flows (id, name, description, subject, bank_id, final_reviewer_ids, vote_rule, rounds, archived, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		ON CONFLICT (id) DO UPDATE SET
 			name=EXCLUDED.name, description=EXCLUDED.description, subject=EXCLUDED.subject,
 			bank_id=EXCLUDED.bank_id, final_reviewer_ids=EXCLUDED.final_reviewer_ids,
-			vote_rule=EXCLUDED.vote_rule, rounds=EXCLUDED.rounds
-	`, f.ID, f.Name, f.Description, f.Subject, f.BankID, pqArray(f.FinalReviewerIDs), f.VoteRule, rounds, f.CreatedAt)
+			vote_rule=EXCLUDED.vote_rule, rounds=EXCLUDED.rounds, archived=EXCLUDED.archived
+	`, f.ID, f.Name, f.Description, f.Subject, f.BankID, pqArray(f.FinalReviewerIDs), f.VoteRule, rounds, f.Archived, f.CreatedAt)
 	return err
 }
 
 func (s *Store) GetFlowConfig(ctx context.Context, id string) (*domain.ReviewFlowConfig, error) {
-	row := s.queryRowContext(ctx, `SELECT id, name, description, subject, bank_id, final_reviewer_ids, vote_rule, rounds, created_at FROM review_flows WHERE id=$1`, id)
+	row := s.queryRowContext(ctx, `SELECT id, name, description, subject, bank_id, final_reviewer_ids, vote_rule, rounds, archived, created_at FROM review_flows WHERE id=$1`, id)
 	return scanFlow(row)
 }
 
 func (s *Store) ListFlowConfigs(ctx context.Context) ([]domain.ReviewFlowConfig, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, description, subject, bank_id, final_reviewer_ids, vote_rule, rounds, created_at FROM review_flows ORDER BY created_at`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, description, subject, bank_id, final_reviewer_ids, vote_rule, rounds, archived, created_at FROM review_flows ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -1818,7 +1818,7 @@ func scanFlow(row *sql.Row) (*domain.ReviewFlowConfig, error) {
 	var f domain.ReviewFlowConfig
 	var finalReviewerIDs []string
 	var roundsJSON []byte
-	err := row.Scan(&f.ID, &f.Name, &f.Description, &f.Subject, &f.BankID, pqArrayScanner(&finalReviewerIDs), &f.VoteRule, &roundsJSON, &f.CreatedAt)
+	err := row.Scan(&f.ID, &f.Name, &f.Description, &f.Subject, &f.BankID, pqArrayScanner(&finalReviewerIDs), &f.VoteRule, &roundsJSON, &f.Archived, &f.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1835,7 +1835,7 @@ func scanFlowRow(rows *sql.Rows) (*domain.ReviewFlowConfig, error) {
 	var f domain.ReviewFlowConfig
 	var finalReviewerIDs []string
 	var roundsJSON []byte
-	err := rows.Scan(&f.ID, &f.Name, &f.Description, &f.Subject, &f.BankID, pqArrayScanner(&finalReviewerIDs), &f.VoteRule, &roundsJSON, &f.CreatedAt)
+	err := rows.Scan(&f.ID, &f.Name, &f.Description, &f.Subject, &f.BankID, pqArrayScanner(&finalReviewerIDs), &f.VoteRule, &roundsJSON, &f.Archived, &f.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -2086,9 +2086,7 @@ func (s *Store) EnqueueCheckTask(ctx context.Context, task domain.AICheckTask) (
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO ai_check_tasks (id, question_id, question_version, status, attempts, max_attempts, last_error, leased_until, created_at, updated_at)
 		SELECT $1, $2, $3, $4, 0, $5, '', NULL, NOW(), NOW()
-		WHERE NOT EXISTS (
-			SELECT 1 FROM ai_check_tasks WHERE question_id = $2 AND status IN ('pending','running')
-		)
+		WHERE NOT EXISTS (SELECT 1 FROM ai_check_tasks WHERE question_id = $2)
 	`, task.ID, task.QuestionID, task.QuestionVersion, task.Status, task.MaxAttempts)
 	if err != nil {
 		return false, err

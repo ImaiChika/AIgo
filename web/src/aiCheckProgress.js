@@ -19,7 +19,7 @@ export function useAICheckProgress({ intervalMs = 5000, timeoutMs = 10 * 60 * 10
 
   async function tick() {
     if (!questionIds.length) return;
-    // 整体超时兜底：前端停止轮询，检查仍在后台进行（任务表持久化，可稍后查看或补查）
+	// 整体超时兜底：前端停止轮询，检查仍在后台按同一任务自动重试；耗尽后阻断流程。
     if (Date.now() - startedAt > timeoutMs) {
       const snapshot = progress.value || {};
       stop();

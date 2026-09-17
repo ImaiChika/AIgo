@@ -61,15 +61,18 @@ func (s *Service) retryBackoffFor(attempts int) time.Duration {
 	return d
 }
 
-// SetAutoCheckEnabled 控制自动触发检查是否生效（对应 AIGO_AICHECK_AUTO，默认开）。
-// 关闭后 CheckAsync 直接忽略，仅保留 POST /api/ai-check 手动检查入口。
+// SetAutoCheckEnabled 仅保留配置兼容；正式 Web 服务要求始终开启自动检查。
 func (s *Service) SetAutoCheckEnabled(enabled bool) {
 	s.autoEnabled = enabled
 }
 
+func (s *Service) AutomaticReady() bool {
+	return s != nil && s.autoEnabled && s.taskStore != nil && s.client != nil
+}
+
 // CheckAsync 把题目写入持久化检查队列（立即返回，不等待检查完成）。
-// 幂等：该题目已有 pending/running 任务时不再新建；重试耗尽的题目再次入队
-// 会开启新一轮重试周期。任务由 StartWorkers 启动的 worker 消费。
+// 幂等：每道题只允许创建一次检查任务；任务内部可按 MaxAttempts 自动重试，
+// 一旦成功或耗尽均不再创建第二轮检查。
 func (s *Service) CheckAsync(questionIDs ...string) {
 	if !s.autoEnabled || s.taskStore == nil {
 		return
@@ -80,6 +83,10 @@ func (s *Service) CheckAsync(questionIDs ...string) {
 		}
 		q, err := s.questionStore.GetQuestion(context.Background(), id)
 		if err != nil || q == nil {
+			continue
+		}
+		if existing, resultErr := s.aiReviewStore.GetLatestByQuestionID(context.Background(), id); resultErr == nil && existing != nil {
+			slog.Info("题目已有首次 AI 检查结果，跳过重复检查", "question_id", id)
 			continue
 		}
 		task := domain.AICheckTask{

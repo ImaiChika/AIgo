@@ -52,6 +52,9 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(args) > 1 && args[1] == "serve" && !cfg.AICheck.AutoEnabled {
+		return fmt.Errorf("拒绝启动：AI 质量检查必须开启；题目仅允许在首次生成后自动检查一次")
+	}
 	if commandRequiresInferenceConfig(args[1]) {
 		if err := cfg.ValidateInference(); err != nil {
 			return err
@@ -124,7 +127,7 @@ func run(ctx context.Context, args []string) error {
 	// 审核服务：依赖认证服务解析审核人（审题权限 + 题库范围）
 	reviewSvc := review.NewService(pgStore, pgStore, pgStore, authSvc)
 	// 送审强制前置：开启后仅 AI 检查通过（及人工回流状态）的题目可提交审核
-	reviewSvc.RequireAICheck = cfg.ReviewRequireAI
+	reviewSvc.RequireAICheck = true
 
 	// 题库（分库）服务
 	bankSvc := bank.NewService(pgStore, pgStore)
@@ -252,9 +255,7 @@ func run(ctx context.Context, args []string) error {
 		// 启动 AI 检查后台 worker：执行生成/批量导入/编辑自动触发的质量检查
 		workerCtx, stopWorkers := context.WithCancel(context.Background())
 		defer stopWorkers()
-		if cfg.AICheck.AutoEnabled {
-			aiCheckSvc.StartWorkers(workerCtx, cfg.AICheck.Concurrency)
-		}
+		aiCheckSvc.StartWorkers(workerCtx, cfg.AICheck.Concurrency)
 		// 启动单题生成后台 worker：消费 pending 命题运行（请求快照已落库，可恢复/重试）
 		pipe.StartGenerationWorkers(workerCtx, 2)
 		fmt.Printf("AI 质量检查: 自动触发=%v 并发=%d 模型=%s 送审强制前置=%v\n",
@@ -326,46 +327,7 @@ func run(ctx context.Context, args []string) error {
 		return pipe.EvaluateByID(ctx, args[2])
 
 	case "ai-check":
-		// AI 质量检查（LLM 评分）。
-		// 用法: aigo ai-check --all-drafts            检查全部未检查草稿（存量补查）
-		//       aigo ai-check <题目ID> [题目ID...]    检查指定题目
-		var ids []string
-		if len(args) >= 3 && args[2] == "--all-drafts" {
-			questions, err := pgStore.ListQuestions(ctx)
-			if err != nil {
-				return err
-			}
-			for _, q := range questions {
-				if q.Status == domain.StatusAIDraft || q.Status == domain.StatusAutoChecked {
-					ids = append(ids, q.ID)
-				}
-			}
-			fmt.Printf("待检查草稿: %d 道\n", len(ids))
-		} else {
-			ids = args[2:]
-		}
-		if len(ids) == 0 {
-			return fmt.Errorf("用法: aigo ai-check --all-drafts | aigo ai-check <题目ID>...")
-		}
-		results, err := aiCheckSvc.CheckQuestions(ctx, ids)
-		if err != nil {
-			return err
-		}
-		pass, issues, reject, failed := 0, 0, 0, 0
-		for _, r := range results {
-			switch r.Verdict {
-			case "pass":
-				pass++
-			case "issues_found":
-				issues++
-			case "reject":
-				reject++
-			default:
-				failed++
-			}
-		}
-		fmt.Printf("检查完成: 通过 %d, 有问题 %d, 驳回 %d, 失败 %d\n", pass, issues, reject, failed)
-		return nil
+		return fmt.Errorf("AI 检查只允许在题目首次生成后由系统自动执行一次，不支持人工补查或复检")
 
 	// ===== 知识点管理 =====
 	case "kp-import":
@@ -717,7 +679,7 @@ func run(ctx context.Context, args []string) error {
 
 func commandRequiresInferenceConfig(command string) bool {
 	switch command {
-	case "serve", "doctor", "generate", "generate-all", "batch-run", "ai-check":
+	case "serve", "doctor", "generate", "generate-all", "batch-run":
 		return true
 	default:
 		return false
@@ -826,8 +788,6 @@ func printUsage() {
   go run ./cmd/aigo eval-id <题目ID>              评估指定题目
 
 AI 质量检查（LLM 评分；serve 模式下生成/导入/编辑后自动执行）:
-  go run ./cmd/aigo ai-check --all-drafts         检查全部未检查草稿(存量补查)
-  go run ./cmd/aigo ai-check <题目ID>...          检查指定题目
 
 批量生成与导出:
   go run ./cmd/aigo generate-all [每知识点题数]    遍历所有知识点生成题目(默认1)

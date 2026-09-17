@@ -116,6 +116,17 @@ func TestBankTierPermissionsAndExport(t *testing.T) {
 	server.reviewSvc = review.NewService(store, store, store, server.authSvc)
 	handler := server.Handler()
 	adminToken := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.1")
+	adminUser, err := server.authSvc.GetUserByUsername("admin")
+	if err != nil || adminUser == nil {
+		t.Fatal("load admin")
+	}
+	flow := domain.ReviewFlowConfig{ID: "tier-formal-flow", Name: "正式题撤回流程", Rounds: []domain.RoundConfig{{RoundNumber: 1, Name: "审核", ExpertIDs: []string{adminUser.ID}, RequiredCount: 1}}, CreatedAt: time.Now()}
+	if err := store.SaveFlowConfig(context.Background(), flow); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveTask(context.Background(), domain.ReviewTask{ID: "tier-formal-task", QuestionID: "tier-formal", FlowID: flow.ID, CurrentRound: 1, Status: domain.StatusPublished, AssignedTo: []string{adminUser.ID}, QuestionVersion: 1, RoundResults: []domain.RoundResult{{RoundNumber: 1, Passed: true}}, CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
 
 	// 本测试验证分层查看边界；个人轴隔离（无 view_all 仅本人）是另一维度，
 	// 因此这些用户显式授予 question:view_all 以聚焦分层语义。

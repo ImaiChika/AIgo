@@ -340,6 +340,48 @@ func TestLegacyReviewWorkflowCleanupMigrationKeepsUnsubmittedQuestions(t *testin
 	}
 }
 
+func TestExplicitReviewerFlowMigrationArchivesAutomaticFlows(t *testing.T) {
+	_, dsn, cleanup := migrationTestSchema(t)
+	defer cleanup()
+	store, err := New(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	migrations := configuredMigrations(baselineSchemaSQL)
+	applyMigrationPrefix(t, ctx, store, migrations[:28])
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO review_flows(id,name,rounds) VALUES
+		 ('auto-flow','自动流程','[{"round_number":1,"expert_ids":[],"required_count":1}]'),
+		 ('explicit-flow','显式流程','[{"round_number":1,"expert_ids":["reviewer-1"],"required_count":1}]');
+		INSERT INTO questions(id,clinical_stem,options,answer,status,version)
+		VALUES ('check-once-question','男，50岁。检查任务迁移，最可能诊断？','[]','A','ai_draft',1);
+		INSERT INTO ai_check_tasks(id,question_id,question_version,status,created_at,updated_at) VALUES
+		 ('check-old','check-once-question',1,'exhausted',NOW()-INTERVAL '1 minute',NOW()-INTERVAL '1 minute'),
+		 ('check-new','check-once-question',1,'pending',NOW(),NOW());
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.migrate(ctx, migrations); err != nil {
+		t.Fatal(err)
+	}
+	var autoArchived, explicitArchived bool
+	if err := store.db.QueryRowContext(ctx, `SELECT archived FROM review_flows WHERE id='auto-flow'`).Scan(&autoArchived); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT archived FROM review_flows WHERE id='explicit-flow'`).Scan(&explicitArchived); err != nil {
+		t.Fatal(err)
+	}
+	var taskCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM ai_check_tasks WHERE question_id='check-once-question'`).Scan(&taskCount); err != nil {
+		t.Fatal(err)
+	}
+	if !autoArchived || explicitArchived || taskCount != 1 {
+		t.Fatalf("migration result auto=%v explicit=%v tasks=%d", autoArchived, explicitArchived, taskCount)
+	}
+}
+
 func applyMigrationPrefix(t *testing.T, ctx context.Context, store *Store, migrations []migration) {
 	t.Helper()
 	if _, err := store.db.ExecContext(ctx, migrationTableSQL); err != nil {

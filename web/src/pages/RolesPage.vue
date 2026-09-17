@@ -179,7 +179,8 @@ onMounted(loadAll);
             <div>
               <strong>{{ r.name }}</strong>
             </div>
-            <div v-if="r.id !== 'super_admin'" class="role-actions">
+	        <span v-if="r.is_builtin" class="builtin-tag">内置固定</span>
+	        <div v-else class="role-actions">
               <button class="edit-btn" type="button" @click="startEdit(r)">编辑</button>
               <button class="delete-btn" type="button" :disabled="deletingRoleId === r.id" @click="deleteRole(r)" title="删除">×</button>
             </div>
@@ -316,6 +317,7 @@ onMounted(loadAll);
   display: flex;
   gap: 8px;
 }
+.builtin-tag { color: #718197; font-size: 11px; border: 1px solid #dbe4ed; border-radius: 999px; padding: 3px 8px; }
 
 .edit-btn {
   height: 28px;

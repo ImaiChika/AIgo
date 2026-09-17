@@ -270,8 +270,8 @@ func TestRetryThenExhaust(t *testing.T) {
 	}
 }
 
-// 重试耗尽的题目再次入队会开启新一轮检查周期（管理员补查路径）。
-func TestRequeueAfterExhausted(t *testing.T) {
+// 首次检查任务耗尽后保持故障终态，不允许创建第二次检查。
+func TestExhaustedTaskCannotBeRequeued(t *testing.T) {
 	svc, store, _, tasks := newTestService(&recordingClient{})
 	svc.MaxAttempts = 1
 	svc.RetryBackoff = time.Millisecond
@@ -294,11 +294,11 @@ func TestRequeueAfterExhausted(t *testing.T) {
 		t.Fatalf("任务应已耗尽，实际 %v", counts)
 	}
 
-	// 再次入队：新建任务，开启新一轮重试
+	// 再次入队必须保持原耗尽任务，不创建第二轮检查。
 	svc.CheckAsync("q-again")
 	counts, _ = tasks.CountCheckTasksByStatus(ctx)
-	if counts[domain.AICheckTaskPending] != 1 {
-		t.Fatalf("耗尽后再次入队应有 1 条新 pending 任务，实际 %v", counts)
+	if counts[domain.AICheckTaskPending] != 0 || counts[domain.AICheckTaskExhausted] != 1 {
+		t.Fatalf("耗尽后不应再次入队，实际 %v", counts)
 	}
 }
 
@@ -312,10 +312,9 @@ func TestCheckAsyncDisabled(t *testing.T) {
 	}
 }
 
-// 已通过 AI 检查的题目（ai_reviewed）即使重新检查不通过，状态也保持不变：
-// AI 检查只在首次创建时执行一次，人工修改后的把关责任在专家审核环节。
-func TestCheckQuestionKeepsAIReviewedOnFailure(t *testing.T) {
-	svc, store, results, _ := newTestService(&failingCheckClient{})
+// 已通过首次检查的题目禁止再次调用 AI 检查。
+func TestCheckQuestionRejectsRecheckAfterAIReviewed(t *testing.T) {
+	svc, store, _, _ := newTestService(&failingCheckClient{})
 
 	ctx := context.Background()
 	q := testDraft("q-keep", 1)
@@ -324,19 +323,12 @@ func TestCheckQuestionKeepsAIReviewedOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := svc.CheckQuestion(ctx, "q-keep")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Verdict != "issues_found" {
-		t.Fatalf("verdict 应为 issues_found，实际 %s", result.Verdict)
+	if _, err := svc.CheckQuestion(ctx, "q-keep"); err == nil {
+		t.Fatal("ai_reviewed 题目不应允许复检")
 	}
 	stored, _ := store.GetQuestion(ctx, "q-keep")
 	if stored == nil || stored.Status != domain.StatusAIReviewed {
-		t.Fatalf("重新检查不通过不应改动或删除 ai_reviewed 题目")
-	}
-	if r, _ := results.GetLatestByQuestionID(ctx, "q-keep"); r == nil {
-		t.Fatal("重新检查结果应已保存")
+		t.Fatalf("拒绝复检不应改动题目")
 	}
 }
 

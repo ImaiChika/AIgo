@@ -158,7 +158,7 @@ const workflowSteps = computed(() => [
       : aiProgress.value?.stalled
         ? "检查仍在后台进行，可稍后查看"
         : aiProgress.value?.exhausted > 0
-          ? `${aiProgress.value.exhausted} 道检查异常，可由管理员补查`
+	        ? `${aiProgress.value.exhausted} 道检查故障，已停止进入审核流程，请联系管理员恢复服务后重新生成`
           : aiProgress.value
             ? "格式、答案与医学质量已检查"
             : "落库后自动异步执行一次",
@@ -169,7 +169,7 @@ const workflowSteps = computed(() => [
   {
     number: "03",
     title: "转入待审核题库",
-    detail: aiProgress.value ? `通过 ${aiProgress.value.passed || 0} 道，淘汰 ${aiProgress.value.discarded || 0} 道` : "质检通过后可由管理员送审",
+	  detail: aiProgress.value ? `通过 ${aiProgress.value.passed || 0} 道，淘汰 ${aiProgress.value.discarded || 0} 道` : "质检通过后进入新题修改与送审",
     state: aiProgress.value?.checking > 0 ? "waiting" : aiProgress.value?.stalled || aiProgress.value?.exhausted > 0 ? "attention" : aiProgress.value ? "done" : "waiting",
   },
 ].map((step) => ({

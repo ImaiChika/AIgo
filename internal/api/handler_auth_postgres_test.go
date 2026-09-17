@@ -320,6 +320,32 @@ func TestReferencedReviewerCannotBeDisabledOrDeleted(t *testing.T) {
 	}
 }
 
+func TestUserWithOwnedQuestionsCannotBeDeleted(t *testing.T) {
+	server, store, cleanup := authHandlerTestServer(t)
+	defer cleanup()
+	handler := server.Handler()
+	adminToken := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.90")
+	created := serveAuthJSON(t, handler, http.MethodPost, "/api/users", adminToken, "198.51.100.90", map[string]any{
+		"username": "owned-work-teacher", "password": "owned-work-teacher-password", "display_name": "有遗留题老师", "role": domain.RoleTeacher,
+	})
+	var teacher auth.User
+	if created.Code != http.StatusCreated || json.Unmarshal(created.Body.Bytes(), &teacher) != nil {
+		t.Fatalf("create teacher: %d %s", created.Code, created.Body)
+	}
+	if err := store.SaveQuestion(t.Context(), domain.A2Question{
+		ID: "owned-work-question", OwnerID: teacher.ID, CreatedBy: teacher.Username,
+		ClinicalStem: "男，50岁。有遗留题目，最可能的诊断是？",
+		Options:      []domain.Option{{Label: "A", Text: "甲"}, {Label: "B", Text: "乙"}, {Label: "C", Text: "丙"}, {Label: "D", Text: "丁"}, {Label: "E", Text: "戊"}},
+		Answer:       "A", Status: domain.StatusAIReviewed, Version: 1, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deleted := serveAuthJSON(t, handler, http.MethodDelete, "/api/users/"+teacher.ID, adminToken, "198.51.100.90", nil)
+	if deleted.Code != http.StatusConflict || !strings.Contains(deleted.Body.String(), "个人题目 1") {
+		t.Fatalf("user with owned work should not be deleted: %d %s", deleted.Code, deleted.Body)
+	}
+}
+
 func authHandlerTestServer(t *testing.T) (*Server, *postgres.Store, func()) {
 	t.Helper()
 	dsn := os.Getenv("AIGO_TEST_POSTGRES_DSN")

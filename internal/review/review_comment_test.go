@@ -51,7 +51,9 @@ func TestReviewCommentRequiredForNonApproval(t *testing.T) {
 	)
 	ctx := context.Background()
 	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
-	reviewStore.SaveFlowConfig(ctx, testFlow())
+	flow := testFlow()
+	flow.Rounds[0].ExpertIDs = []string{"r1", "r2"}
+	reviewStore.SaveFlowConfig(ctx, flow)
 	task, err := svc.SubmitQuestion(ctx, "q1", "flow-test")
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +91,9 @@ func TestLegacyOpinionCountsAsComment(t *testing.T) {
 	)
 	ctx := context.Background()
 	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
-	reviewStore.SaveFlowConfig(ctx, testFlow())
+	flow := testFlow()
+	flow.Rounds[0].ExpertIDs = []string{"r1", "r2"}
+	reviewStore.SaveFlowConfig(ctx, flow)
 	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-test")
 
 	// 旧客户端只传 opinion → 视为「其他」栏，非通过也应放行
@@ -183,6 +187,7 @@ func TestRecordsForViewerIsolation(t *testing.T) {
 	ctx := context.Background()
 	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
 	flow := testFlow()
+	flow.Rounds[0].ExpertIDs = []string{"r1", "r2", "r3", "r4"}
 	flow.Rounds[0].RequiredCount = 3
 	reviewStore.SaveFlowConfig(ctx, flow)
 	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-test")
@@ -230,7 +235,9 @@ func TestMyTasksHidesPeerVotesForReviewer(t *testing.T) {
 	)
 	ctx := context.Background()
 	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
-	reviewStore.SaveFlowConfig(ctx, testFlow())
+	flow := testFlow()
+	flow.Rounds[0].ExpertIDs = []string{"r1", "r2", "r3"}
+	reviewStore.SaveFlowConfig(ctx, flow)
 	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-test")
 
 	// r1 已投通过、r2 已投驳回（各带评语），r3 未投
@@ -280,7 +287,7 @@ func TestRoundAdvanceKeepsPreviousRoundSummaryForReviewer(t *testing.T) {
 	ctx := context.Background()
 	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
 	flow := testFlow()
-	flow.Rounds = append(flow.Rounds, domain.RoundConfig{RoundNumber: 2, Name: "复审", RequiredCount: 0})
+	flow.Rounds = append(flow.Rounds, domain.RoundConfig{RoundNumber: 2, Name: "复审", ExpertIDs: []string{"r1", "r2"}, RequiredCount: 0})
 	reviewStore.SaveFlowConfig(ctx, flow)
 	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-test")
 

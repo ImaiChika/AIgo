@@ -130,21 +130,9 @@ func (p *Pipeline) GenerateSample(ctx context.Context) error {
 		Count: 1,
 	}
 
-	questions, err := p.generator.Generate(ctx, req)
+	questions, err := p.Generate(ctx, req)
 	if err != nil {
 		return fmt.Errorf("生成失败: %w", err)
-	}
-
-	for i := range questions {
-		if err := questions[i].Validate(); err != nil {
-			questions[i].SourceRefs = append(questions[i].SourceRefs, domain.SourceRef{
-				Title: "校验未通过",
-				Note:  err.Error(),
-			})
-		}
-		if err := p.store.SaveQuestion(ctx, questions[i]); err != nil {
-			return fmt.Errorf("存储失败: %w", err)
-		}
 	}
 
 	return printJSON(questions)
@@ -484,7 +472,7 @@ func (p *Pipeline) GenerateAll(ctx context.Context, countPerPoint int) (int, err
 			Count:           countPerPoint,
 		}
 
-		questions, err := p.generator.Generate(ctx, req)
+		questions, err := p.Generate(ctx, req)
 		if err != nil {
 			failed++
 			if failed <= 10 {
@@ -493,20 +481,7 @@ func (p *Pipeline) GenerateAll(ctx context.Context, countPerPoint int) (int, err
 			continue
 		}
 
-		// 保存到数据库
-		for _, q := range questions {
-			if err := q.Validate(); err != nil {
-				q.SourceRefs = append(q.SourceRefs, domain.SourceRef{
-					Title: "校验未通过",
-					Note:  err.Error(),
-				})
-			}
-			if err := p.store.SaveQuestion(ctx, q); err != nil {
-				fmt.Printf("  ⚠ 保存失败: %v\n", err)
-				continue
-			}
-			total++
-		}
+		total += len(questions)
 
 		// 避免 API 限流，每 10 个请求暂停 1 秒
 		if (i+1)%10 == 0 {

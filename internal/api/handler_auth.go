@@ -381,6 +381,8 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusBadRequest
 		if errors.Is(err, auth.ErrSuperAdminOnly) || errors.Is(err, auth.ErrProtectedAccount) {
 			status = http.StatusForbidden
+		} else if errors.Is(err, auth.ErrUserHasWork) {
+			status = http.StatusConflict
 		}
 		writeError(w, status, err.Error())
 		return

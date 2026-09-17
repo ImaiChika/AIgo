@@ -8,6 +8,12 @@ import (
 	"aigo/internal/domain"
 )
 
+func singleReviewerTestFlow() domain.ReviewFlowConfig {
+	flow := testFlow()
+	flow.Rounds[0].ExpertIDs = []string{"r1"}
+	return flow
+}
+
 // 驳回是终态锁定：重提必须返回可识别的状态冲突错误，API 层据此返回 409 而不是 500。
 func TestSubmitRejectedQuestionReturnsNotSubmittable(t *testing.T) {
 	svc, reviewStore, questionStore := newTestService(
@@ -21,7 +27,7 @@ func TestSubmitRejectedQuestionReturnsNotSubmittable(t *testing.T) {
 	if err := questionStore.SaveQuestion(ctx, *rejected); err != nil {
 		t.Fatal(err)
 	}
-	if err := reviewStore.SaveFlowConfig(ctx, testFlow()); err != nil {
+	if err := reviewStore.SaveFlowConfig(ctx, singleReviewerTestFlow()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -39,10 +45,12 @@ func TestSubmitUncheckedDraftReturnsNotSubmittable(t *testing.T) {
 	svc.RequireAICheck = true
 	ctx := context.Background()
 
-	if err := questionStore.SaveQuestion(ctx, *testQuestion("bank-neike")); err != nil {
+	question := testQuestion("bank-neike")
+	question.Status = domain.StatusAIDraft
+	if err := questionStore.SaveQuestion(ctx, *question); err != nil {
 		t.Fatal(err)
 	}
-	if err := reviewStore.SaveFlowConfig(ctx, testFlow()); err != nil {
+	if err := reviewStore.SaveFlowConfig(ctx, singleReviewerTestFlow()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -63,7 +71,7 @@ func TestResubmitRevisionRequiresNewQuestionVersion(t *testing.T) {
 	if err := questionStore.SaveQuestion(ctx, *q); err != nil {
 		t.Fatal(err)
 	}
-	if err := reviewStore.SaveFlowConfig(ctx, testFlow()); err != nil {
+	if err := reviewStore.SaveFlowConfig(ctx, singleReviewerTestFlow()); err != nil {
 		t.Fatal(err)
 	}
 	task := domain.ReviewTask{
@@ -103,7 +111,7 @@ func TestResubmitRevisionCannotSwitchFlow(t *testing.T) {
 	if err := questionStore.SaveQuestion(ctx, *q); err != nil {
 		t.Fatal(err)
 	}
-	if err := reviewStore.SaveFlowConfig(ctx, testFlow()); err != nil {
+	if err := reviewStore.SaveFlowConfig(ctx, singleReviewerTestFlow()); err != nil {
 		t.Fatal(err)
 	}
 	newFlow := testFlow()
@@ -155,7 +163,7 @@ func TestReviewRejectsVoteAfterRevisionRequired(t *testing.T) {
 	q := testQuestion("bank-neike")
 	q.Status = domain.StatusAIReviewed
 	questionStore.SaveQuestion(ctx, *q)
-	reviewStore.SaveFlowConfig(ctx, testFlow())
+	reviewStore.SaveFlowConfig(ctx, singleReviewerTestFlow())
 	task := domain.ReviewTask{
 		ID:                 "task-revision-vote",
 		QuestionID:         q.ID,

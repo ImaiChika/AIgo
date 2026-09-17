@@ -39,7 +39,8 @@ var (
 	ErrProtectedAccount            = errors.New("超级管理员账号受保护，不能修改、禁用或删除")
 	ErrSuperAdminExists            = errors.New("系统只能有一个超级管理员")
 	ErrSuperAdminRoleNotAssignable = errors.New("超级管理员角色不能通过用户管理分配")
-	ErrProtectedRole               = errors.New("超级管理员角色受保护，不能修改或删除")
+	ErrProtectedRole               = errors.New("内置角色模板受保护，不能修改或删除；请创建自定义角色")
+	ErrUserHasWork                 = errors.New("用户仍有未处理业务数据，不能删除")
 )
 
 // User 用户信息（不含密码）。
@@ -709,6 +710,22 @@ func (s *Service) DeleteUserAs(ctx context.Context, actorID, userID string) (*Us
 	if containsString(target.Roles, domain.RoleAdmin) && !isSuper {
 		return nil, ErrSuperAdminOnly
 	}
+	var questions, generationRuns, batchJobs, shares int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM questions WHERE owner_id=$1`, userID).Scan(&questions); err != nil {
+		return nil, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM generation_runs WHERE owner_id=$1 AND status IN ('pending','running')`, userID).Scan(&generationRuns); err != nil {
+		return nil, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM batch_jobs WHERE owner_id=$1 AND (status NOT IN ('completed','complete','failed','cancelled','expired') OR imported_at IS NULL)`, userID).Scan(&batchJobs); err != nil {
+		return nil, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM question_share_requests WHERE owner_id=$1 AND status='pending'`, userID).Scan(&shares); err != nil {
+		return nil, err
+	}
+	if questions+generationRuns+batchJobs+shares > 0 {
+		return nil, fmt.Errorf("%w：个人题目 %d、运行中命题任务 %d、未完成批量任务 %d、待审批分享 %d；请先处理或停用账号", ErrUserHasWork, questions, generationRuns, batchJobs, shares)
+	}
 	if _, err := s.db.Exec(`DELETE FROM users WHERE id=$1`, userID); err != nil {
 		return nil, err
 	}
@@ -1111,7 +1128,9 @@ func (s *Service) SaveRoleAs(ctx context.Context, actorID string, r domain.Role)
 	if err := s.requireActiveSuperAdmin(ctx, actorID); err != nil {
 		return err
 	}
-	if r.ID == domain.RoleSuperAdmin {
+	if existing, err := s.GetRole(ctx, r.ID); err != nil {
+		return err
+	} else if existing != nil && existing.IsBuiltin {
 		return ErrProtectedRole
 	}
 	if containsPermission(r.Permissions, domain.PermRoleManage) {
@@ -1170,7 +1189,9 @@ func (s *Service) DeleteRoleAs(ctx context.Context, actorID, id string) error {
 	if err := s.requireActiveSuperAdmin(ctx, actorID); err != nil {
 		return err
 	}
-	if id == domain.RoleSuperAdmin {
+	if existing, err := s.GetRole(ctx, id); err != nil {
+		return err
+	} else if existing != nil && existing.IsBuiltin {
 		return ErrProtectedRole
 	}
 	return s.DeleteRole(ctx, id)

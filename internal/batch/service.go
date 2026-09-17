@@ -110,7 +110,7 @@ func (s *Service) ensureAvailable() error {
 // BatchJob 批量任务状态。
 type BatchJob struct {
 	JobID        string `json:"job_id"`
-	OwnerID      string `json:"-"` // 提交任务的用户，仅服务端隔离使用
+	OwnerID      string `json:"owner_id,omitempty"` // 提交任务的用户；管理员查看他人任务时用于只读标识
 	Backend      string `json:"backend,omitempty"`
 	Model        string `json:"model,omitempty"`
 	JobName      string `json:"job_name"` // 自定义任务名称

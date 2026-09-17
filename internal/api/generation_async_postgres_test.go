@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"aigo/internal/aicheck"
 	"aigo/internal/audit"
 
 	"aigo/internal/bank"
@@ -34,6 +35,10 @@ func generationHandlerTestServer(t *testing.T) (*Server, func()) {
 	server.auditSvc = audit.NewService(store)
 	server.kpSvc = knowledge.NewService(store)
 	server.generationRunStore = store
+	checker := aicheck.NewService(&fakeAPILLM{}, store, store, store, "test-check")
+	checker.SetAutoCheckEnabled(true)
+	server.aiCheckSvc = checker
+	pipe.SetDraftChecker(checker)
 	return server, cleanup
 }
 

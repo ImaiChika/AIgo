@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onActivated, onDeactivated, onBeforeUnmount } from "vue";
 import { api } from "../api.js";
-import { hasPerm } from "../auth.js";
+import { hasPerm, currentUser } from "../auth.js";
 import { useAICheckProgress } from "../aiCheckProgress.js";
 import KnowledgePointPicker from "../components/KnowledgePointPicker.vue";
 import QuestionDetailModal from "../components/QuestionDetailModal.vue";
@@ -71,6 +71,7 @@ const jobHistory = ref([]);
 const polling = ref(false);
 const importResult = ref(null); // 导入结果详情
 const detailQuestion = ref(null); // 弹窗查看的题目全貌（复用题库详情弹窗）
+const currentJobOwned = computed(() => !!currentJob.value && currentJob.value.owner_id === currentUser.value?.id);
 
 // 进度百分比
 const progressPercent = computed(() => {
@@ -169,8 +170,9 @@ async function submitBatch() {
       job_name: batchConfig.value.job_name || "",
     });
 
-    currentJob.value = {
-      job_id: data.job_id,
+	  currentJob.value = {
+	    job_id: data.job_id,
+	    owner_id: currentUser.value?.id || "",
       status: "validating",
       total_count: data.count,
       completed: 0,
@@ -247,7 +249,7 @@ const autoImportJobs = new Set(); // 本会话已触发过自动导入的任务�
 // 仅存在于云端列表的历史任务没有导入跟踪，自动导入会把历史结果重复写入。
 // 重复触发由后端导入幂等拦截：已导入的任务只会重放上次的导入结果。
 function maybeAutoImport(job) {
-  if (!job || !isCompleted(job.status) || job.imported_at || !job.tracked) return;
+	if (!job || job.owner_id !== currentUser.value?.id || !isCompleted(job.status) || job.imported_at || !job.tracked) return;
   if (autoImportJobs.has(job.job_id)) return;
   autoImportJobs.add(job.job_id);
   downloadResult(job.job_id);
@@ -489,7 +491,10 @@ onMounted(() => {
         </div>
 
         <!-- 任务完成后的导入：自动触发，无需手动点击 -->
-        <div v-if="isCompleted(currentJob.status) && currentJob.imported_at" class="job-actions">
+	    <div v-if="!currentJobOwned" class="job-actions">
+	      <span class="field-hint">其他用户任务仅供管理员查看，只有原提交人可以导入结果。</span>
+	    </div>
+	    <div v-else-if="isCompleted(currentJob.status) && currentJob.imported_at" class="job-actions">
           <span class="action-hint">结果已自动导入题库，详见下方导入结果</span>
         </div>
         <div v-else-if="isCompleted(currentJob.status) && importError" class="job-actions">
@@ -570,10 +575,11 @@ onMounted(() => {
             </span>
             <span v-if="job.imported_at" class="q-status status-good">已导入</span>
           </div>
-          <div class="job-detail">
-            <span>生成项：{{ job.total_count }}</span>
+	          <div class="job-detail">
+	            <span>生成项：{{ job.total_count }}</span>
             <span>已完成：{{ job.completed || 0 }}</span>
-            <span>失败：{{ job.failed || 0 }}</span>
+	            <span>失败：{{ job.failed || 0 }}</span>
+	            <span v-if="job.owner_id && job.owner_id !== currentUser?.id">其他用户任务 · 只读</span>
           </div>
           <div class="job-actions">
             <button class="ghost-button" type="button" @click="checkStatus(job.job_id)">刷新状态</button>

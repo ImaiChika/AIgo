@@ -291,17 +291,6 @@ export const api = {
     }),
 
   // AI 检查
-  aiCheck: (questionIds) =>
-    request("/ai-check", {
-      method: "POST",
-      body: JSON.stringify({ question_ids: questionIds }),
-    }),
-  // 加入后台检查队列，立即返回（批量补查用）
-  aiCheckAsync: (questionIds) =>
-    request("/ai-check/async", {
-      method: "POST",
-      body: JSON.stringify({ question_ids: questionIds }),
-    }),
   // 题目粒度检查进度（登录即可，逐题校验题库范围）
   aiCheckProgress: (questionIds) =>
     request("/ai-check/progress", {
@@ -310,12 +299,6 @@ export const api = {
     }),
   // 检查概况统计（质量检查权限）
   aiCheckSummary: () => request("/ai-check/summary"),
-  // 强制通过 AI 检查（质量检查权限，写审计留痕）
-  aiCheckOverride: (questionId, reason = "") =>
-    request("/ai-check/override", {
-      method: "POST",
-      body: JSON.stringify({ question_id: questionId, reason }),
-    }),
   aiCheckResult: (questionId) =>
     request(`/ai-check/result/${questionId}`),
   aiCheckResults: (limit = 50) =>
@@ -341,11 +324,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ question_id: questionId, flow_id: flowId, bank_id: bankId }),
     }),
-  submitReviewBatch: (questionIds, flowId) =>
-    request("/review/submit-batch", {
-      method: "POST",
-      body: JSON.stringify({ question_ids: questionIds, flow_id: flowId }),
-    }),
+	  submitReviewBatch: (questionIds, flowId) =>
+	    request("/review/submit-batch", {
+	      method: "POST",
+	      body: JSON.stringify({ question_ids: questionIds, flow_id: flowId }),
+	    }),
+	  resubmitRevisions: (questionIds) =>
+	    request("/review/resubmit-revisions", {
+	      method: "POST",
+	      body: JSON.stringify({ question_ids: questionIds }),
+	    }),
   reviewResults: (params = {}) => {
     const qs = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => {
@@ -376,11 +364,6 @@ export const api = {
   createFlow: (data) =>
     request("/review/flows", {
       method: "POST",
-      body: JSON.stringify(data),
-    }),
-  updateFlow: (id, data) =>
-    request(`/review/flows/${id}`, {
-      method: "PUT",
       body: JSON.stringify(data),
     }),
   deleteFlow: (id) => request(`/review/flows/${id}`, { method: "DELETE" }),

@@ -192,6 +192,51 @@ func (s *Server) handleSubmitReviewBatch(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// handleResubmitRevisions 将出题人已保存新版本的退修题按各自原流程从第一轮重提。
+func (s *Server) handleResubmitRevisions(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		QuestionIDs []string `json:"question_ids"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
+		return
+	}
+	if len(req.QuestionIDs) == 0 || len(req.QuestionIDs) > 500 {
+		writeError(w, http.StatusBadRequest, "一次请选择 1 至 500 道已修改题目")
+		return
+	}
+	type failedItem struct {
+		QuestionID string `json:"question_id"`
+		Error      string `json:"error"`
+	}
+	seen := make(map[string]bool, len(req.QuestionIDs))
+	failed := make([]failedItem, 0)
+	submitted := 0
+	for _, questionID := range req.QuestionIDs {
+		questionID = strings.TrimSpace(questionID)
+		if questionID == "" || seen[questionID] {
+			continue
+		}
+		seen[questionID] = true
+		task, err := s.reviewSvc.GetTaskByQuestionID(r.Context(), questionID)
+		if err != nil || task == nil || task.Status != domain.StatusRevisionRequired {
+			failed = append(failed, failedItem{QuestionID: questionID, Error: "题目不在待修改重提状态"})
+			continue
+		}
+		if _, err := s.submitReviewForActor(r, questionID, task.FlowID, ""); err != nil {
+			failed = append(failed, failedItem{QuestionID: questionID, Error: err.Error()})
+			continue
+		}
+		actor := auth.GetUsername(r.Context())
+		if actor == "" {
+			actor = auth.GetUserID(r.Context())
+		}
+		_ = s.auditSvc.LogSubmit(r.Context(), questionID, task.FlowID, actor, true)
+		submitted++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"submitted": submitted, "failed": failed, "total": submitted + len(failed)})
+}
+
 // handleAvailableReviewFlows 只向命题教师暴露可选择的流程摘要，不泄露每轮
 // 审核人 ID；完整流程配置仍只由管理员查看和维护。
 func (s *Server) handleAvailableReviewFlows(w http.ResponseWriter, r *http.Request) {
@@ -712,31 +757,9 @@ func (s *Server) handleCreateFlow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, flow)
 }
 
-// handleUpdateFlow 更新审核流程（有进行中任务时禁止修改）。
+// handleUpdateFlow 流程创建后不可修改；保留路由用于向旧客户端返回明确冲突。
 func (s *Server) handleUpdateFlow(w http.ResponseWriter, r *http.Request) {
-	var flow domain.ReviewFlowConfig
-	if err := readJSON(r, &flow); err != nil {
-		writeError(w, 400, "请求格式错误: "+err.Error())
-		return
-	}
-	flow.ID = r.PathValue("id")
-	flow.BankID = ""
-	actor := auth.GetUsername(r.Context())
-	ok := s.withAuditedTx(w, r, "更新审核流程",
-		func(txCtx context.Context) error {
-			if err := s.reviewSvc.UpdateFlow(txCtx, flow); err != nil {
-				writeError(w, 400, err.Error())
-				return errResponded
-			}
-			return nil
-		},
-		func(txCtx context.Context) error {
-			return s.auditSvc.LogFlow(txCtx, flow.ID, actor, "update", fmt.Sprintf("修改流程「%s」（%d 轮）", flow.Name, len(flow.Rounds)))
-		})
-	if !ok {
-		return
-	}
-	writeJSON(w, 200, flow)
+	writeError(w, http.StatusConflict, "审核流程创建后不可修改；请删除旧流程并新建")
 }
 
 // handleDeleteFlow 删除审核流程。
@@ -746,7 +769,7 @@ func (s *Server) handleDeleteFlow(w http.ResponseWriter, r *http.Request) {
 	ok := s.withAuditedTx(w, r, "删除审核流程",
 		func(txCtx context.Context) error {
 			if err := s.reviewSvc.DeleteFlow(txCtx, id); err != nil {
-				writeError(w, 500, err.Error())
+				writeError(w, http.StatusConflict, err.Error())
 				return errResponded
 			}
 			return nil

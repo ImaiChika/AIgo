@@ -23,6 +23,10 @@ func (s *Server) handleBatchCapabilities(w http.ResponseWriter, r *http.Request)
 // handleBatchSubmit 向当前配置的批量执行器提交任务。
 // 请求：{"limit": 100, "skip_existing": true, "count": 1, "from_code": "", "to_code": "", "job_name": "任务名"}
 func (s *Server) handleBatchSubmit(w http.ResponseWriter, r *http.Request) {
+	if s.aiCheckSvc == nil || !s.aiCheckSvc.AutomaticReady() {
+		writeError(w, http.StatusServiceUnavailable, "AI 质量检查服务未就绪，已停止批量出题；请联系管理员恢复后再试")
+		return
+	}
 	var req struct {
 		VersionID         string   `json:"version_id"`
 		KnowledgePointIDs []string `json:"knowledge_point_ids"`
@@ -252,16 +256,21 @@ func (s *Server) handleBatchDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "查询批量任务失败: "+statusErr.Error())
 		return
 	}
-	if !s.canAccessBatchJob(r, job) {
+	if job == nil || job.OwnerID == "" || job.OwnerID != auth.GetUserID(r.Context()) {
 		writeError(w, http.StatusForbidden, "无权导入其他用户的批量任务")
 		return
 	}
 
 	// 执行器按统一 job ID 导入结果；具体 provider 文件 ID 留在适配器内部。
-	// 把当前用户塞入上下文，批量生成的题目 created_by 记为提交任务的管理员。
+	owner, ownerErr := s.authSvc.GetUserByID(job.OwnerID)
+	if ownerErr != nil || owner == nil || !owner.Enabled {
+		writeError(w, http.StatusConflict, "批量任务原所有者不存在或已停用，不能导入")
+		return
+	}
+	// 导入归属固定使用任务提交时的所有者，不能因管理员查看而改变。
 	importCtx := storage.WithQuestionChange(r.Context(), storage.QuestionChange{
-		Actor:      auth.GetUsername(r.Context()),
-		OwnerID:    auth.GetUserID(r.Context()),
+		Actor:      owner.Username,
+		OwnerID:    owner.ID,
 		ChangeType: "batch_generate",
 	})
 	result, err := s.batchSvc.ImportResults(importCtx, jobID, nil)

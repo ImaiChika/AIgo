@@ -354,7 +354,7 @@ onMounted(() => {
           <span class="ai-verdict" :class="selectedAIReview.verdict === 'pass' ? 'good' : selectedAIReview.verdict === 'reject' ? 'bad' : 'warn'">
             {{ selectedAIVerdict }}<template v-if="selectedAIAvg !== null">（综合 {{ selectedAIAvg }} 分）</template>
           </span>
-          <span v-if="selectedAIStale" class="ai-stale">题目已修改，结果待复检</span>
+	        <span v-if="selectedAIStale" class="ai-stale">首次生成检查结果；人工修改后不复检</span>
           <span class="ai-caret">展开 ▼</span>
         </summary>
         <div class="ai-report-body">

@@ -24,7 +24,7 @@ func (s *MemoryAICheckTaskStore) EnqueueCheckTask(_ context.Context, task domain
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, t := range s.tasks {
-		if t.QuestionID == task.QuestionID && (t.Status == domain.AICheckTaskPending || t.Status == domain.AICheckTaskRunning) {
+		if t.QuestionID == task.QuestionID {
 			return false, nil
 		}
 	}

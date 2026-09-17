@@ -202,15 +202,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/batch/status/{jobId}", s.requireAuth(domain.PermBatchRun, s.handleBatchStatus))
 	mux.HandleFunc("POST /api/batch/download/{jobId}", s.requireAuth(domain.PermBatchRun, s.handleBatchDownload))
 
-	// === AI 检查（自动执行，不设独立权限点）===
-	// 手动补查按题目编辑权限（谁修题谁补查）；强制通过按用户管理权限（与送审一致）；
-	// 查看类接口登录即可，逐题校验题库范围。
-	mux.HandleFunc("POST /api/ai-check", s.requireAuth(domain.PermQuestionEdit, s.handleAICheck))
-	mux.HandleFunc("POST /api/ai-check/async", s.requireAuth(domain.PermQuestionEdit, s.handleAICheckAsync))
+	// === AI 检查（题目首次生成后唯一一次自动执行）===
+	// 不提供人工复检或强制通过入口；检查故障会耗尽并阻断人工审核流程。
 	// 进度查询登录即可，逐题校验题库范围（生成/批量页轮询自己的检查进度）
 	mux.HandleFunc("POST /api/ai-check/progress", s.requireAuth("", s.handleAICheckProgress))
 	mux.HandleFunc("GET /api/ai-check/summary", s.requireAuth("", s.handleAICheckSummary))
-	mux.HandleFunc("POST /api/ai-check/override", s.requireAuth(domain.PermUserManage, s.handleAICheckOverride))
 	mux.HandleFunc("GET /api/ai-check/result/{questionId}", s.requireAuth("", s.handleAICheckResult))
 	mux.HandleFunc("GET /api/ai-check/results", s.requireAuth(domain.PermUserManage, s.handleAICheckResults))
 
@@ -218,6 +214,7 @@ func (s *Server) Handler() http.Handler {
 	// 提交审核仅系统管理员（user:manage）可操作；审核人员只负责投票
 	mux.HandleFunc("POST /api/review/submit", s.requireAuthAny([]string{domain.PermReviewSubmit, domain.PermUserManage}, s.handleSubmitReview))
 	mux.HandleFunc("POST /api/review/submit-batch", s.requireAuthAny([]string{domain.PermReviewSubmit, domain.PermUserManage}, s.handleSubmitReviewBatch))
+	mux.HandleFunc("POST /api/review/resubmit-revisions", s.requireAuth(domain.PermReviewSubmit, s.handleResubmitRevisions))
 	mux.HandleFunc("POST /api/review/action", s.requireAuth(domain.PermReviewDo, s.handleReviewAction))
 	mux.HandleFunc("POST /api/review/finalize", s.requireAuth(domain.PermReviewFinal, s.handleReviewFinalize))
 	mux.HandleFunc("GET /api/review/task/{id}", s.requireAuth("", s.handleGetReviewTask))

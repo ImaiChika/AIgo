@@ -82,7 +82,7 @@ const aiReviewScores = computed(() => {
   ].filter((x) => typeof x.value === "number");
 });
 
-// 详情弹窗内强制通过等操作后刷新当前题目
+// 详情弹窗关闭后刷新当前题目
 async function refreshSelectedQuestion() {
   if (!selectedQuestion.value) return;
   try {
@@ -332,7 +332,7 @@ onMounted(() => {
       <div v-if="aiReview" class="detail-section ai-review-box">
         <button type="button" class="ai-toggle" @click="aiReviewExpanded = !aiReviewExpanded">
           <span class="ai-verdict" :class="aiReview.verdict === 'pass' ? 'good' : aiReview.verdict === 'reject' ? 'bad' : 'warn'">{{ aiReviewVerdict }}<template v-if="aiReviewAvg !== null">（综合 {{ aiReviewAvg }} 分）</template></span>
-          <span v-if="aiReviewStale" class="ai-stale">题目已修改，结果待复检</span>
+	        <span v-if="aiReviewStale" class="ai-stale">首次生成检查结果；人工修改后不复检</span>
           <span class="ai-caret">{{ aiReviewExpanded ? "收起 ▲" : "展开 ▼" }}</span>
         </button>
         <div v-show="aiReviewExpanded" class="ai-detail">

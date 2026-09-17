@@ -19,7 +19,7 @@ var baselineSchemaSQL string
 
 const (
 	// LatestSchemaVersion 是当前程序能够使用的最新数据库版本。
-	LatestSchemaVersion int64 = 28
+	LatestSchemaVersion int64 = 29
 	// migrationLockKey 在同一 PostgreSQL 数据库内串行化所有 AIgo Schema 迁移。
 	migrationLockKey int64 = 0x4149474f5f4d4947 // "AIGO_MIG"
 )
@@ -383,6 +383,21 @@ func configuredMigrations(schemaSQL string) []migration {
 				 SELECT 1 FROM unnest(gr.question_ids) AS item(id)
 				 WHERE NOT EXISTS (SELECT 1 FROM questions q WHERE q.id=item.id)
 			 )`,
+		}},
+		{Version: 29, Name: "immutable_explicit_reviewer_flows", Statements: []string{
+			`ALTER TABLE review_flows ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE`,
+			`UPDATE review_flows f SET archived=TRUE
+			 WHERE EXISTS (
+				 SELECT 1 FROM jsonb_array_elements(f.rounds) round
+				 WHERE jsonb_array_length(COALESCE(round->'expert_ids','[]'::jsonb))=0
+			 )`,
+			`DELETE FROM ai_check_tasks t USING (
+				 SELECT id FROM (
+					 SELECT id, ROW_NUMBER() OVER (PARTITION BY question_id ORDER BY created_at, id) AS rn
+					 FROM ai_check_tasks
+				 ) ranked WHERE rn > 1
+			 ) duplicate WHERE t.id=duplicate.id`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_check_tasks_one_per_question ON ai_check_tasks(question_id)`,
 		}},
 	}
 }

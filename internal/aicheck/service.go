@@ -4,10 +4,10 @@
 package aicheck
 
 import (
-	"log/slog"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -49,6 +49,19 @@ func NewService(client llm.Client, qs storage.QuestionStore, rs storage.AIReview
 // CheckQuestion 检查单道题目，返回检查结果并持久化。
 // 供手动检查与批量检查使用：只落库检查结论与题目状态，不涉及检查任务。
 func (s *Service) CheckQuestion(ctx context.Context, questionID string) (*domain.AIReviewResult, error) {
+	if existing, err := s.aiReviewStore.GetLatestByQuestionID(ctx, questionID); err == nil && existing != nil {
+		return existing, nil
+	}
+	q, err := s.questionStore.GetQuestion(ctx, questionID)
+	if err != nil {
+		return nil, err
+	}
+	if q == nil {
+		return nil, fmt.Errorf("题目不存在: %s", questionID)
+	}
+	if q.Status != domain.StatusAIDraft && q.Status != domain.StatusAutoChecked {
+		return nil, fmt.Errorf("AI 检查只允许在题目首次生成后执行一次")
+	}
 	return s.checkQuestion(ctx, questionID, "")
 }
 
@@ -103,8 +116,7 @@ func (s *Service) checkQuestion(ctx context.Context, questionID, taskID string) 
 	// 4. 落库：检查结果、题目状态推进或淘汰删除、任务完成要么全部提交、要么全部回滚。
 	// AI 检查仅在题目首次创建时执行一次：通过则把草稿态推进为 ai_reviewed；
 	// 不通过时题目自动淘汰删除（不入题库），淘汰原因留档供生成页展示。
-	// 已通过检查（ai_reviewed）或进入人工流程的题目，即使之后被重新检查，
-	// 状态也不由 AI 检查改动——人工修改后的把关责任在专家审核环节。
+	// 人工修改后的把关责任在专家审核环节；系统不创建第二次 AI 检查。
 	if err := s.applyCheckOutcome(ctx, result, q, taskID); err != nil {
 		return nil, err
 	}

@@ -59,6 +59,41 @@ def pass_current_review(page):
     page.wait_for_timeout(700)
 
 
+def request_revision(page):
+    page.goto(BASE + "/review", wait_until="networkidle")
+    card = page.locator(".my-task-card").filter(has_text=stem_marker).first
+    card.wait_for(timeout=15000)
+    card.click()
+    page.locator(".review-form select").select_option("revision_required")
+    page.locator(".sc-field textarea").first.fill("请补充并修正题干表述")
+    page.get_by_role("button", name="提交审核", exact=True).click()
+    page.wait_for_timeout(700)
+
+
+def save_and_resubmit_revision(page, suffix_text):
+    page.goto(BASE + "/my-revisions", wait_until="networkidle")
+    card = page.locator(".revision-card").filter(has_text=stem_marker).first
+    card.wait_for(timeout=15000)
+    card.click()
+    textarea = page.locator(".edit-field textarea").first
+    textarea.fill(textarea.input_value() + suffix_text)
+    page.get_by_role("button", name="保存修改", exact=True).click()
+    page.locator(".toast.show").filter(has_text="修改已保存").wait_for(timeout=10000)
+    page.once("dialog", lambda dialog: dialog.accept())
+    page.get_by_role("button", name="按原流程重新送审", exact=True).click()
+    page.get_by_text("从原流程第一轮开始审核", exact=False).wait_for(timeout=10000)
+
+
+def finalize_approved(page):
+    page.goto(BASE + "/review-decisions", wait_until="networkidle")
+    decision = page.locator(".decision-card,.my-task-card").filter(has_text=stem_marker).first
+    decision.wait_for(timeout=15000)
+    decision.click()
+    page.locator(".finalize-form select").select_option("approved")
+    page.get_by_role("button", name="提交决断", exact=True).click()
+    page.wait_for_timeout(900)
+
+
 def main():
     user_id = ""
     with sync_playwright() as playwright:
@@ -154,17 +189,22 @@ def main():
             teacher.wait_for_function("document.querySelector('.todo-row[data-kind=\"review\"] strong')?.textContent.trim() === '1'", timeout=10000)
             assert int(todo_count.inner_text()) == 1, f"dashboard review count={todo_count.inner_text()}"
 
+            request_revision(teacher)
+            switch_role(teacher, "命题教师", "teacher")
+            save_and_resubmit_revision(teacher, "（按首次退修意见修改）")
+            switch_role(teacher, "审题老师", "expert")
             pass_current_review(teacher)
             pass_current_review(teacher)
+            finalize_approved(admin)
 
-            admin.goto(BASE + "/review-decisions", wait_until="networkidle")
-            decision = admin.locator(".decision-card,.my-task-card").filter(has_text=stem_marker).first
-            decision.wait_for(timeout=15000)
-            decision.click()
-            admin.locator(".finalize-form select").select_option("approved")
-            admin.get_by_role("button", name="提交决断", exact=True).click()
-            admin.wait_for_timeout(900)
-
+            switch_role(teacher, "命题教师", "teacher")
+            unpublish = admin.request.post(BASE + f"/api/questions/{question_id}/unpublish", headers=auth_headers(admin), data={"reason": "端到端撤回修订"})
+            assert unpublish.status == 200, unpublish.text()
+            save_and_resubmit_revision(teacher, "（正式题撤回后再次修改）")
+            switch_role(teacher, "审题老师", "expert")
+            pass_current_review(teacher)
+            pass_current_review(teacher)
+            finalize_approved(admin)
             switch_role(teacher, "命题教师", "teacher")
             result = teacher.request.get(
                 BASE + "/api/questions?page=1&page_size=20&tier=formal&scope=personal",
@@ -172,7 +212,8 @@ def main():
             )
             assert result.status == 200, result.text()
             assert any(q["id"] == question_id and q["status"] == "published" for q in result.json().get("questions", [])), result.text()
-            print("PASS | 无分类新题 → 两轮审核 → 最终决断 → 正式题库")
+            print("PASS | 首次新题 → 退修保存 → 原流程从第一轮重送 → 正式题库")
+            print("PASS | 正式题撤回 → 待我修改 → 原流程再次重送")
             print("PASS | 身份切换保留命题工作区，待审数字无需手动刷新")
             print("PASS | 新题微调未保存时离页拦截")
         finally:

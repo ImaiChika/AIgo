@@ -159,7 +159,7 @@ async function saveUser(u, patch) {
 
 async function deleteUser(u) {
   if (isProtectedUser(u)) return;
-  if (!confirm(`确定删除用户「${u.username}」？删除后该账号将无法登录，历史审核记录保留。`)) return;
+	if (!confirm(`确定删除用户「${u.username}」？仅当该账号没有个人题目、生成/批量任务、分享申请或审核流程引用时才能删除；否则请改为停用。`)) return;
   try {
     await api.deleteUser(u.id);
     users.value = users.value.filter((item) => item.id !== u.id);
@@ -190,7 +190,7 @@ onMounted(loadAll);
         </button>
       </div>
       <p class="permission-summary">
-        超级管理员仅保留一名；管理员负责业务管理。命题教师与审题老师的权限互斥，但同一账号可以同时挂载两种身份并在左下角切换当前身份。命题教师负责单题/批量出题和提交审核，审题老师只处理分配到的审核任务；批量推理仍是独立权限，命题教师模板默认包含，其他角色按需配置。
+	      超级管理员仅保留一名；管理员负责业务管理。命题教师与审题老师模板权限互斥，同一账号可挂载两种身份并在左下角切换。命题教师负责单题/批量出题和提交审核，审题老师只处理分配任务。直接勾选的权限属于账号级覆盖，会在所有身份下生效；双身份老师通常不要直接勾选出题或审题权限，以免绕过身份隔离。
       </p>
 
       <!-- 新建用户表单 -->
@@ -261,7 +261,7 @@ onMounted(loadAll);
                 </button>
               </td>
               <td>
-                <span class="perm-count">{{ (u.permissions || []).length }} 项有效权限</span>
+	            <span class="perm-count" title="该数字是账号全部身份与直接权限的并集；登录后当前身份显示的权限数可能更少">账号合计 {{ (u.permissions || []).length }} 项</span>
               </td>
               <td class="time-cell">{{ new Date(u.created_at).toLocaleString() }}</td>
               <td>
@@ -291,7 +291,7 @@ onMounted(loadAll);
                   </div>
 
                   <p class="matrix-note">
-                    角色决定“能做什么”；审题与最终决断的题目内容按审核任务分配开放。
+	              角色模板决定当前身份能力；这里直接勾选的是账号级覆盖权限，会对该账号所有身份生效。审题与最终决断的题目内容仍按审核任务分配开放。
                   </p>
                 </div>
               </td>

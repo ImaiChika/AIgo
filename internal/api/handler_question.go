@@ -25,6 +25,10 @@ import (
 // （生成 → 落库 → AI 检查 → 题库归纳 → 审计），进程重启后未完成运行可被接管。
 // 前端凭 run_id 轮询 GET /api/generation-runs/{id} 获取进度与已生成题目。
 func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
+	if s.aiCheckSvc == nil || !s.aiCheckSvc.AutomaticReady() {
+		writeError(w, http.StatusServiceUnavailable, "AI 质量检查服务未就绪，已停止出题；请联系管理员恢复后再试")
+		return
+	}
 	var req struct {
 		RunID            string `json:"run_id"` // 客户端生成的幂等运行 ID，用于刷新恢复
 		KnowledgePointID string `json:"knowledge_point_id"`
@@ -509,20 +513,19 @@ func (s *Server) handleUnpublishQuestion(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	q.Status = domain.StatusAIReviewed
-	q.UpdatedAt = time.Now()
 	note := "撤回已通过题目至 AI 检查通过状态"
 	if reason := strings.TrimSpace(req.Reason); reason != "" {
 		note += "：" + reason
 	}
 	actor := auth.GetUsername(r.Context())
-	unpublishCtx := storage.WithQuestionChange(r.Context(), storage.QuestionChange{Actor: actor, ChangeType: "unpublish", ChangeNote: note})
+	reviewerID := auth.GetUserID(r.Context())
+	reviewerName := actor
+	if user, userErr := s.authSvc.GetUserByID(reviewerID); userErr == nil && user != nil && strings.TrimSpace(user.DisplayName) != "" {
+		reviewerName = user.DisplayName
+	}
 	ok := s.withAuditedTx(w, r, "撤回题目",
 		func(txCtx context.Context) error {
-			if err := s.questionStore.SaveQuestion(unpublishCtx, *q); err != nil {
-				return fmt.Errorf("撤回失败: %w", err)
-			}
-			return nil
+			return s.reviewSvc.ReturnPublishedForRevision(txCtx, q.ID, reviewerID, reviewerName, note)
 		},
 		func(txCtx context.Context) error {
 			return s.auditSvc.Log(txCtx, q.ID, "unpublish", actor, note)
@@ -530,7 +533,8 @@ func (s *Server) handleUnpublishQuestion(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	writeJSON(w, 200, q)
+	updated, _ := s.questionStore.GetQuestion(r.Context(), id)
+	writeJSON(w, 200, updated)
 }
 
 // handleDeleteQuestion 删除题目。校验题库范围与题库分层：

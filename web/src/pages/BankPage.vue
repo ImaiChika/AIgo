@@ -9,10 +9,9 @@ import ReviewHistoryPanel from "../components/ReviewHistoryPanel.vue";
 const route = useRoute();
 
 // 权限判断。题目唯一来源是 AI 生成：无手动新建；编辑窗口仅限专家退回修改（待我修改页）。
-// AI 检查仅在首次生成时自动执行一次，本页不提供重新检查入口；强制通过/撤回按用户管理权限。
+// AI 检查仅在首次生成时自动执行一次；故障题阻断流程，不提供复检或强制通过。
 const canDelete = computed(() => hasPerm("question:delete"));
 const canDownload = computed(() => hasPerm("question:download"));
-const canForcePass = computed(() => hasPerm("user:manage"));
 const canUnpublish = computed(() => hasPerm("user:manage"));
 // 正式题库（已通过）为定稿密封区：删除需要专门权限（question:delete_formal）
 const canDeleteFormal = computed(() => hasPerm("question:delete_formal"));
@@ -103,8 +102,7 @@ const reviewInfo = ref(null); // { task, records }
 const reviewInfoLoading = ref(false);
 let questionSearchTicket = 0;
 
-// 强制通过：跳过 AI 检查门禁，草稿直接置为已检查（后端写审计留痕）
-const mutating = ref(false); // 强制通过/撤回/删除在途守卫，防重复事务
+const mutating = ref(false); // 撤回/删除在途守卫，防重复事务
 const canBatchShare = computed(() => !isGlobalScope.value && activeTier.value === 'formal' && hasPerm('question:share'));
 const shareDialog = ref(null);
 const shareDialogElement = ref(null);
@@ -165,35 +163,17 @@ async function submitBulkShare() {
   finally { mutating.value = false; }
 }
 
-async function forcePassSelected() {
-  const q = selectedQuestion.value;
-  if (!q) return;
-  if (mutating.value) return;
-  if (!confirm("确定跳过 AI 检查、强制将该题置为「已检查」？该操作会记录到审计日志。")) return;
-  mutating.value = true;
-  try {
-    const updated = await api.aiCheckOverride(q.id);
-    if (selectedQuestion.value?.id === q.id) selectedQuestion.value = updated;
-    showToast("已强制通过 AI 检查");
-    await loadQuestions(false);
-  } catch (e) {
-    showToast("强制通过失败: " + e.message);
-  } finally {
-    mutating.value = false;
-  }
-}
-
 // 管理员撤回已通过题目至 AI 检查通过状态
 async function unpublishSelected() {
   const q = selectedQuestion.value;
   if (!q) return;
   if (mutating.value) return;
-  if (!confirm("确定撤回该已通过题目？撤回后状态回到「已检查」，可修订后重新送审。该操作会记录到审计日志。")) return;
+	if (!confirm("确定撤回该已通过题目？题目将进入原出题人的「待我修改」，保存新版本后按原流程从第一轮重新审核。")) return;
   mutating.value = true;
   try {
     const updated = await api.unpublishQuestion(q.id, "题库页撤回修订");
     if (selectedQuestion.value?.id === q.id) selectedQuestion.value = updated;
-    showToast("已撤回至 AI 检查通过状态");
+	showToast("已撤回并进入原出题人的待我修改");
     await loadQuestions(false);
   } catch (e) {
     showToast("撤回失败: " + e.message);
@@ -640,16 +620,6 @@ onMounted(async () => {
         </span>
         <AICheckScoreButton :question-id="selectedQuestion.id" />
         <div class="edit-actions">
-          <button
-            v-if="!isGlobalScope && canForcePass && activeTier === 'working' && (selectedQuestion.status === 'ai_draft' || selectedQuestion.status === 'auto_checked')"
-            class="ghost-button ai-force-btn"
-            type="button"
-            title="跳过 AI 检查，直接置为已检查（写审计日志）"
-            :disabled="mutating"
-            @click="forcePassSelected"
-          >
-            {{ mutating ? "处理中..." : "强制通过" }}
-          </button>
           <button
             v-if="!isGlobalScope && canUnpublish && activeTier === 'formal' && selectedQuestion.status === 'published'"
             class="ghost-button ai-force-btn"

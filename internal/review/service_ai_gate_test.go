@@ -17,10 +17,14 @@ func TestSubmitRequiresAIReviewWhenEnabled(t *testing.T) {
 	svc.RequireAICheck = true
 	ctx := context.Background()
 
-	if err := questionStore.SaveQuestion(ctx, *testQuestion("bank-neike")); err != nil {
+	question := testQuestion("bank-neike")
+	question.Status = domain.StatusAIDraft
+	if err := questionStore.SaveQuestion(ctx, *question); err != nil {
 		t.Fatal(err)
 	}
-	if err := reviewStore.SaveFlowConfig(ctx, testFlow()); err != nil {
+	flow := testFlow()
+	flow.Rounds[0].ExpertIDs = []string{"r1"}
+	if err := reviewStore.SaveFlowConfig(ctx, flow); err != nil {
 		t.Fatal(err)
 	}
 
@@ -40,20 +44,24 @@ func TestSubmitRequiresAIReviewWhenEnabled(t *testing.T) {
 	}
 }
 
-// 强制前置关闭时保持历史兼容：ai_draft 可直接送审。
-func TestSubmitAllowsDraftWhenGateDisabled(t *testing.T) {
+// 即使旧配置关闭门禁，ai_draft 也不得绕过唯一一次 AI 检查。
+func TestSubmitStillRejectsDraftWhenLegacyGateFlagDisabled(t *testing.T) {
 	svc, reviewStore, questionStore := newTestService(
 		map[string][]string{"bank-neike": {"r1"}},
 		map[string]bool{"admin1": true},
 	)
 	ctx := context.Background()
-	if err := questionStore.SaveQuestion(ctx, *testQuestion("bank-neike")); err != nil {
+	question := testQuestion("bank-neike")
+	question.Status = domain.StatusAIDraft
+	if err := questionStore.SaveQuestion(ctx, *question); err != nil {
 		t.Fatal(err)
 	}
-	if err := reviewStore.SaveFlowConfig(ctx, testFlow()); err != nil {
+	flow := testFlow()
+	flow.Rounds[0].ExpertIDs = []string{"r1"}
+	if err := reviewStore.SaveFlowConfig(ctx, flow); err != nil {
 		t.Fatal(err)
 	}
-	if task, err := svc.SubmitQuestion(ctx, "q1", "flow-test"); err != nil || task == nil || task.ID == "" {
-		t.Fatalf("关闭强制前置时 ai_draft 应可提交审核: task=%+v err=%v", task, err)
+	if task, err := svc.SubmitQuestion(ctx, "q1", "flow-test"); err == nil || task != nil {
+		t.Fatalf("旧配置不得允许 ai_draft 绕过检查: task=%+v err=%v", task, err)
 	}
 }

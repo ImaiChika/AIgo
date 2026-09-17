@@ -73,7 +73,7 @@ func testQuestion(bankID string) *domain.A2Question {
 			{Label: "D", Text: "气胸"},
 		},
 		Answer:  "A",
-		Status:  domain.StatusAIDraft,
+		Status:  domain.StatusAIReviewed,
 		Version: 1,
 		BankIDs: []string{bankID},
 	}
@@ -139,7 +139,7 @@ func TestSubmitRejectsInvalidQuestion(t *testing.T) {
 		t.Fatalf("不合格题应被拒绝提交，实际错误: %v", err)
 	}
 	stored, _ := questionStore.GetQuestion(ctx, q.ID)
-	if stored.Status != domain.StatusAIDraft {
+	if stored.Status != domain.StatusAIReviewed {
 		t.Fatalf("拒绝提交后题目状态不应变化，实际 %s", stored.Status)
 	}
 	task, _ := reviewStore.GetTaskByQuestionID(ctx, q.ID)
@@ -220,8 +220,8 @@ func testFlow() domain.ReviewFlowConfig {
 			{
 				RoundNumber:   1,
 				Name:          "专家组审核",
-				ExpertIDs:     []string{}, // 自动匹配
-				RequiredCount: 0,          // 全部通过
+				ExpertIDs:     []string{"r1", "r2"},
+				RequiredCount: 0, // 全部通过
 			},
 		},
 	}
@@ -264,7 +264,8 @@ func TestOwnerUnclassifiedQuestionAdvancesAcrossAutoMatchedRounds(t *testing.T) 
 		t.Fatal(err)
 	}
 	flow := testFlow()
-	flow.Rounds = append(flow.Rounds, domain.RoundConfig{RoundNumber: 2, Name: "终审", RequiredCount: 1})
+	flow.Rounds[0].ExpertIDs = []string{"r1"}
+	flow.Rounds = append(flow.Rounds, domain.RoundConfig{RoundNumber: 2, Name: "终审", ExpertIDs: []string{"r1"}, RequiredCount: 1})
 	if err := reviewStore.SaveFlowConfig(ctx, flow); err != nil {
 		t.Fatal(err)
 	}
@@ -278,6 +279,82 @@ func TestOwnerUnclassifiedQuestionAdvancesAcrossAutoMatchedRounds(t *testing.T) 
 	task, _ = reviewStore.GetTask(ctx, task.ID)
 	if task.Status != domain.StatusReviewing || task.CurrentRound != 2 || task.SubmissionBankID != "" {
 		t.Fatalf("无分类多轮任务推进异常: %+v", task)
+	}
+}
+
+func TestRevisionResubmitRestartsOriginalFlowFromFirstRound(t *testing.T) {
+	svc, reviewStore, questionStore := newTestService(map[string][]string{"": {"r1", "r2"}}, map[string]bool{"admin1": true})
+	ctx := context.Background()
+	q := testQuestion("")
+	q.BankIDs = nil
+	q.Status = domain.StatusAIReviewed
+	if err := questionStore.SaveQuestion(ctx, *q); err != nil {
+		t.Fatal(err)
+	}
+	q.Version = 2
+	questionStore.ForceQuestionForTest(*q)
+	flow := testFlow()
+	flow.Rounds = []domain.RoundConfig{
+		{RoundNumber: 1, Name: "初审", ExpertIDs: []string{"r1"}, RequiredCount: 1},
+		{RoundNumber: 2, Name: "复审", ExpertIDs: []string{"r2"}, RequiredCount: 1},
+	}
+	if err := reviewStore.SaveFlowConfig(ctx, flow); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.ReviewTask{
+		ID: "revision-restart-task", QuestionID: q.ID, FlowID: flow.ID, CurrentRound: 2,
+		Status: domain.StatusRevisionRequired, AssignedTo: []string{"r2"}, QuestionVersion: 1, Attempt: 1,
+		RoundResults: []domain.RoundResult{
+			{RoundNumber: 1, Passed: true, ApprovedCount: 1},
+			{RoundNumber: 2, RevisionCount: 1, Reviews: []domain.ExpertReview{{ExpertID: "r2", Conclusion: domain.StatusRevisionRequired}}},
+		},
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	if err := reviewStore.SaveTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := svc.SubmitQuestionForOwner(ctx, q.ID, flow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.CurrentRound != 1 || restarted.Attempt != 2 || len(restarted.AssignedTo) != 1 || restarted.AssignedTo[0] != "r1" {
+		t.Fatalf("退修重提未从原流程第一轮开始: %+v", restarted)
+	}
+	for _, round := range restarted.RoundResults {
+		if round.Passed || len(round.Reviews) != 0 || round.ApprovedCount+round.RejectedCount+round.RevisionCount != 0 {
+			t.Fatalf("新一批次应清空全部轮次结果: %+v", restarted.RoundResults)
+		}
+	}
+}
+
+func TestReturnPublishedForRevisionEntersCreatorQueue(t *testing.T) {
+	svc, reviewStore, questionStore := newTestService(map[string][]string{"": {"r1"}}, map[string]bool{"admin1": true})
+	ctx := context.Background()
+	q := testQuestion("")
+	q.BankIDs = nil
+	q.Status = domain.StatusPublished
+	q.CreatedBy = "teacher"
+	if err := questionStore.SaveQuestion(ctx, *q); err != nil {
+		t.Fatal(err)
+	}
+	flow := testFlow()
+	flow.Rounds[0].ExpertIDs = []string{"r1"}
+	if err := reviewStore.SaveFlowConfig(ctx, flow); err != nil {
+		t.Fatal(err)
+	}
+	if err := reviewStore.SaveTask(ctx, domain.ReviewTask{
+		ID: "published-return-task", QuestionID: q.ID, FlowID: flow.ID, CurrentRound: 1,
+		Status: domain.StatusPublished, AssignedTo: []string{"r1"}, QuestionVersion: 1, Attempt: 1,
+		RoundResults: []domain.RoundResult{{RoundNumber: 1, Passed: true}}, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ReturnPublishedForRevision(ctx, q.ID, "admin1", "管理员", "修订医学表述"); err != nil {
+		t.Fatal(err)
+	}
+	items, err := svc.MyRevisions(ctx, "teacher")
+	if err != nil || len(items) != 1 || items[0].Modified || !strings.Contains(items[0].Reason, "修订医学表述") {
+		t.Fatalf("撤回题未进入原作者待我修改: items=%+v err=%v", items, err)
 	}
 }
 
@@ -476,7 +553,7 @@ func TestSubmitQuestionRollsBackWhenTaskSaveFails(t *testing.T) {
 		t.Fatal("任务写入失败时送审应失败")
 	}
 	storedQuestion, _ := questionStore.GetQuestion(ctx, "q1")
-	if storedQuestion.Status != domain.StatusAIDraft {
+	if storedQuestion.Status != domain.StatusAIReviewed {
 		t.Fatalf("送审回滚后题目应保持草稿，实际 %s", storedQuestion.Status)
 	}
 	tasks, _ := reviewStore.ListAllTasks(ctx)
@@ -625,7 +702,9 @@ func TestRejectedRoundTerminates(t *testing.T) {
 	ctx := context.Background()
 
 	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
-	svc.reviewStore.SaveFlowConfig(ctx, testFlow())
+	flow := testFlow()
+	flow.Rounds[0].ExpertIDs = []string{"r1", "r2", "r3"}
+	svc.reviewStore.SaveFlowConfig(ctx, flow)
 
 	task, err := svc.SubmitQuestion(ctx, "q1", "flow-test")
 	if err != nil {
@@ -877,6 +956,7 @@ func TestRoundRevisionPriorityOverRejection(t *testing.T) {
 	ctx := context.Background()
 	questionStore.SaveQuestion(ctx, *testQuestion("bank-neike"))
 	flow := testFlow()
+	flow.Rounds[0].ExpertIDs = []string{"r1", "r2", "r3"}
 	flow.Rounds[0].RequiredCount = 3
 	svc.reviewStore.SaveFlowConfig(ctx, flow)
 	task, _ := svc.SubmitQuestion(ctx, "q1", "flow-test")
@@ -1234,8 +1314,8 @@ func TestAutomaticReviewerRoutingIgnoresLegacyBankSnapshot(t *testing.T) {
 	}
 	flow := testFlow()
 	flow.Rounds = []domain.RoundConfig{
-		{RoundNumber: 1, Name: "初审", RequiredCount: 1},
-		{RoundNumber: 2, Name: "复审", RequiredCount: 1},
+		{RoundNumber: 1, Name: "初审", ExpertIDs: []string{"reviewer-a", "reviewer-b"}, RequiredCount: 1},
+		{RoundNumber: 2, Name: "复审", ExpertIDs: []string{"reviewer-a", "reviewer-b"}, RequiredCount: 1},
 	}
 	if err := reviewStore.SaveFlowConfig(ctx, flow); err != nil {
 		t.Fatal(err)
@@ -1290,8 +1370,39 @@ func TestConflictTaskLocksFlowConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	flow.Name = "不应生效的新名称"
-	if err := svc.UpdateFlow(ctx, flow); err == nil || !strings.Contains(err.Error(), "进行中的审核任务") {
-		t.Fatalf("待决断任务存在时不应允许修改流程，实际错误=%v", err)
+	if err := svc.UpdateFlow(ctx, flow); err == nil || !strings.Contains(err.Error(), "不可修改") {
+		t.Fatalf("流程创建后不应允许修改，实际错误=%v", err)
+	}
+}
+
+func TestDeleteFlowArchivesAfterTerminalTasksButBlocksActiveTasks(t *testing.T) {
+	svc, reviewStore, _ := newTestService(map[string][]string{"": {"r1"}}, map[string]bool{})
+	ctx := context.Background()
+	flow := testFlow()
+	flow.Rounds[0].ExpertIDs = []string{"r1"}
+	if err := reviewStore.SaveFlowConfig(ctx, flow); err != nil {
+		t.Fatal(err)
+	}
+	active := domain.ReviewTask{ID: "flow-active", QuestionID: "q-active", FlowID: flow.ID, Status: domain.StatusReviewing, QuestionVersion: 1}
+	if err := reviewStore.SaveTask(ctx, active); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteFlow(ctx, flow.ID); err == nil {
+		t.Fatal("进行中任务存在时不应删除流程")
+	}
+	active.Status = domain.StatusPublished
+	if err := reviewStore.UpdateTask(ctx, active); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteFlow(ctx, flow.ID); err != nil {
+		t.Fatalf("终态任务存在时应允许从当前流程列表删除: %v", err)
+	}
+	if listed, _ := svc.ListFlows(ctx); len(listed) != 0 {
+		t.Fatalf("已删除流程仍出现在可用列表: %+v", listed)
+	}
+	stored, _ := reviewStore.GetFlowConfig(ctx, flow.ID)
+	if stored == nil || !stored.Archived {
+		t.Fatal("删除流程应保留归档配置供历史任务和原流程重提")
 	}
 }
 

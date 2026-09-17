@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { api } from "../api.js";
 
 const toast = ref("");
@@ -8,7 +8,12 @@ const reviewers = ref([]); // 有审题权限的用户（流程选审核人用�
 const users = ref([]); // 用户账号列表（把关人名映射）
 const loading = ref(false);
 const showCreate = ref(false);
-const editingFlowId = ref(""); // 非空表示编辑模式
+const flowQuery = ref("");
+const visibleFlows = computed(() => {
+	const keyword = flowQuery.value.trim().toLowerCase();
+	if (!keyword) return flows.value;
+	return flows.value.filter((flow) => `${flow.name} ${flow.description || ""}`.toLowerCase().includes(keyword));
+});
 
 const form = ref({
   id: "",
@@ -17,7 +22,7 @@ const form = ref({
   vote_rule: "",
   final_reviewer_ids: [],
   rounds: [
-    { round_number: 1, name: "专家组审核", expert_ids: [], required_count: 0, can_modify: false, pass_condition: "" },
+	  { round_number: 1, name: "专家组审核", expert_ids: [], required_count: 1, can_modify: false, pass_condition: "" },
   ],
 });
 
@@ -68,10 +73,9 @@ function resetForm() {
     vote_rule: "",
     final_reviewer_ids: [],
     rounds: [
-      { round_number: 1, name: "专家组审核", expert_ids: [], required_count: 0, can_modify: false, pass_condition: "" },
+	    { round_number: 1, name: "专家组审核", expert_ids: [], required_count: 1, can_modify: false, pass_condition: "" },
     ],
   };
-  editingFlowId.value = "";
 }
 
 function addRound() {
@@ -80,7 +84,7 @@ function addRound() {
     round_number: num,
     name: `第${num}轮审核`,
     expert_ids: [],
-    required_count: 0,
+	  required_count: 1,
     can_modify: false,
     pass_condition: "",
   });
@@ -111,33 +115,22 @@ function toggleFinalReviewer(userId) {
   else form.value.final_reviewer_ids.push(userId);
 }
 
-// 回填表单进入编辑模式
-function startEditFlow(flow) {
-  editingFlowId.value = flow.id;
-  form.value = {
-    id: flow.id,
-    name: flow.name,
-    description: flow.description || "",
-    vote_rule: flow.vote_rule || "",
-    final_reviewer_ids: [...(flow.final_reviewer_ids || [])],
-    rounds: (flow.rounds || []).map((r) => ({
-      round_number: r.round_number,
-      name: r.name,
-      expert_ids: [...(r.expert_ids || [])],
-      required_count: r.required_count || 0,
-      can_modify: !!r.can_modify,
-      pass_condition: r.pass_condition || "",
-    })),
-  };
-  showCreate.value = true;
-}
-
 function validateForm() {
   if (!form.value.name.trim()) {
     showToast("流程名称不能为空");
-    return false;
-  }
-  return true;
+	    return false;
+	  }
+	  for (const round of form.value.rounds) {
+	    if (!(round.expert_ids || []).length) {
+	      showToast(`第 ${round.round_number} 轮必须选择至少一名审题老师`);
+	      return false;
+	    }
+	    if (round.required_count > round.expert_ids.length) {
+	      showToast(`第 ${round.round_number} 轮通过票数不能超过审核人数`);
+	      return false;
+	    }
+	  }
+	  return true;
 }
 
 const savingFlow = ref(false);
@@ -159,18 +152,13 @@ async function submitFlow() {
 
   savingFlow.value = true;
   try {
-    if (editingFlowId.value) {
-      await api.updateFlow(editingFlowId.value, flow);
-      showToast("修改成功");
-    } else {
-      await api.createFlow(flow);
-      showToast("创建成功");
-    }
+	    await api.createFlow(flow);
+	    showToast("创建成功；流程创建后不可修改，需要调整时请删除并新建");
     showCreate.value = false;
     resetForm();
     loadFlows();
   } catch (e) {
-    showToast(`${editingFlowId.value ? "修改" : "创建"}失败: ` + e.message);
+	    showToast("创建失败: " + e.message);
   } finally {
     savingFlow.value = false;
   }
@@ -179,7 +167,7 @@ async function submitFlow() {
 const deletingFlowId = ref("");
 
 async function deleteFlow(flow) {
-  if (!confirm(`确定删除流程：${flow.name}？`)) return;
+	if (!confirm(`确定删除流程“${flow.name}”？有进行中任务时禁止删除；已有历史任务仍保留原流程快照。`)) return;
   if (deletingFlowId.value) return; // 在途防重复提交
   deletingFlowId.value = flow.id;
   try {
@@ -200,13 +188,12 @@ function expertName(id) {
   return r ? r.display_name || r.username : id;
 }
 
-// 该流程自动匹配到的审题人摘要
 function matchedReviewers(flow) {
   const firstRound = (flow.rounds || [])[0];
   if (firstRound && (firstRound.expert_ids || []).length) {
     return firstRound.expert_ids.map(expertName).join("、");
   }
-  return "按审题权限自动匹配审题老师";
+	  return "未配置（不可用）";
 }
 
 function userName(id) {
@@ -231,17 +218,18 @@ onMounted(() => {
         <button class="primary-button" type="button" @click="showCreate = !showCreate; resetForm()">
           {{ showCreate ? "取消" : "+ 新建流程" }}
         </button>
-      </div>
+	    </div>
+	    <div class="flow-search-row"><input v-model="flowQuery" type="search" placeholder="搜索流程名称或描述" /></div>
 
-      <!-- 创建/编辑表单 -->
+	      <!-- 创建表单：流程创建后不可修改 -->
       <div v-if="showCreate" class="create-form">
         <div class="form-heading-row">
-          <h3>{{ editingFlowId ? "编辑流程" : "新建流程" }}</h3>
+	          <h3>新建流程</h3>
         </div>
         <div class="form-row">
           <div class="field">
             <label>流程名称 *</label>
-            <input v-model="form.name" placeholder="如：内科题库审核流程" />
+	          <input v-model="form.name" placeholder="如：临床医学双轮审核" />
           </div>
           <div class="field">
             <label>描述</label>
@@ -302,7 +290,7 @@ onMounted(() => {
               </div>
             </div>
             <div class="expert-select">
-              <label>审核人（不选则自动匹配当前可用的审题老师）</label>
+	              <label>审核人 *（每轮至少选择一名）</label>
               <div class="expert-chips">
                 <button
                   v-for="r in reviewers"
@@ -327,7 +315,7 @@ onMounted(() => {
 
         <div class="form-actions">
           <button class="primary-button" type="button" :disabled="savingFlow" @click="submitFlow">
-            {{ savingFlow ? "保存中..." : (editingFlowId ? "保存修改" : "创建流程") }}
+	          {{ savingFlow ? "创建中..." : "创建流程" }}
           </button>
           <button class="ghost-button" type="button" @click="showCreate = false; resetForm()">取消</button>
         </div>
@@ -335,20 +323,19 @@ onMounted(() => {
 
       <!-- 流程列表 -->
       <div v-if="loading" class="loading">加载中...</div>
-      <div v-else class="flow-list">
-        <div v-for="flow in flows" :key="flow.id" class="flow-card">
+	      <div v-else class="flow-list">
+	        <div v-for="flow in visibleFlows" :key="flow.id" class="flow-card">
           <div class="flow-header">
             <div>
               <strong>{{ flow.name }}</strong>
             </div>
-            <div class="flow-actions">
-              <button class="edit-btn" type="button" @click="startEditFlow(flow)" title="编辑">编辑</button>
-              <button class="delete-btn" type="button" :disabled="deletingFlowId === flow.id" @click="deleteFlow(flow)" title="删除">×</button>
+	          <div class="flow-actions">
+	            <button class="delete-btn" type="button" :disabled="deletingFlowId === flow.id" @click="deleteFlow(flow)" title="删除">×</button>
             </div>
           </div>
           <p v-if="flow.description" class="flow-desc">{{ flow.description }}</p>
           <p class="flow-meta">
-            题目提交后按审核流程和审题权限自动分配
+	          流程创建后不可修改；需要调整请删除并新建
             <span v-if="flow.vote_rule === 'veto'" class="rule-tag veto">一票否决</span>
             <span v-else class="rule-tag">通过票数推进</span>
             <span v-if="(flow.final_reviewer_ids || []).length">
@@ -364,7 +351,7 @@ onMounted(() => {
               <span class="round-num">第{{ round.round_number }}轮</span>
               <span class="round-name">{{ round.name }}</span>
               <span class="round-experts">
-                {{ (round.expert_ids || []).length ? round.expert_ids.map(expertName).join(", ") : "自动匹配审题人" }}
+	              {{ (round.expert_ids || []).map(expertName).join(", ") }}
               </span>
               <span class="round-req">
                 {{ round.required_count ? `需${round.required_count}票通过` : "全票通过" }}
@@ -372,7 +359,7 @@ onMounted(() => {
             </div>
           </div>
         </div>
-        <div v-if="!flows.length" class="empty">暂无审核流程，点击上方「新建流程」创建</div>
+	        <div v-if="!visibleFlows.length" class="empty">{{ flows.length ? "未找到匹配流程" : "暂无审核流程，点击上方「新建流程」创建" }}</div>
       </div>
     </section>
   </div>
@@ -385,6 +372,8 @@ onMounted(() => {
   max-width: 100%;
   min-width: 0;
 }
+.flow-search-row { margin: 0 0 14px; }
+.flow-search-row input { width: min(360px, 100%); height: 38px; box-sizing: border-box; border: 1px solid #dce6f1; border-radius: 7px; padding: 0 12px; color: #24344b; background: #fff; }
 
 .create-form {
   padding: 20px;

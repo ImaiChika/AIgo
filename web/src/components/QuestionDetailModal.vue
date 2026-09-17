@@ -1,7 +1,6 @@
 <script setup>
 import { ref, computed, watch, onBeforeUnmount } from "vue";
 import { api } from "../api.js";
-import { hasPerm } from "../auth.js";
 
 const props = defineProps({
   question: { type: Object, default: null },
@@ -10,21 +9,13 @@ const emit = defineEmits(["close", "refresh"]);
 
 const aiResult = ref(null);
 const aiTask = ref(null); // 检查任务状态快照（排队/执行中/耗尽）
-const aiChecking = ref(false);
-const overridden = ref(false); // 本会话内已强制通过
 let taskTimer = null;
-// AI 检查自动执行、不设独立权限点：重新检查按题目编辑权限，强制通过与送审一致按用户管理权限
-const canRecheck = computed(() => hasPerm("question:edit"));
-const canForcePass = computed(() => hasPerm("user:manage"));
-
-const effectiveStatus = computed(() => (overridden.value ? "ai_reviewed" : props.question?.status));
 
 watch(
   () => props.question,
   async (q) => {
     aiResult.value = null;
     aiTask.value = null;
-    overridden.value = false;
     stopTaskPolling();
     if (q && q.id) {
       try {
@@ -73,36 +64,6 @@ async function refreshAITask(questionId) {
         }
       } catch (e) { /* 下一轮重试 */ }
     }, 5000);
-  }
-}
-
-async function recheckAI() {
-  if (!props.question || aiChecking.value) return;
-  aiChecking.value = true;
-  try {
-    await api.aiCheckAsync([props.question.id]);
-    await refreshAITask(props.question.id);
-  } catch (e) {
-    console.warn("AI 检查提交失败", e);
-  } finally {
-    aiChecking.value = false;
-  }
-}
-
-// 强制通过：跳过 AI 检查门禁，把草稿直接置为已检查（后端写审计留痕）
-async function forcePassAI() {
-  if (!props.question || overridden.value) return;
-  if (!confirm("确定跳过 AI 检查、强制将该题置为「已检查」？该操作会记录到审计日志。")) return;
-  aiChecking.value = true;
-  try {
-    await api.aiCheckOverride(props.question.id);
-    overridden.value = true;
-    stopTaskPolling();
-    emit("refresh");
-  } catch (e) {
-    console.warn("强制通过失败", e);
-  } finally {
-    aiChecking.value = false;
   }
 }
 
@@ -186,7 +147,7 @@ function difficultyText(d) {
         <span v-if="question.system" class="q-param"><label>系统</label>{{ question.system }}</span>
         <span v-if="question.difficulty" class="q-param"><label>难度</label>{{ difficultyText(question.difficulty) }}</span>
         <span v-if="question.cognitive_level" class="q-param"><label>认知层次</label>{{ question.cognitive_level }}</span>
-        <span class="q-param"><label>状态</label><b :class="statusClass(effectiveStatus)">{{ statusText(effectiveStatus) }}</b></span>
+	      <span class="q-param"><label>状态</label><b :class="statusClass(question.status)">{{ statusText(question.status) }}</b></span>
         <span class="q-param"><label>版本</label>v{{ question.version }}</span>
       </div>
 
@@ -235,16 +196,10 @@ function difficultyText(d) {
         <div class="q-ai-head">
           <label>AI 检查结果</label>
           <span v-if="aiResult" class="q-ai-verdict" :class="aiVerdictClass">
-            {{ aiVerdictText }}<template v-if="aiStale">（内容已修改，结果待复检）</template>
+	          {{ aiVerdictText }}<template v-if="aiStale">（首次生成检查结果；人工修改后不复检）</template>
           </span>
           <span v-else-if="aiTaskRunning" class="q-ai-verdict ai-warn">{{ aiTaskLabel }}</span>
           <span v-else-if="aiTaskExhausted" class="q-ai-verdict ai-reject">检查异常（已重试 {{ aiTask.attempts }} 次）</span>
-          <button v-if="canRecheck && (aiTaskExhausted || aiStale)" class="q-ai-recheck" type="button" :disabled="aiChecking" @click="recheckAI">
-            {{ aiChecking ? "提交中…" : "重新检查" }}
-          </button>
-          <button v-if="canForcePass && !overridden && (question.status === 'ai_draft' || question.status === 'auto_checked')" class="q-ai-recheck q-ai-force" type="button" :disabled="aiChecking" @click="forcePassAI">
-            强制通过
-          </button>
         </div>
         <p v-if="aiTaskExhausted && aiTask.last_error" class="q-ai-error">失败原因：{{ aiTask.last_error }}</p>
         <template v-if="aiResult">

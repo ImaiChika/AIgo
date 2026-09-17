@@ -1,5 +1,6 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { onBeforeRouteLeave } from "vue-router";
 import { api } from "../api.js";
 import AICheckScoreButton from "../components/AICheckScoreButton.vue";
 
@@ -9,9 +10,26 @@ const loading = ref(false);
 const selected = ref(null); // 当前编辑的条目
 const editForm = ref({ clinical_stem: "", options: [], answer: "", explanation: "", change_reason: "" });
 const saving = ref(false);
+const submitting = ref(false);
+const selectedIds = ref(new Set());
 const statusFilter = ref(""); // ""=全部 / pending=待修改 / done=已提交修改
 // 保存被送审格式校验拒绝时的明确弹窗：内容较长，不能用 3 秒 toast 一闪而过
 const errorDialog = ref("");
+const selectedDirty = computed(() => {
+  if (!selected.value) return false;
+  return JSON.stringify(editPayload(editForm.value)) !== JSON.stringify(editPayload(selected.value.question));
+});
+const readyItems = computed(() => items.value.filter((item) => item.modified));
+const selectedCount = computed(() => selectedIds.value.size);
+
+function editPayload(question) {
+  return {
+    clinical_stem: question?.clinical_stem || "",
+    options: (question?.options || []).map((o) => ({ label: o.label, text: o.text })),
+    answer: question?.answer || "",
+    explanation: question?.explanation || "",
+  };
+}
 
 function showToast(msg) {
   toast.value = msg;
@@ -38,7 +56,9 @@ async function load() {
   loading.value = true;
   try {
     const data = await api.myRevisions();
-    items.value = data.items || [];
+	    items.value = data.items || [];
+	    const readyIDs = new Set(items.value.filter((item) => item.modified).map((item) => item.question.id));
+	    selectedIds.value = new Set([...selectedIds.value].filter((id) => readyIDs.has(id)));
     applyFilter();
     // 当前编辑条目若已不在列表中则清空
     if (selected.value && !items.value.some((it) => it.task.id === selected.value.task.id)) {
@@ -52,6 +72,10 @@ async function load() {
 }
 
 function selectItem(item) {
+	if (selectedDirty.value && selected.value?.task.id !== item.task.id) {
+	  showToast("当前题目有未保存修改，请先保存或撤销后再切换");
+	  return;
+	}
   selected.value = item;
   const q = item.question;
   editForm.value = {
@@ -63,9 +87,8 @@ function selectItem(item) {
   };
 }
 
-async function submitRevision() {
-  if (!selected.value) return;
-  if (!confirm("确认按退修意见修改完成？提交后将回库等待管理员重新送审（无需 AI 检查）。")) return;
+async function saveRevision() {
+  if (!selected.value || !selectedDirty.value) return;
   saving.value = true;
   try {
     const data = await api.updateQuestion(selected.value.question.id, {
@@ -75,7 +98,7 @@ async function submitRevision() {
       explanation: editForm.value.explanation,
       change_reason: editForm.value.change_reason || "按审核退修意见修改",
     });
-    showToast("修改已提交，等待管理员重新送审");
+	showToast("修改已保存，现在可以按原流程重新提交审核");
     await load();
     // 更新选中条目为最新题目
     const found = items.value.find((it) => it.task.id === selected.value?.task.id);
@@ -91,26 +114,77 @@ async function submitRevision() {
   }
 }
 
-onMounted(load);
+function toggleSelected(item) {
+  if (!item.modified || submitting.value) return;
+  const next = new Set(selectedIds.value);
+  next.has(item.question.id) ? next.delete(item.question.id) : next.add(item.question.id);
+  selectedIds.value = next;
+}
+
+function toggleAllReady() {
+  const next = new Set(selectedIds.value);
+  const all = readyItems.value.length > 0 && readyItems.value.every((item) => next.has(item.question.id));
+  readyItems.value.forEach((item) => all ? next.delete(item.question.id) : next.add(item.question.id));
+  selectedIds.value = next;
+}
+
+async function resubmit(ids) {
+  if (selectedDirty.value) return showToast("当前题目有未保存修改，请先保存");
+  const ready = [...new Set(ids)].filter((id) => items.value.some((item) => item.question.id === id && item.modified));
+  if (!ready.length) return showToast("请先选择已经保存修改的题目");
+  if (!confirm(`确定将 ${ready.length} 道题按各自原审核流程从第一轮重新提交吗？`)) return;
+  submitting.value = true;
+  try {
+    const result = await api.resubmitRevisions(ready);
+    const failed = result.failed || [];
+    if (failed.length) {
+      errorDialog.value = failed.map((item) => `${item.question_id}：${item.error}`).join("\n");
+    } else {
+      showToast(`已重新提交 ${result.submitted} 道题，从原流程第一轮开始审核`);
+    }
+    selectedIds.value = new Set();
+    selected.value = null;
+    await load();
+  } catch (e) {
+    errorDialog.value = e.message || "重新提交审核失败";
+  } finally {
+    submitting.value = false;
+  }
+}
+
+function warnBeforeUnload(event) {
+  if (!selectedDirty.value) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
+
+onBeforeRouteLeave(() => !selectedDirty.value || confirm("当前题目有未保存修改，确定离开并放弃吗？"));
+
+onMounted(() => { window.addEventListener("beforeunload", warnBeforeUnload); load(); });
+onBeforeUnmount(() => window.removeEventListener("beforeunload", warnBeforeUnload));
 </script>
 
 <template>
   <div class="revisions-layout">
     <!-- 左侧：退回给我的题目列表 -->
-    <section class="panel revisions-list-panel">
-      <div class="section-heading">
+	    <section class="panel revisions-list-panel">
+	      <div class="section-heading">
         <span class="dot blue"></span>
         <h2>待我修改</h2>
-        <small>{{ items.length }} 项</small>
-      </div>
+	        <small>{{ items.length }} 项</small>
+	        <button class="primary-button" type="button" :disabled="!selectedCount || submitting || selectedDirty" @click="resubmit([...selectedIds])">
+	          {{ submitting ? "提交中..." : `批量重新送审${selectedCount ? `（${selectedCount}）` : ""}` }}
+	        </button>
+	      </div>
 
-      <div class="filter-row">
+	      <div class="filter-row">
         <select v-model="statusFilter" @change="applyFilter">
           <option value="">全部</option>
           <option value="pending">待修改</option>
           <option value="done">已提交修改</option>
         </select>
-        <button class="ghost-button compact-button" type="button" @click="load">刷新</button>
+	        <button class="ghost-button compact-button" type="button" @click="load">刷新</button>
+	        <label class="ready-select-all"><input type="checkbox" :checked="readyItems.length > 0 && readyItems.every((item) => selectedIds.has(item.question.id))" @change="toggleAllReady" /> 全选已保存</label>
       </div>
 
       <div v-if="loading" class="loading">加载中...</div>
@@ -128,18 +202,19 @@ onMounted(load);
           tabindex="0"
           @click="selectItem(item)"
           @keydown.enter="selectItem(item)"
-        >
+	        >
+	          <input class="revision-checkbox" type="checkbox" :checked="selectedIds.has(item.question.id)" :disabled="!item.modified || submitting" title="保存修改后才可选择重送审" @click.stop @change="toggleSelected(item)" />
           <div class="rc-head">
             <span class="rc-flow">{{ item.task.flow_id }}</span>
             <span class="rc-round">第 {{ item.task.current_round }} 轮</span>
             <span class="rc-version">送审 v{{ item.task.question_version }} · 当前 v{{ item.question.version }}</span>
             <span class="rc-state" :class="item.modified ? 'done' : 'pending'">
-              {{ item.modified ? "已提交修改" : "待修改" }}
+	              {{ item.modified ? "已保存修改" : "待修改" }}
             </span>
           </div>
           <div class="rc-stem">{{ (item.question.clinical_stem || "").slice(0, 55) }}{{ (item.question.clinical_stem || "").length > 55 ? "..." : "" }}</div>
           <div v-if="revisionReason(item)" class="rc-reason">退修意见：{{ revisionReason(item).slice(0, 60) }}{{ revisionReason(item).length > 60 ? "..." : "" }}</div>
-          <div class="rc-action">{{ item.modified ? "查看 / 继续修改 →" : "去修改 →" }}</div>
+	          <div class="rc-action">{{ item.modified ? "可重新送审 · 查看 / 继续修改 →" : "去修改 →" }}</div>
         </div>
       </div>
     </section>
@@ -150,7 +225,7 @@ onMounted(load);
         <span class="dot blue"></span>
         <h2>按退修意见修改</h2>
         <span class="rc-state" :class="selected.modified ? 'done' : 'pending'">
-          {{ selected.modified ? "已提交修改，等待管理员重新送审" : "待修改" }}
+	          {{ selected.modified ? "已保存修改，可按原流程重新送审" : "待修改" }}
         </span>
         <AICheckScoreButton :question-id="selected.question.id" />
       </div>
@@ -195,11 +270,14 @@ onMounted(load);
       </div>
 
       <div class="submit-row">
-        <button class="primary-button" type="button" :disabled="saving" @click="submitRevision">
-          {{ saving ? "提交中..." : "提交修改" }}
-        </button>
-      </div>
-      <p class="submit-hint">提交修改后题目回库等待管理员重新送审，无需 AI 检查。</p>
+	        <button class="primary-button" type="button" :disabled="saving || submitting || !selectedDirty" @click="saveRevision">
+	          {{ saving ? "保存中..." : "保存修改" }}
+	        </button>
+	        <button class="primary-button secondary" type="button" :disabled="saving || submitting || selectedDirty || !selected.modified" @click="resubmit([selected.question.id])">
+	          {{ submitting ? "提交中..." : "按原流程重新送审" }}
+	        </button>
+	      </div>
+	      <p class="submit-hint">必须先保存产生新版本，之后按原流程从第一轮重新审核；人工修改不触发 AI 复检。</p>
     </section>
 
     <section v-else class="panel empty-panel">
@@ -210,9 +288,9 @@ onMounted(load);
   <!-- 送审格式校验失败弹窗：逐条对照修改后才能提交 -->
   <div v-if="errorDialog" class="error-overlay" role="alertdialog" aria-modal="true" aria-labelledby="revision-error-title">
     <div class="error-modal">
-      <h3 id="revision-error-title">保存失败，未通过送审格式校验</h3>
+	    <h3 id="revision-error-title">操作未完成</h3>
       <p class="error-message">{{ errorDialog }}</p>
-      <p class="error-hint">请按上方意见和该提示修改题目内容后重新提交；修改完成前管理员无法重新送审。</p>
+	      <p class="error-hint">请按上方意见修改并保存新版本，再按原流程重新送审。</p>
       <div class="error-actions">
         <button class="primary-button" type="button" @click="errorDialog = ''">知道了，去修改</button>
       </div>
@@ -305,6 +383,7 @@ onMounted(load);
 }
 
 .revision-card {
+	position: relative;
   border: 2px solid #dce8f7;
   border-radius: 10px;
   padding: 10px 12px;
@@ -312,6 +391,8 @@ onMounted(load);
   cursor: pointer;
   transition: all 0.15s;
 }
+.revision-checkbox { position: absolute; top: 12px; right: 12px; }
+.ready-select-all { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; color: #52647a; font-size: 12px; }
 
 .revision-card:hover {
   border-color: #1385f8;
