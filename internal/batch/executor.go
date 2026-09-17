@@ -32,6 +32,7 @@ type Executor interface {
 	GetJobStatus(ctx context.Context, jobID string) (*BatchJob, error)
 	ListJobs(ctx context.Context, name, status string, limit int) ([]BatchJob, error)
 	ImportResults(ctx context.Context, jobID string, points []domain.KnowledgePoint) (*ImportResult, error)
+	RetryFailed(ctx context.Context, jobID string) (*BatchJob, error)
 	Capabilities() Capabilities
 }
 
@@ -71,6 +72,10 @@ type ImportItem struct {
 	Count       int    `json:"count"`        // 导入题目数
 	Status      string `json:"status"`       // "ok" / "failed"
 	Error       string `json:"error"`        // 失败原因
+
+	// question 是执行期携带的生成结果（成功项），仅存活于任务执行队列内存，
+	// 不随 OutputJSON 序列化（导入时的入库数据以序列化快照为准）。
+	question domain.A2Question
 }
 
 // batchPointID 返回任务内知识点的稳定标识：历史大纲（无版本）按大纲代码，
@@ -121,5 +126,9 @@ func (e *UnavailableExecutor) ListJobs(context.Context, string, string, int) ([]
 }
 
 func (e *UnavailableExecutor) ImportResults(context.Context, string, []domain.KnowledgePoint) (*ImportResult, error) {
+	return nil, e.unavailable()
+}
+
+func (e *UnavailableExecutor) RetryFailed(context.Context, string) (*BatchJob, error) {
 	return nil, e.unavailable()
 }

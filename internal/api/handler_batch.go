@@ -294,6 +294,43 @@ func (s *Server) handleBatchDownload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, result)
 }
 
+// handleBatchRetryFailed 重跑任务中的失败生成单元。
+// 仅任务所有者可在结果导入前调用；任务转回 in_progress 后按既有轮询与
+// 自动导入流程继续。受全局并发上限约束，与正常执行共享同一队列。
+func (s *Server) handleBatchRetryFailed(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("jobId")
+	if jobID == "" {
+		writeError(w, 400, "缺少 job_id")
+		return
+	}
+	job, statusErr := s.batchSvc.GetJobStatus(r.Context(), jobID)
+	if statusErr != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(statusErr, batch.ErrUnavailable) {
+			status = http.StatusServiceUnavailable
+		}
+		writeError(w, status, "查询批量任务失败: "+statusErr.Error())
+		return
+	}
+	if job == nil || job.OwnerID == "" || job.OwnerID != auth.GetUserID(r.Context()) {
+		writeError(w, http.StatusForbidden, "无权重跑其他用户的批量任务")
+		return
+	}
+	retried, err := s.batchSvc.RetryFailed(r.Context(), jobID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, batch.ErrUnavailable):
+			status = http.StatusServiceUnavailable
+		case errors.Is(err, batch.ErrNotReady):
+			status = http.StatusConflict
+		}
+		writeError(w, status, "重跑失败: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, retried)
+}
+
 func (s *Server) canAccessBatchJob(r *http.Request, job *batch.BatchJob) bool {
 	if job == nil {
 		return false

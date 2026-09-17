@@ -268,6 +268,72 @@ AIGO_TEST_POSTGRES_DSN 跑真实 PostgreSQL 集成测试；本地不设该变量
 19.【/api/review/reviewers 收紧权限】（server.go:228 登录即可枚举审题人名单 →
     至少要求 review:do / review:final / flow:manage 之一）。
 
+--------------------------------------------------------------------------------
+第七批：全流程 debug 测试新发现（2026-09-17，本地+服务器同构建 ed16876
+复核；已完成项复核全部通过，以下均为新问题）
+--------------------------------------------------------------------------------
+
+20.【分享批准后题目永久冻结】P1
+    问题：published 题的分享被批准（approved）后，unpublish 与 delete 均被
+        questionShare 守卫 409 拦截（handler_question.go），文案要求"先完成
+        或结束分享申请"；但分享已审批后 /question-shares/{id}/review 返回
+        "已经审批，不能重复处理"，全系统无任何结束/撤下分享的接口——题目
+        从此不能撤回修订、不能删除，唯一出路是改库，与 4.4"正式题库仅允许
+        自动入库与权限者删除/撤回"冲突。
+    修法：决断产品语义后实现其一：①允许管理员"结束/撤下"已批准分享（审计
+        留痕，题目回流个人正式库，全局库同步下架）；②批准后的分享不再阻断
+        unpublish/delete。同步修正 409 文案不再指向不存在的操作。
+    验收：批准分享后撤回（unpublish→待我修改）与删除（归档）两条路至少
+        一条可走通，全局库该题同步下架；pending 分享维持现有 409 阻断不变。
+
+21.【归档流程仍锁死其审核人/把关人】P2
+    问题：删除流程（无进行中任务，归档成功）后，其 expert_ids/
+        final_reviewer_ids 内用户仍不能删除、停用、收回审题/把关权限，409
+        文案指向已无法调整的流程。根因：UserAssignmentReferences 遍历
+        ListFlowConfigs（review/service.go:284），SQL 不过滤 archived
+        （store.go:1321）。
+    修法：UserAssignmentReferences 跳过 archived 流程（进行中任务另有独立
+        检查，不受影响）。
+    验收：建流程引用用户X→删除流程→X 可正常删除/停用/收权；仍有进行中
+        任务引用时维持 409。
+
+22.【view_all 账号"我的题库"口径互相矛盾】P2（扩展原 P2-10/待办 15）
+    问题：同一 admin 账号同一时刻：我的数据页"我的题库"= questions 接口
+        scope=personal（view_all 放大为全系统，MyDashboardPage.vue:94-97，
+        页面无任何提示横幅）；生成/批量页侧栏"个人题库"= stats 接口
+        scope=personal（按 owner 隔离）。两个接口的 personal 语义不同，
+        同一概念两套数字（实测 4848 vs 3）。
+    修法：先决断 personal 语义（按 owner 或按 view_all 放大），统一 stats
+        与 questions 两接口及页面口径；至少给 MyDashboardPage 补与
+        BankPage 一致的 view_all 横幅。
+    验收：admin 的我的数据页与生成页侧栏数字可互相印证；无 view_all 用户
+        行为不变。
+
+23.【个人范围导出他人题必失败】P2
+    问题：admin 在题库页"我的题库"标签勾选他人 published 题（view_all
+        可见可选）点导出 → 400"没有可导出的题目"。根因：
+        matchesQuestionExportScope 对 personal 严格限定 owner
+        （handler_export.go:187-193），而 BankPage 固定传
+        scope=questionScope（BankPage.vue:274/305）——看得见、选得上、
+        导不出。不带 scope 时 admin 可正常导出同一题。
+    修法：导出 personal 范围对持有 view_all+download 的调用者放行；或前端
+        在个人标签下对非本人题禁选并提示。
+    验收：admin 个人题库标签勾选他人 published 题导出成功（或被明确禁选
+        并提示）；teacher 导出本人题、无权限导出 403 行为不变。
+
+24.【送审不存在题目返回 500】P3
+    问题：POST /api/review/submit 传不存在的 question_id → 500"题目不存在"
+        （GetQuestion 的 not-found 落进 handler_review.go 通用 500 分支）；
+        GET /api/questions/{id} 同场景为正确的 404。
+    修法：该分支按 not-found 映射 404。
+    验收：submit 传不存在题目返回 404；正常送审行为不变。
+
+25.【统计难度分布重复分桶】P3
+    问题：难度按字面字符串分桶，历史数据未归一，本地统计页同时出现 0.6 与
+        0.60 两个桶（66/748 条）；服务器当前数据未显现。
+    修法：统计侧将难度解析为数值后归一分桶（显示保留两位小数）。
+    验收：难度分布无语义重复桶；现有统计测试断言不回退。
+
 ================================================================================
 六、已删去项（2026-09-17 复核判定无行为影响，不再作为待办）
 ================================================================================

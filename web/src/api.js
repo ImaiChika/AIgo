@@ -341,6 +341,10 @@ export const api = {
     request(`/batch/download/${jobId}`, {
       method: "POST",
     }),
+  batchRetryFailed: (jobId) =>
+    request(`/batch/retry-failed/${jobId}`, {
+      method: "POST",
+    }),
 
   // AI 检查
   // 题目粒度检查进度（登录即可，逐题校验题库范围）

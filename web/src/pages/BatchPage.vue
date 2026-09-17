@@ -73,6 +73,29 @@ const importResult = ref(null); // 导入结果详情
 const detailQuestion = ref(null); // 弹窗查看的题目全貌（复用题库详情弹窗）
 const currentJobOwned = computed(() => !!currentJob.value && currentJob.value.owner_id === currentUser.value?.id);
 
+// 等待计时：每秒刷新一次当前时间，任务项展示自提交起已用时。
+const nowTick = ref(Date.now());
+let tickTimer = null;
+
+function jobStartMs(job) {
+  if (!job) return null;
+  if (job.created_at) return Number(job.created_at) * 1000;
+  if (job.submitted_at) return Number(job.submitted_at);
+  return null;
+}
+
+function elapsedText(job) {
+  const start = jobStartMs(job);
+  if (!start) return "—";
+  let sec = Math.max(0, Math.floor((nowTick.value - start) / 1000));
+  const hours = Math.floor(sec / 3600);
+  sec %= 3600;
+  const minutes = Math.floor(sec / 60);
+  const seconds = sec % 60;
+  const mmss = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return hours > 0 ? `${hours}:${mmss}` : mmss;
+}
+
 // 进度百分比
 const progressPercent = computed(() => {
   if (!currentJob.value || !currentJob.value.total_count) return 0;
@@ -177,6 +200,7 @@ async function submitBatch() {
       total_count: data.count,
       completed: 0,
       failed: 0,
+      submitted_at: Date.now(),
     };
 
     jobHistory.value.unshift(currentJob.value);
@@ -240,21 +264,43 @@ onActivated(() => {
   if (currentJob.value && isRunning(currentJob.value.status)) startPolling(currentJob.value.job_id);
 });
 onDeactivated(() => { pageActive = false; stopPolling(); });
-onBeforeUnmount(() => { disposed = true; stopPolling(); clearTimeout(showToast.timer); });
 
 const importError = ref("");
 const autoImportJobs = new Set(); // 本会话已触发过自动导入的任务；后端按任务幂等兜底
 
 // 任务完成后自动导入一次，无需手动点击。仅针对本地有记录的任务（tracked）：
 // 仅存在于云端列表的历史任务没有导入跟踪，自动导入会把历史结果重复写入。
+// 存在失败项时不自动导入：等出题人决定“重跑失败项”或“直接导入成功部分”——
+// 一旦导入，失败项视为放弃、不能再重跑。
 // 重复触发由后端导入幂等拦截：已导入的任务只会重放上次的导入结果。
 function maybeAutoImport(job) {
 	if (!job || job.owner_id !== currentUser.value?.id || !isCompleted(job.status) || job.imported_at || !job.tracked) return;
+  if ((job.failed || 0) > 0) return;
   if (autoImportJobs.has(job.job_id)) return;
   autoImportJobs.add(job.job_id);
   downloadResult(job.job_id);
 }
 watch(currentJob, (job) => maybeAutoImport(job));
+
+// 重跑失败项：任务回到执行中，复用既有轮询；完成后若无失败项则自动导入。
+const retrying = ref(false);
+async function retryFailed(job) {
+  if (retrying.value || !job) return;
+  retrying.value = true;
+  try {
+    const updated = await api.batchRetryFailed(job.job_id);
+    currentJob.value = updated;
+    const idx = jobHistory.value.findIndex(j => j.job_id === job.job_id);
+    if (idx >= 0) jobHistory.value[idx] = updated;
+    saveJobToStorage(updated);
+    showToast("失败项重跑已开始，任务回到执行中");
+    startPolling(job.job_id);
+  } catch (e) {
+    showToast("重跑失败: " + e.message);
+  } finally {
+    retrying.value = false;
+  }
+}
 
 function markJobImported(jobId) {
   const now = new Date().toISOString();
@@ -374,6 +420,13 @@ onMounted(() => {
   loadStats();
   loadBatchCapabilities();
   loadJobsFromDB();
+  tickTimer = setInterval(() => { nowTick.value = Date.now(); }, 1000);
+});
+onBeforeUnmount(() => {
+  disposed = true;
+  stopPolling();
+  clearInterval(tickTimer);
+  clearTimeout(showToast.timer);
 });
 </script>
 
@@ -475,6 +528,7 @@ onMounted(() => {
         <div class="job-meta">
           <p><strong>任务名称:</strong> {{ currentJob.job_name || '未命名' }}</p>
           <p><strong>任务ID:</strong> <code>{{ currentJob.job_id }}</code></p>
+          <p><strong>已用时:</strong> <span class="elapsed-time">{{ elapsedText(currentJob) }}</span><span v-if="isRunning(currentJob.status)" class="field-hint">（含排队等待）</span></p>
         </div>
 
         <!-- 进度条 -->
@@ -496,6 +550,13 @@ onMounted(() => {
 	    </div>
 	    <div v-else-if="isCompleted(currentJob.status) && currentJob.imported_at" class="job-actions">
           <span class="action-hint">结果已自动导入题库，详见下方导入结果</span>
+        </div>
+        <div v-else-if="isCompleted(currentJob.status) && (currentJob.failed || 0) > 0" class="job-actions job-retry-actions">
+          <button class="ghost-button" type="button" :disabled="retrying" @click="retryFailed(currentJob)">
+            {{ retrying ? "重跑中…" : `重跑失败项（${currentJob.failed}）` }}
+          </button>
+          <button class="ghost-button" type="button" @click="downloadResult(currentJob.job_id)">直接导入成功部分</button>
+          <span class="action-hint">失败项可重跑；一旦导入成功部分，本任务剩余失败项将不能再重跑</span>
         </div>
         <div v-else-if="isCompleted(currentJob.status) && importError" class="job-actions">
           <button class="ghost-button" type="button" @click="downloadResult(currentJob.job_id)">重新导入</button>
@@ -579,6 +640,7 @@ onMounted(() => {
 	            <span>生成项：{{ job.total_count }}</span>
             <span>已完成：{{ job.completed || 0 }}</span>
 	            <span>失败：{{ job.failed || 0 }}</span>
+            <span>已用时：{{ elapsedText(job) }}</span>
 	            <span v-if="job.owner_id && job.owner_id !== currentUser?.id">其他用户任务 · 只读</span>
           </div>
           <div class="job-actions">
@@ -933,5 +995,13 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.elapsed-time {
+  font-variant-numeric: tabular-nums;
+  color: #1f5eff;
+  font-weight: 600;
+}
+.job-retry-actions {
+  flex-wrap: wrap;
 }
 </style>

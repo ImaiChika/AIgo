@@ -202,6 +202,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/batch/list", s.requireAuth(domain.PermBatchRun, s.handleBatchList))
 	mux.HandleFunc("GET /api/batch/status/{jobId}", s.requireAuth(domain.PermBatchRun, s.handleBatchStatus))
 	mux.HandleFunc("POST /api/batch/download/{jobId}", s.requireAuth(domain.PermBatchRun, s.handleBatchDownload))
+	mux.HandleFunc("POST /api/batch/retry-failed/{jobId}", s.requireAuth(domain.PermBatchRun, s.handleBatchRetryFailed))
 
 	// === AI 检查（题目首次生成后唯一一次自动执行）===
 	// 不提供人工复检或强制通过入口；检查故障会耗尽并阻断人工审核流程。
