@@ -241,7 +241,11 @@ function selectJob(job, { silent = false } = {}) {
     startPolling(job.job_id);
   }
   if (!silent) {
-    nextTick(() => jobPanel.value?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    // 平滑滚动定位到任务状态面板；轮询刷新引起的重渲染可能打断动画，
+    // 400ms 后重试一次（已到位时为无操作）。
+    const scrollPanel = () => jobPanel.value?.scrollIntoView({ behavior: "smooth", block: "start" });
+    nextTick(scrollPanel);
+    window.setTimeout(scrollPanel, 400);
   }
 }
 
