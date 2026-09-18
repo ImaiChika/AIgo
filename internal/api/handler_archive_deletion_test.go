@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -30,7 +29,15 @@ func TestArchiveDeletionPolicy(t *testing.T) {
 	adminToken := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.1")
 	ctx := context.Background()
 	now := time.Now()
-	adminID := "user-" + fmt.Sprint(now.UnixNano())
+	// 个人视野严格按 owner_id 过滤，夹具题目必须挂在真实 admin 用户名下
+	me := serveAuthJSON(t, handler, http.MethodGet, "/api/auth/me", adminToken, "198.51.100.1", nil)
+	var mePayload struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(me.Body.Bytes(), &mePayload); err != nil || mePayload.ID == "" {
+		t.Fatalf("decode admin me: %v body=%s", err, me.Body.String())
+	}
+	adminID := mePayload.ID
 
 	saveQuestion := func(t *testing.T, id string, status domain.QuestionStatus) {
 		t.Helper()

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,6 +107,30 @@ func TestOwnerSelfDeletePolicy(t *testing.T) {
 		}
 	}
 
+	// 5b. 退回修改：题目本体状态已恢复 ai_reviewed，但存在审核历史 → 409。
+	// 用户口径：退回需修改虽显示"AI已检查"，也算流程中，不可删除。
+	saveQuestion(t, "own-returned", domain.StatusAIReviewed)
+	if err := store.SaveFlowConfig(ctx, domain.ReviewFlowConfig{
+		ID: "own-del-flow", Name: "所有者删除测试流程", CreatedAt: now,
+		Rounds: []domain.RoundConfig{{RoundNumber: 1}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveTask(ctx, domain.ReviewTask{
+		ID: "own-del-task", QuestionID: "own-returned", FlowID: "own-del-flow",
+		Status: domain.StatusRevisionRequired, CurrentRound: 1,
+		AssignedTo: []string{"reviewer-1"}, Attempt: 1, QuestionVersion: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if code := ownerDelete(t, ownerToken, "own-returned"); code != http.StatusConflict {
+		t.Fatalf("退回修改（ai_reviewed+审核历史）删除应 409，实际 %d", code)
+	}
+	// 同一道题对有权限者开放（管理员清理语义）
+	if code := ownerDelete(t, adminToken, "own-returned"); code != http.StatusOK {
+		t.Fatalf("有权限者删除退回修改题应 200，实际 %d", code)
+	}
+
 	// 6. 淘汰终态 → 409
 	saveQuestion(t, "own-archived", domain.StatusArchived)
 	if code := ownerDelete(t, ownerToken, "own-archived"); code != http.StatusConflict {
@@ -132,4 +157,36 @@ func TestOwnerSelfDeletePolicy(t *testing.T) {
 	if q, _ := store.GetQuestion(ctx, "other-owned"); q == nil || q.Status != domain.StatusArchived {
 		t.Fatal("有权限者删除后应为 archived")
 	}
+
+	// 8. 个人视野严格仅本人：view_all 管理员的 scope=personal 列表不再出现
+	// 他人题目（2026-09-19 产品口径）。
+	saveQuestion(t, "own-visible", domain.StatusAIReviewed) // owner-teacher 名下
+	otherQ := domain.A2Question{
+		ID: "other-visible", ClinicalStem: "所有者删除测试 other-visible",
+		Options: []domain.Option{{Label: "A", Text: "选项"}}, Answer: "A",
+		Status: domain.StatusAIReviewed, Version: 1, OwnerID: "other-user-2", CreatedBy: "other-user",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.SaveQuestion(ctx, otherQ); err != nil {
+		t.Fatal(err)
+	}
+	teacherList := serveAuthJSON(t, handler, http.MethodGet, "/api/questions?scope=personal&tier=working", ownerToken, "198.51.100.2", nil)
+	if teacherList.Code != http.StatusOK {
+		t.Fatalf("teacher personal list status=%d", teacherList.Code)
+	}
+	if !containsID(teacherList.Body.String(), "own-visible") || containsID(teacherList.Body.String(), "other-visible") {
+		t.Fatalf("teacher 个人视野应只见本人题目: %s", teacherList.Body.String())
+	}
+	adminList := serveAuthJSON(t, handler, http.MethodGet, "/api/questions?scope=personal&tier=working", adminToken, "198.51.100.1", nil)
+	if adminList.Code != http.StatusOK {
+		t.Fatalf("admin personal list status=%d", adminList.Code)
+	}
+	if containsID(adminList.Body.String(), "own-visible") || containsID(adminList.Body.String(), "other-visible") {
+		t.Fatalf("view_all 管理员个人视野不应出现他人题目: %s", adminList.Body.String())
+	}
+}
+
+// containsID 粗判题目 ID 是否出现在分页响应中（ID 含唯一前缀，无误报风险）。
+func containsID(body, id string) bool {
+	return strings.Contains(body, `"`+id+`"`)
 }

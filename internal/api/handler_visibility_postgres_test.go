@@ -11,10 +11,12 @@ import (
 	"aigo/internal/domain"
 )
 
-// TestQuestionVisibilityPersonalAxis 验证个人轴题目可见性三档语义：
-//   - 默认（无 view_all、未分配题库范围）：仅本人题目，他人题目与历史无归属题不可见；
-//   - 授予 question:view_all：可见全部题目（含历史无归属题）与完整子题库目录；
-//   - 直接分配题库范围（bank_ids）：范围内题库的题目可见（含他人）。
+// TestQuestionVisibilityPersonalAxis 验证个人轴题目可见性语义（2026-09-19 收紧）：
+//   - 任何用户的 scope=personal 列表严格只含本人题目——view_all 与题库范围
+//     授权不再放大"我的题库"视野；他人题目只经全局题库（分享推导分层）、
+//     审核任务等专门入口出现；
+//   - view_all 仍放开子题库完整目录与单题详情访问（权限轴不变，仅列表口径收紧）；
+//   - 授予题库范围（bank_ids）不再使列表出现范围内他人题目。
 //
 // 同时验证子题库目录不再向普通用户泄露全部子题库（如管理员自建测试题库）。
 func TestQuestionVisibilityPersonalAxis(t *testing.T) {
@@ -102,7 +104,8 @@ func TestQuestionVisibilityPersonalAxis(t *testing.T) {
 		t.Fatalf("expert catalog should contain only own-relevant bank, got %+v", banksPayload.Banks)
 	}
 
-	// ===== 授予 question:view_all：可见全部题目（含历史无归属题）与完整子题库目录 =====
+	// ===== 授予 question:view_all：个人列表仍严格仅本人（口径收紧）；
+	// 子题库目录放开为完整目录，单题详情权限轴不变 =====
 	updated = serveAuthJSON(t, handler, http.MethodPut, "/api/users/"+expert.ID, adminToken, "198.51.100.1", map[string]any{
 		"display_name": "可见性专家", "role": domain.RoleExpert, "permissions": []string{domain.PermQuestionViewAll}, "bank_ids": []string{}, "enabled": true,
 	})
@@ -110,8 +113,8 @@ func TestQuestionVisibilityPersonalAxis(t *testing.T) {
 		t.Fatalf("grant view_all: status=%d body=%s", updated.Code, updated.Body.String())
 	}
 	list = decodeQuestionPage(t, serveAuthJSON(t, handler, http.MethodGet, "/api/questions?scope=personal", expertToken, "203.0.113.10", nil).Body.String())
-	if list.Total != 2 {
-		t.Fatalf("expert with view_all should see all personal-axis questions, got total=%d ids=%v", list.Total, questionIDs(list))
+	if list.Total != 1 || len(list.Questions) != 1 || list.Questions[0].ID != "vis-expert-own" {
+		t.Fatalf("view_all expert personal list should stay own-only, got total=%d ids=%v", list.Total, questionIDs(list))
 	}
 	if resp := serveAuthJSON(t, handler, http.MethodGet, "/api/questions/vis-legacy", expertToken, "203.0.113.10", nil); resp.Code != http.StatusOK {
 		t.Fatalf("expert with view_all should view legacy question: status=%d", resp.Code)
@@ -130,7 +133,7 @@ func TestQuestionVisibilityPersonalAxis(t *testing.T) {
 		t.Fatal("expert with view_all should see full bank catalog")
 	}
 
-	// ===== bank_ids 范围授权：范围内题库的题目可见（含他人/历史题） =====
+	// ===== bank_ids 范围授权：个人列表仍严格仅本人，不再出现范围内他人/历史题 =====
 	updated = serveAuthJSON(t, handler, http.MethodPut, "/api/users/"+expert.ID, adminToken, "198.51.100.1", map[string]any{
 		"display_name": "可见性专家", "role": "", "permissions": []string{domain.PermQuestionView}, "bank_ids": []string{"bank-admin-test"}, "enabled": true,
 	})
@@ -141,13 +144,12 @@ func TestQuestionVisibilityPersonalAxis(t *testing.T) {
 	// 直接授权题库范围继续生效。
 	expertToken = loginForAuthTest(t, handler, "vis-expert", "vis-expert-password", "203.0.113.10")
 	list = decodeQuestionPage(t, serveAuthJSON(t, handler, http.MethodGet, "/api/questions?scope=personal", expertToken, "203.0.113.10", nil).Body.String())
-	sawScoped := false
 	for _, q := range list.Questions {
 		if q.ID == "vis-legacy" {
-			sawScoped = true
+			t.Fatalf("scoped user personal list must not contain others' bank questions: ids=%v", questionIDs(list))
 		}
 	}
-	if !sawScoped {
-		t.Fatalf("scoped user should see questions within granted banks: ids=%v", questionIDs(list))
+	if list.Total != 1 || len(list.Questions) != 1 || list.Questions[0].ID != "vis-expert-own" {
+		t.Fatalf("scoped user personal list should stay own-only, got total=%d ids=%v", list.Total, questionIDs(list))
 	}
 }

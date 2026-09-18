@@ -589,10 +589,27 @@ func (s *Server) handleDeleteQuestion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "无权删除该题目：只能删除本人题目，或由有权限者操作")
 		return
 	}
-	// 所有者路径：仅"刚出未送审"与"流程完全结束"两态可移入淘汰题库
-	if !privileged && q.Status != domain.StatusAIReviewed && q.Status != domain.StatusPublished {
-		writeError(w, http.StatusConflict, "只能把刚出未送审或流程完全结束的题目移入淘汰题库")
-		return
+	// 所有者路径：仅"刚出未送审"与"流程完全结束"两态可移入淘汰题库。
+	// 注意：退回修改的题目本体状态已恢复 ai_reviewed（revision_required 只在
+	// 审核任务上标记），必须以审核历史识别——有历史即流程中/经历过流程，不可删。
+	if !privileged {
+		switch q.Status {
+		case domain.StatusAIReviewed:
+			hasHistory, histErr := s.reviewSvc.HasReviewHistory(r.Context(), id)
+			if histErr != nil {
+				writeError(w, 500, "查询审核历史失败: "+histErr.Error())
+				return
+			}
+			if hasHistory {
+				writeError(w, http.StatusConflict, "该题目已进入审核流程（退回修改中），不能删除；请按流程修改后重新送审")
+				return
+			}
+		case domain.StatusPublished:
+			// 流程完全结束（决断通过入库）：可移入淘汰题库，分享守卫在下方
+		default:
+			writeError(w, http.StatusConflict, "只能把刚出未送审或流程完全结束的题目移入淘汰题库")
+			return
+		}
 	}
 
 	// 分享守卫：审批中/已入全局正式库不可删；被否决的分享不阻塞
@@ -761,8 +778,10 @@ func (s *Server) applyTierScope(w http.ResponseWriter, r *http.Request, filter s
 			return filter, true
 		}
 		if r.URL.Query().Get("scope") == "personal" {
-			// 新版个人题库：题目归属过滤 + 个人轴可见范围（view_all/题库范围/仅本人）。
-			s.applyQuestionVisibility(r, &filter, domain.PermQuestionView)
+			// 新版个人题库：严格按 owner_id 过滤（applyQuestionScope 已写入）。
+			// 2026-09-19 产品口径：任何人的"我的题库"只能看到自己的题目，
+			// view_all/题库范围不再放大个人视野；他人题目只经全局题库
+			// （分享推导分层）或审核任务等专门入口出现。
 		} else if !s.canViewTier(r, tier) {
 			// 未显式传 scope 的旧客户端继续使用原有分层权限语义。
 			writeError(w, http.StatusForbidden, "无权访问"+tier.Name())
@@ -795,8 +814,9 @@ func (s *Server) applyTierScope(w http.ResponseWriter, r *http.Request, filter s
 		return filter, true
 	}
 	if r.URL.Query().Get("scope") == "personal" {
+		// 个人视野严格仅本人（applyQuestionScope 已写入 OwnerID），
+		// 不被 view_all/题库范围放大——2026-09-19 产品口径。
 		filter.Tiers = []string{string(domain.TierFormal), string(domain.TierWorking), string(domain.TierEliminated)}
-		s.applyQuestionVisibility(r, &filter, domain.PermQuestionView)
 		return filter, true
 	}
 	visible := s.visibleTiers(r)
