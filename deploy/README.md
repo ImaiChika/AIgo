@@ -233,3 +233,65 @@ age -d -i /离线加密介质/aigo-offsite-identity.txt \
 - MFA/企业身份认证、密码找回、注册通知和集中式安全告警。
 - 应用结构化日志、指标、集中日志、监控与告警。
 - 本地 Qwen 的医学质量、并发容量、GPU 故障和升级回滚验收。
+
+## 10. 线上生产服务器事实记录（2026-09-18 核实；改动 Caddy/域名前必读）
+
+本节记录当前唯一线上环境的实测状态。任何对话、脚本或手工操作在修改服务器上的 Caddy、`AIGO_SITE_ADDRESS`、域名解析或重新部署前，必须先读本节，并保持以下事实不被破坏。
+
+### 10.1 服务器与域名
+
+- 阿里云 ECS，公网 IP `123.56.164.1`（Ubuntu 24.04，hostname `iZ2zehvtm7j3elg4bsmiyxZ`）。
+- `imaichika.love` 与 `www.imaichika.love` 的 A 记录均指向该 IP；DNS 托管在阿里云（dns13/dns14.hichina.com）。
+- 对外仅发布 Caddy 的 80/TCP、443/TCP、443/UDP（HTTP/3）；应用 8080 与 PostgreSQL 5432 不出容器网络。
+- SSH 等登录凭证由运维另行保管，不写入本仓库任何文件。
+- 域名绑在中国大陆 ECS 上：若日后浏览器访问出现阿里云"未备案"拦截页，属 ICP 备案问题，需在阿里云控制台完成备案；服务器侧配置无需变动。
+
+### 10.2 服务器上的部署布局
+
+- 部署根目录 `/opt/aigo`（compose project directory），唯一操作入口 `/opt/aigo/deploy/compose.sh`（内部封装 `docker compose --project-directory /opt/aigo --env-file /opt/aigo/deploy/production.env -f /opt/aigo/compose.production.yaml`）。
+- 生产配置 `/opt/aigo/deploy/production.env`、Caddyfile `/opt/aigo/deploy/Caddyfile`；服务器上的 `production.env` 和 `deploy/secrets/` 是唯一权威源，Mac 侧副本不得反向覆盖（rsync 同步时务必排除）。
+- 容器：`aigo-app-1`（应用，仅容器网络 8080）、`aigo-caddy-1`（`caddy:2-alpine`，发布宿主 80/443）、`aigo-postgres-1`、`aigo-backup-1`。
+
+### 10.3 当前生效的 Caddy 站点地址（权威值，勿改坏）
+
+服务器 `/opt/aigo/deploy/production.env` 中：
+
+```text
+AIGO_SITE_ADDRESS=imaichika.love www.imaichika.love http://123.56.164.1 http://localhost
+```
+
+各项语义与必须保持的约束：
+
+- `imaichika.love`、`www.imaichika.love`：裸域名写法 = Caddy 自动 HTTPS（Let's Encrypt 证书 2026-09-18 首签成功并自动续期，证书存命名卷 `aigo_caddy_data`），80 端口 HTTP 自动 308 跳转 HTTPS。**这两个域名绝不能从该行删除**——否则域名请求不匹配任何站点，落入 Caddyfile 末尾 `http://` 兜底块返回 421，用户看到的就是"网站打不开"。
+- `http://123.56.164.1`：**IP 必须保留 `http://` 前缀**，维持纯 HTTP 直连（2026-09-18 实测：写成裸 IP 时 Caddy 会为 IP 自动配自签名证书并把 80 端口 308 重定向到 `https://123.56.164.1`，浏览器报证书告警）。
+- `http://localhost`：容器内自测入口，保留。
+- Caddyfile 末尾的 `http:// { respond "Misdirected Request" 421 }` 兜底块是**有意设计**（未知 Host 不得拿到虚假 200、不得转发到应用），不要删除或改成 `reverse_proxy`。
+- Caddyfile 中 `{$AIGO_SITE_ADDRESS}` 占位符机制不变：调整站点范围只改 production.env 这一行，不改 Caddyfile。
+
+### 10.4 修改流程（重建容器，不是 restart）
+
+`AIGO_SITE_ADDRESS` 是容器创建时固化的环境变量，`docker restart` / `compose restart` 都不会生效：
+
+```bash
+cd /opt/aigo
+cp deploy/production.env deploy/production.env.bak-<改动目的>
+vi deploy/production.env                                # 只改 AIGO_SITE_ADDRESS 行
+./deploy/compose.sh up -d caddy                         # compose 检测到 env 变化自动重建 caddy
+docker exec aigo-caddy-1 env | grep AIGO_SITE_ADDRESS   # 确认新值已进入容器
+```
+
+### 10.5 修改后的对外验收（域名 + IP 双路径）
+
+```bash
+curl -sI https://imaichika.love/      # 期望 200，Let's Encrypt 有效证书
+curl -sI http://imaichika.love/       # 期望 308 → https://imaichika.love/
+curl -sI https://www.imaichika.love/  # 期望 200
+curl -sI http://123.56.164.1/         # 期望 200（纯 HTTP，不跳转）
+curl -s  https://imaichika.love/api/auth/register-enabled   # 期望正常 JSON
+```
+
+域名响应出现 `HTTP 421 Misdirected Request`（Server: Caddy）即说明站点地址丢了域名，按 10.3 恢复。
+
+### 10.6 Mac 侧本地副本不要互相污染
+
+Mac 仓库的 `deploy/production.env` 仅用于本地隔离测试，站点地址保持 IP/localhost 写法即可，**不要把线上域名同步进去**：域名公网 DNS 指向线上服务器，本地 Caddy 会为其尝试签发证书并把本地请求重定向到签发失败的 HTTPS，破坏本地验收。线上配置一律以服务器 `/opt/aigo/deploy/production.env` 为准。

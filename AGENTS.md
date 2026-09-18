@@ -203,5 +203,15 @@ AI 质量检查约束（2026-09-06 用户明确）：
 - `.env`：环境变量（API Key、数据库连接），不提交 git。
 - `configs/example.env`：环境变量示例。
 - `configs/review_flows.json`：审核流程配置。
+- `deploy/`：生产部署编排（Compose + Caddy + 备份），使用指引见 `deploy/README.md`。
+
+## 8. 线上服务器与 Caddy（改动前必读）
+
+线上唯一生产环境：阿里云 ECS `123.56.164.1`，域名 `imaichika.love` / `www.imaichika.love`（Caddy 自动 HTTPS），部署在服务器 `/opt/aigo`（docker compose）。
+
+- Caddy 站点地址由服务器 `/opt/aigo/deploy/production.env` 的 `AIGO_SITE_ADDRESS` 控制；当前权威值、修改流程与验收命令见 `deploy/README.md` 第 10 节，凡涉及 Caddy、域名或生产 env 的改动前必读。
+- 两个禁忌：站点地址不能丢域名（域名请求会落入 Caddyfile 兜底块返回 421，症状为"网站打不开"）；IP 项必须保留 `http://` 前缀（裸 IP 会被 Caddy 308 重定向到自签名 HTTPS，浏览器告警）。
+- 修改 `AIGO_SITE_ADDRESS` 后必须 `./deploy/compose.sh up -d caddy` 重建容器，restart 不生效。
+- 服务器 `/opt/aigo/deploy/production.env` 与 `deploy/secrets/` 是唯一权威源，Mac 侧副本不得反向覆盖；服务器登录凭证不入仓库。
 
 后续开发应围绕 `功能需求文档.txt` 的树状图继续，不要主动增加无关模块。
