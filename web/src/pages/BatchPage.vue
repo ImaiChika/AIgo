@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onMounted, onActivated, onDeactivated, onBeforeUnmount } from "vue";
+import { ref, computed, watch, nextTick, onMounted, onActivated, onDeactivated, onBeforeUnmount } from "vue";
 import { api } from "../api.js";
 import { hasPerm, currentUser } from "../auth.js";
 import { useAICheckProgress } from "../aiCheckProgress.js";
@@ -69,7 +69,7 @@ const batchConfig = ref({
 const currentJob = ref(null);
 const jobHistory = ref([]);
 const polling = ref(false);
-const importResult = ref(null); // 导入结果详情
+const importResult = ref(null); // 导入结果详情（落库为 AI 草稿，需经 AI 检查后才可见）
 const detailQuestion = ref(null); // 弹窗查看的题目全貌（复用题库详情弹窗）
 const currentJobOwned = computed(() => !!currentJob.value && currentJob.value.owner_id === currentUser.value?.id);
 
@@ -87,13 +87,25 @@ function jobStartMs(job) {
 function elapsedText(job) {
   const start = jobStartMs(job);
   if (!start) return "—";
-  let sec = Math.max(0, Math.floor((nowTick.value - start) / 1000));
+  let sec = Math.max(0, Math.floor((jobEndMs(job) - start) / 1000));
   const hours = Math.floor(sec / 3600);
   sec %= 3600;
   const minutes = Math.floor(sec / 60);
   const seconds = sec % 60;
   const mmss = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   return hours > 0 ? `${hours}:${mmss}` : mmss;
+}
+
+// 计时终点：执行中任务实时走表；终态任务冻结在后端记录的完成时间
+// （completed_at），旧数据缺失时退回导入时间（导入只发生在完成后），
+// 修复"任务已完成仍在计时"的问题。
+function jobEndMs(job) {
+  if (Number(job?.completed_at) > 0) return Number(job.completed_at) * 1000;
+  if (isTerminal(job?.status) && job.imported_at) {
+    const t = Date.parse(job.imported_at);
+    if (!Number.isNaN(t)) return t;
+  }
+  return nowTick.value;
 }
 
 // 逐单元生成明细：顺序与提交的知识点展开一致，老师按知识点核对成功/失败。
@@ -107,6 +119,33 @@ const unitRows = computed(() => {
     error: it.status === "ok" ? "" : (it.error || "生成失败"),
   }));
 });
+
+// 生成明细分页（与题库一致的左右翻页），避免大量明细只能滚动查看。
+const unitPage = ref(1);
+const unitPageSize = 10;
+const unitPageCount = computed(() => Math.max(1, Math.ceil(unitRows.value.length / unitPageSize)));
+const pagedUnitRows = computed(() => {
+  const start = (unitPage.value - 1) * unitPageSize;
+  return unitRows.value.slice(start, start + unitPageSize);
+});
+function goUnitPage(p) {
+  unitPage.value = Math.min(Math.max(1, p), unitPageCount.value);
+}
+watch(() => currentJob.value?.job_id, () => { unitPage.value = 1; });
+watch(unitPageCount, (n) => { if (unitPage.value > n) unitPage.value = n; });
+
+// 任务历史分页：任务卡片较高，每页 5 条，页码翻页不必长滚动。
+const historyPage = ref(1);
+const historyPageSize = 5;
+const historyPageCount = computed(() => Math.max(1, Math.ceil(jobHistory.value.length / historyPageSize)));
+const pagedJobHistory = computed(() => {
+  const start = (historyPage.value - 1) * historyPageSize;
+  return jobHistory.value.slice(start, start + historyPageSize);
+});
+function goHistoryPage(p) {
+  historyPage.value = Math.min(Math.max(1, p), historyPageCount.value);
+}
+watch(historyPageCount, (n) => { if (historyPage.value > n) historyPage.value = n; });
 
 // 尚未出结果的单元数：排队等待或生成中。
 const pendingUnitCount = computed(() => {
@@ -176,7 +215,7 @@ async function loadJobsFromDB() {
     const data = await api.batchList({ limit: 50 });
     jobHistory.value = data.jobs || [];
     if (jobHistory.value.length > 0 && !currentJob.value) {
-      selectJob(jobHistory.value[0]);
+      selectJob(jobHistory.value[0], { silent: true });
     }
   } catch (e) {
     console.error("加载任务历史失败:", e);
@@ -189,11 +228,21 @@ async function loadJobsFromDB() {
 
 // 选中任务：先展示列表摘要，再拉取完整状态补齐逐单元明细（明细只在
 // 状态接口返回，列表接口不带；终态任务没有轮询，必须主动水合一次）。
-function selectJob(job) {
+// silent=true 用于页面初次自动选中：不弹提示也不滚动。
+const jobPanel = ref(null);
+function selectJob(job, { silent = false } = {}) {
   if (!job) return;
   currentJob.value = job;
   hydrateJobDetail(job.job_id);
-  if (isRunning(job.status)) startPolling(job.job_id);
+  if (isRunning(job.status)) {
+    if (!silent) {
+      showToast("任务仍在进行中：生成明细实时更新，完整结果与 AI 检查将在任务彻底结束后展示");
+    }
+    startPolling(job.job_id);
+  }
+  if (!silent) {
+    nextTick(() => jobPanel.value?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }
 }
 
 async function hydrateJobDetail(jobId) {
@@ -203,9 +252,19 @@ async function hydrateJobDetail(jobId) {
     currentJob.value = full;
     const idx = jobHistory.value.findIndex(j => j.job_id === jobId);
     if (idx >= 0) jobHistory.value[idx] = full;
+    maybeLoadImportReplay(full);
   } catch (e) {
     // 明细拉取失败静默降级：摘要信息（计数/进度）仍然可用
   }
+}
+
+// 历史任务回看：已完成的本人任务在选中时重放后端保存的导入结果
+// （幂等，不重复入库），让"查看详情"在重新登录后仍有结果可看。
+function maybeLoadImportReplay(job) {
+  if (!job || !isCompleted(job.status) || !job.imported_at) return;
+  if (job.owner_id && job.owner_id !== currentUser.value?.id) return;
+  if (importJobId.value === job.job_id && importResult.value) return;
+  downloadResult(job.job_id, { replay: true });
 }
 
 // 提交批量任务
@@ -235,9 +294,13 @@ async function submitBatch() {
       job_name: batchConfig.value.job_name || "",
     });
 
-	  currentJob.value = {
-	    job_id: data.job_id,
-	    owner_id: currentUser.value?.id || "",
+    // 新任务开始：清空上一任务的结果展示，避免旧明细与新任务混淆。
+    importResult.value = null;
+    importJobId.value = "";
+    importError.value = "";
+    currentJob.value = {
+      job_id: data.job_id,
+      owner_id: currentUser.value?.id || "",
       status: "validating",
       total_count: data.count,
       completed: 0,
@@ -308,6 +371,7 @@ onActivated(() => {
 onDeactivated(() => { pageActive = false; stopPolling(); });
 
 const importError = ref("");
+const importJobId = ref(""); // importResult 所属任务；切换任务时隐藏过期结果
 const autoImportJobs = new Set(); // 本会话已触发过自动导入的任务；后端按任务幂等兜底
 
 // 任务完成后自动导入一次，无需手动点击。仅针对本地有记录的任务（tracked）：
@@ -351,28 +415,34 @@ function markJobImported(jobId) {
   if (idx >= 0) jobHistory.value[idx] = { ...jobHistory.value[idx], imported_at: now };
 }
 
-// 下载并导入结果
-async function downloadResult(jobId) {
+// 下载并导入结果。replay=true 用于历史任务回看：后端幂等重放上次的导入
+// 结果，不重复入库，仅恢复展示；题目落库为 AI 草稿，需通过 AI 检查后才
+// 进入个人题库（待审核）。
+async function downloadResult(jobId, { replay = false } = {}) {
   importError.value = "";
   try {
-    importResult.value = null;
+    if (!replay) importResult.value = null;
     const data = await api.batchDownload(jobId);
     importResult.value = data;
+    importJobId.value = jobId;
     markJobImported(jobId);
     if (data.simulated) {
       showToast(data.message || "旧批量任务已完成");
       return;
     }
-    if (data.failed > 0) {
-      showToast(`导入完成：成功 ${data.saved} 题，失败 ${data.failed} 项（AI 检查进行中）`);
+    if (replay) {
+      showToast("已载入该任务的生成与 AI 检查结果");
+    } else if (data.failed > 0) {
+      showToast(`AI 生成完毕：${data.saved} 题已提交 AI 质量检查，失败 ${data.failed} 项`);
     } else {
-      showToast(`导入成功：共 ${data.saved} 题（AI 检查进行中）`);
+      showToast(`AI 生成完毕：共 ${data.saved} 题，已提交 AI 质量检查`);
     }
     startAIProgress(data.question_ids || []);
     loadStats();
   } catch (e) {
+    if (replay) return; // 回看失败静默：详情面板仍显示任务摘要
     importError.value = e.message;
-    showToast("自动导入失败: " + e.message);
+    showToast("结果提交失败: " + e.message);
   }
 }
 
@@ -408,14 +478,17 @@ async function openQuestion(id) {
   }
 }
 
-// 手动查询状态
+// 手动查询状态：同步当前任务与历史列表，保持两处一致
 async function checkStatus(jobId) {
   try {
     const job = await api.batchStatus(jobId);
     stopPolling();
     currentJob.value = job;
+    const idx = jobHistory.value.findIndex(j => j.job_id === jobId);
+    if (idx >= 0) jobHistory.value[idx] = job;
+    maybeLoadImportReplay(job);
     if (isRunning(job.status)) startPolling(jobId);
-    showToast(`状态: ${job.status}`);
+    showToast(`状态: ${statusText(job.status)}`);
   } catch (e) {
     showToast("查询失败: " + e.message);
   }
@@ -557,7 +630,7 @@ onBeforeUnmount(() => {
     </section>
 
     <!-- 当前任务 -->
-    <section v-if="currentJob" class="panel">
+    <section v-if="currentJob" ref="jobPanel" class="panel job-status-panel">
       <div class="section-heading">
         <span class="dot blue"></span>
         <h2>任务状态</h2>
@@ -590,14 +663,14 @@ onBeforeUnmount(() => {
           </p>
         </div>
 
-        <!-- 逐单元明细：按提交顺序展示每个知识点的成功/失败与原因 -->
+        <!-- 逐单元明细：按提交顺序展示每个知识点的成功/失败与原因（分页查看） -->
         <div v-if="unitRows.length" class="unit-section">
           <div class="unit-head">
             <span>生成明细 {{ unitRows.length }}/{{ currentJob.total_count || unitRows.length }}</span>
             <span v-if="pendingUnitCount > 0 && isRunning(currentJob.status)" class="unit-pending">剩余 {{ pendingUnitCount }} 项排队/生成中</span>
           </div>
           <div class="unit-rows">
-            <div v-for="row in unitRows" :key="row.idx" class="unit-row">
+            <div v-for="row in pagedUnitRows" :key="row.idx" class="unit-row">
               <span class="unit-no">{{ row.idx }}</span>
               <span class="unit-code">{{ row.code }}</span>
               <span class="unit-topic" :title="row.topic">{{ row.topic || "—" }}</span>
@@ -606,29 +679,37 @@ onBeforeUnmount(() => {
               <span v-if="row.error" class="unit-error" :title="row.error">{{ row.error }}</span>
             </div>
           </div>
+          <div v-if="unitPageCount > 1" class="pager-row">
+            <span class="page-total">共 {{ unitRows.length }} 项</span>
+            <div class="page-pager">
+              <button class="page-btn" type="button" :disabled="unitPage <= 1" @click="goUnitPage(unitPage - 1)">‹ 上一页</button>
+              <span class="page-info">第 {{ unitPage }} / {{ unitPageCount }} 页</span>
+              <button class="page-btn" type="button" :disabled="unitPage >= unitPageCount" @click="goUnitPage(unitPage + 1)">下一页 ›</button>
+            </div>
+          </div>
         </div>
 
-        <!-- 任务完成后的导入：自动触发，无需手动点击 -->
+        <!-- 任务完成后的处理：自动触发，无需手动点击 -->
 	    <div v-if="!currentJobOwned" class="job-actions">
 	      <span class="field-hint">其他用户任务仅供管理员查看，只有原提交人可以导入结果。</span>
 	    </div>
 	    <div v-else-if="isCompleted(currentJob.status) && currentJob.imported_at" class="job-actions">
-          <span class="action-hint">结果已自动导入题库，详见下方导入结果</span>
-        </div>
-        <div v-else-if="isCompleted(currentJob.status) && (currentJob.failed || 0) > 0" class="job-actions job-retry-actions">
-          <button class="ghost-button" type="button" :disabled="retrying" @click="retryFailed(currentJob)">
-            {{ retrying ? "重跑中…" : `重跑失败项（${currentJob.failed}）` }}
-          </button>
-          <button class="ghost-button" type="button" @click="downloadResult(currentJob.job_id)">直接导入成功部分</button>
-          <span class="action-hint">失败项可重跑；一旦导入成功部分，本任务剩余失败项将不能再重跑</span>
-        </div>
-        <div v-else-if="isCompleted(currentJob.status) && importError" class="job-actions">
-          <button class="ghost-button" type="button" @click="downloadResult(currentJob.job_id)">重新导入</button>
-          <span class="action-hint text-danger">自动导入失败：{{ importError }}</span>
-        </div>
-        <div v-else-if="isCompleted(currentJob.status)" class="job-actions">
-          <span class="action-hint">正在自动导入生成结果…</span>
-        </div>
+	      <span class="action-hint">AI 生成完毕，结果已提交 AI 质量检查；通过检查的题目才会进入个人题库（待审核）</span>
+	    </div>
+	    <div v-else-if="isCompleted(currentJob.status) && (currentJob.failed || 0) > 0" class="job-actions job-retry-actions">
+	      <button class="ghost-button" type="button" :disabled="retrying" @click="retryFailed(currentJob)">
+	        {{ retrying ? "重跑中…" : `重跑失败项（${currentJob.failed}）` }}
+	      </button>
+	      <button class="ghost-button" type="button" @click="downloadResult(currentJob.job_id)">直接导入成功部分</button>
+	      <span class="action-hint">失败项可重跑；一旦导入成功部分，本任务剩余失败项将不能再重跑</span>
+	    </div>
+	    <div v-else-if="isCompleted(currentJob.status) && importError" class="job-actions">
+	      <button class="ghost-button" type="button" @click="downloadResult(currentJob.job_id)">重新导入</button>
+	      <span class="action-hint text-danger">结果提交失败：{{ importError }}</span>
+	    </div>
+	    <div v-else-if="isCompleted(currentJob.status)" class="job-actions">
+	      <span class="action-hint">AI 生成完毕，正在提交 AI 质量检查…</span>
+	    </div>
 
         <div v-if="isRunning(currentJob.status)" class="job-actions">
           <button class="ghost-button" type="button" @click="checkStatus(currentJob.job_id)">
@@ -643,16 +724,16 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <!-- 导入结果：一行一题的固定横栏，只显示关键缩略信息，点击查看全貌 -->
-    <section v-if="importResult" class="panel">
+    <!-- 生成结果与 AI 检查：一行一题的固定横栏，只显示关键缩略信息，点击查看全貌 -->
+    <section v-if="importResult && (!currentJob || importJobId === currentJob.job_id)" class="panel">
       <div class="section-heading">
         <span class="dot blue"></span>
-        <h2>导入结果</h2>
+        <h2>生成结果 · AI 检查</h2>
       </div>
 
       <p v-if="importResult.simulated" class="result-summary simulated-result">{{ importResult.message }}</p>
       <p v-else class="result-summary">
-        已入库 <b>{{ importRows.length }}</b> 题<template v-if="importResult.failed > 0">，失败 <b class="text-danger">{{ importResult.failed }}</b> 项</template>
+        AI 共生成 <b>{{ importRows.length }}</b> 题，已提交 AI 质量检查<template v-if="importResult.failed > 0">，失败 <b class="text-danger">{{ importResult.failed }}</b> 项</template>；通过检查后进入个人题库（待审核）
       </p>
       <p v-if="aiProgress && aiProgress.checking > 0" class="result-check">AI 检查中（已完成 {{ aiProgress.total - aiProgress.checking }}/{{ aiProgress.total }}）：通过检查的题目才会进入个人题库并展示内容</p>
       <p v-else-if="aiProgress && aiProgress.stalled" class="result-check">AI 检查仍在后台进行，可稍后查看结果</p>
@@ -685,7 +766,7 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <!-- 任务历史 -->
+    <!-- 任务历史（分页，每页 5 条） -->
     <section v-if="jobHistory.length > 0" class="panel">
       <div class="section-heading">
         <span class="dot blue"></span>
@@ -693,7 +774,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="job-list">
-        <div v-for="job in jobHistory" :key="job.job_id" class="job-item" :class="{ 'job-active': currentJob?.job_id === job.job_id }">
+        <div v-for="job in pagedJobHistory" :key="job.job_id" class="job-item" :class="{ 'job-active': currentJob?.job_id === job.job_id }">
           <div class="job-header">
             <div>
               <strong>{{ job.job_name || '未命名任务' }}</strong>
@@ -702,19 +783,29 @@ onBeforeUnmount(() => {
             <span class="q-status" :class="statusClass(job.status)">
               {{ statusText(job.status) }}
             </span>
-            <span v-if="job.imported_at" class="q-status status-good">已导入</span>
+            <!-- 已导入徽标只在任务彻底结束后展示，进行中任务不显示 -->
+            <span v-if="isCompleted(job.status) && job.imported_at" class="q-status status-good">已导入</span>
           </div>
 	          <div class="job-detail">
 	            <span>生成项：{{ job.total_count }}</span>
             <span>已完成：{{ job.completed || 0 }}</span>
-	            <span>失败：{{ job.failed || 0 }}</span>
+            <span>失败：{{ job.failed || 0 }}</span>
             <span>已用时：{{ elapsedText(job) }}</span>
-	            <span v-if="job.owner_id && job.owner_id !== currentUser?.id">其他用户任务 · 只读</span>
+            <span v-if="job.owner_id && job.owner_id !== currentUser?.id">其他用户任务 · 只读</span>
           </div>
           <div class="job-actions">
             <button class="ghost-button" type="button" @click="checkStatus(job.job_id)">刷新状态</button>
             <button class="ghost-button" type="button" @click="selectJob(job)">查看详情</button>
+            <span v-if="isRunning(job.status)" class="polling-hint">任务进行中，详情实时更新</span>
           </div>
+        </div>
+      </div>
+      <div v-if="historyPageCount > 1" class="pager-row">
+        <span class="page-total">共 {{ jobHistory.length }} 个任务</span>
+        <div class="page-pager">
+          <button class="page-btn" type="button" :disabled="historyPage <= 1" @click="goHistoryPage(historyPage - 1)">‹ 上一页</button>
+          <span class="page-info">第 {{ historyPage }} / {{ historyPageCount }} 页</span>
+          <button class="page-btn" type="button" :disabled="historyPage >= historyPageCount" @click="goHistoryPage(historyPage + 1)">下一页 ›</button>
         </div>
       </div>
     </section>
@@ -1092,10 +1183,6 @@ onBeforeUnmount(() => {
   color: #8a97a8;
   font-weight: 400;
 }
-.unit-rows {
-  max-height: 260px;
-  overflow-y: auto;
-}
 .unit-row {
   display: flex;
   align-items: center;
@@ -1120,5 +1207,51 @@ onBeforeUnmount(() => {
   border-radius: 6px;
   padding: 6px 10px;
   font-size: 12px;
+}
+/* 分页（与题库页同款）：明细与任务历史共用 */
+.pager-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-top: 1px solid #e7eef8;
+  font-size: 12px;
+  color: #556;
+}
+.unit-section .pager-row {
+  border-radius: 0 0 8px 8px;
+}
+.page-pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.page-btn {
+  border: 1px solid #e5ebf3;
+  border-radius: 7px;
+  background: #fff;
+  color: #556;
+  font-size: 12px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+.page-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.page-btn:not(:disabled):hover {
+  border-color: #9fc3f5;
+  color: #0571dc;
+}
+.page-info {
+  font-size: 12px;
+  color: #556;
+}
+.page-total {
+  color: #8a97a8;
+}
+.job-status-panel {
+  scroll-margin-top: 16px;
 }
 </style>

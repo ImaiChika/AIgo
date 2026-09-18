@@ -387,6 +387,7 @@ func (s *LocalExecutor) RetryFailed(ctx context.Context, jobID string) (*BatchJo
 	if err := s.batchJobStore.UpdateBatchJob(ctx, func() storage.BatchJobRecord {
 		record := *stored
 		record.Status = "in_progress"
+		record.FinishedAt = ""
 		return record
 	}()); err != nil {
 		return nil, err
@@ -412,7 +413,22 @@ func (s *LocalExecutor) updateJob(ctx context.Context, jobID, status string, com
 	job.Completed = completed
 	job.Failed = failed
 	job.OutputJSON = string(payload)
+	// 终态记录完成时间（前端据此冻结已用时）；重跑回到执行中时清空。
+	if isTerminalStatus(status) {
+		job.FinishedAt = time.Now().Format(time.RFC3339Nano)
+	} else {
+		job.FinishedAt = ""
+	}
 	_ = s.batchJobStore.UpdateBatchJob(ctx, *job)
+}
+
+// isTerminalStatus 判断批量任务状态是否为终态（前端冻结已用时的依据）。
+func isTerminalStatus(status string) bool {
+	switch status {
+	case "completed", "complete", "failed", "cancelled", "expired":
+		return true
+	}
+	return false
 }
 
 func (s *LocalExecutor) GetJobStatus(ctx context.Context, jobID string) (*BatchJob, error) {
@@ -520,13 +536,13 @@ func localBatchJob(record storage.BatchJobRecord) BatchJob {
 	return BatchJob{
 		JobID: record.ID, OwnerID: record.OwnerID, Backend: localSingleAPIBackend, Model: record.Model,
 		JobName: record.JobName, Status: record.Status, TotalCount: record.TotalCount,
-		Completed: record.Completed, Failed: record.Failed, CreatedAt: parseLocalBatchCreatedAt(record.CreatedAt),
-		ImportedAt: record.ImportedAt, Tracked: true,
+		Completed: record.Completed, Failed: record.Failed, CreatedAt: parseBatchTimestamp(record.CreatedAt),
+		CompletedAt: parseBatchTimestamp(record.FinishedAt), ImportedAt: record.ImportedAt, Tracked: true,
 	}
 }
 
-func parseLocalBatchCreatedAt(value string) int64 {
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05.999999999-07:00"} {
+func parseBatchTimestamp(value string) int64 {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05.999999999-07:00", "2006-01-02 15:04:05.999999999-07"} {
 		if parsed, err := time.Parse(layout, strings.TrimSpace(value)); err == nil {
 			return parsed.Unix()
 		}

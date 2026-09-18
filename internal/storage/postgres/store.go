@@ -1856,8 +1856,8 @@ func jsonOrEmptyArray(value string) string {
 
 func (s *Store) SaveBatchJob(ctx context.Context, job storage.BatchJobRecord) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO batch_jobs (id, backend, backend_profile, model, job_name, status, total_count, completed, failed, output_file_id, points_json, owner_id, output_json, created_at, updated_at)
-		VALUES ($1,COALESCE(NULLIF($2,''),'local_single_api'),COALESCE(NULLIF($3,''),'local-default'),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW())
+		INSERT INTO batch_jobs (id, backend, backend_profile, model, job_name, status, total_count, completed, failed, output_file_id, points_json, owner_id, output_json, finished_at, created_at, updated_at)
+		VALUES ($1,COALESCE(NULLIF($2,''),'local_single_api'),COALESCE(NULLIF($3,''),'local-default'),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NULLIF($14,'')::timestamptz,NOW(),NOW())
 		ON CONFLICT (id) DO UPDATE SET
 			backend=COALESCE(NULLIF(EXCLUDED.backend,''),batch_jobs.backend),
 			backend_profile=COALESCE(NULLIF(EXCLUDED.backend_profile,''),batch_jobs.backend_profile),
@@ -1866,7 +1866,7 @@ func (s *Store) SaveBatchJob(ctx context.Context, job storage.BatchJobRecord) er
 			total_count=EXCLUDED.total_count, completed=EXCLUDED.completed, failed=EXCLUDED.failed,
 			output_file_id=EXCLUDED.output_file_id, output_json=EXCLUDED.output_json,
 			owner_id=COALESCE(NULLIF(EXCLUDED.owner_id,''), batch_jobs.owner_id), updated_at=NOW()
-	`, job.ID, job.Backend, job.BackendProfile, job.Model, job.JobName, job.Status, job.TotalCount, job.Completed, job.Failed, job.OutputFileID, job.PointsJSON, job.OwnerID, jsonOrEmptyArray(job.OutputJSON))
+	`, job.ID, job.Backend, job.BackendProfile, job.Model, job.JobName, job.Status, job.TotalCount, job.Completed, job.Failed, job.OutputFileID, job.PointsJSON, job.OwnerID, jsonOrEmptyArray(job.OutputJSON), job.FinishedAt)
 	return err
 }
 
@@ -1876,16 +1876,22 @@ func (s *Store) UpdateBatchJob(ctx context.Context, job storage.BatchJobRecord) 
 			backend=COALESCE(NULLIF($1,''),backend),
 			backend_profile=COALESCE(NULLIF($2,''),backend_profile),
 			model=COALESCE(NULLIF($3,''),model),
-			status=$4, total_count=$5, completed=$6, failed=$7, output_file_id=$8, output_json=$9, updated_at=NOW()
-		WHERE id=$10
-	`, job.Backend, job.BackendProfile, job.Model, job.Status, job.TotalCount, job.Completed, job.Failed, job.OutputFileID, jsonOrEmptyArray(job.OutputJSON), job.ID)
+			status=$4, total_count=$5, completed=$6, failed=$7, output_file_id=$8, output_json=$9,
+			finished_at=CASE
+				WHEN $4 IN ('completed','complete','failed','cancelled','expired')
+				THEN COALESCE(NULLIF($10,'')::timestamptz, NOW())
+				ELSE NULL
+			END,
+			updated_at=NOW()
+		WHERE id=$11
+	`, job.Backend, job.BackendProfile, job.Model, job.Status, job.TotalCount, job.Completed, job.Failed, job.OutputFileID, jsonOrEmptyArray(job.OutputJSON), job.FinishedAt, job.ID)
 	return err
 }
 
 func (s *Store) GetBatchJob(ctx context.Context, id string) (*storage.BatchJobRecord, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, backend, backend_profile, model, job_name, status, total_count, completed, failed, output_file_id, points_json, owner_id, COALESCE(output_json::text, '[]'), COALESCE(imported_at::text, ''), COALESCE(import_result::text, ''), created_at, updated_at FROM batch_jobs WHERE id=$1`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, backend, backend_profile, model, job_name, status, total_count, completed, failed, output_file_id, points_json, owner_id, COALESCE(output_json::text, '[]'), COALESCE(imported_at::text, ''), COALESCE(import_result::text, ''), created_at, updated_at, COALESCE(finished_at::text, '') FROM batch_jobs WHERE id=$1`, id)
 	var j storage.BatchJobRecord
-	err := row.Scan(&j.ID, &j.Backend, &j.BackendProfile, &j.Model, &j.JobName, &j.Status, &j.TotalCount, &j.Completed, &j.Failed, &j.OutputFileID, &j.PointsJSON, &j.OwnerID, &j.OutputJSON, &j.ImportedAt, &j.ImportResult, &j.CreatedAt, &j.UpdatedAt)
+	err := row.Scan(&j.ID, &j.Backend, &j.BackendProfile, &j.Model, &j.JobName, &j.Status, &j.TotalCount, &j.Completed, &j.Failed, &j.OutputFileID, &j.PointsJSON, &j.OwnerID, &j.OutputJSON, &j.ImportedAt, &j.ImportResult, &j.CreatedAt, &j.UpdatedAt, &j.FinishedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1899,7 +1905,7 @@ func (s *Store) ListBatchJobs(ctx context.Context, limit int) ([]storage.BatchJo
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, backend, backend_profile, model, job_name, status, total_count, completed, failed, output_file_id, points_json, owner_id, COALESCE(output_json::text, '[]'), COALESCE(imported_at::text, ''), COALESCE(import_result::text, ''), created_at, updated_at FROM batch_jobs ORDER BY created_at DESC LIMIT $1`, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, backend, backend_profile, model, job_name, status, total_count, completed, failed, output_file_id, points_json, owner_id, COALESCE(output_json::text, '[]'), COALESCE(imported_at::text, ''), COALESCE(import_result::text, ''), created_at, updated_at, COALESCE(finished_at::text, '') FROM batch_jobs ORDER BY created_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1907,7 +1913,7 @@ func (s *Store) ListBatchJobs(ctx context.Context, limit int) ([]storage.BatchJo
 	var result []storage.BatchJobRecord
 	for rows.Next() {
 		var j storage.BatchJobRecord
-		if err := rows.Scan(&j.ID, &j.Backend, &j.BackendProfile, &j.Model, &j.JobName, &j.Status, &j.TotalCount, &j.Completed, &j.Failed, &j.OutputFileID, &j.PointsJSON, &j.OwnerID, &j.OutputJSON, &j.ImportedAt, &j.ImportResult, &j.CreatedAt, &j.UpdatedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.Backend, &j.BackendProfile, &j.Model, &j.JobName, &j.Status, &j.TotalCount, &j.Completed, &j.Failed, &j.OutputFileID, &j.PointsJSON, &j.OwnerID, &j.OutputJSON, &j.ImportedAt, &j.ImportResult, &j.CreatedAt, &j.UpdatedAt, &j.FinishedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, j)
@@ -1930,7 +1936,7 @@ func (s *Store) SearchBatchJobs(ctx context.Context, name string, limit int) ([]
 		where = " WHERE " + strings.Join(clauses, " AND ")
 	}
 	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, `SELECT id, backend, backend_profile, model, job_name, status, total_count, completed, failed, output_file_id, points_json, owner_id, COALESCE(output_json::text, '[]'), COALESCE(imported_at::text, ''), COALESCE(import_result::text, ''), created_at, updated_at FROM batch_jobs`+where+` ORDER BY created_at DESC LIMIT $`+fmt.Sprint(len(args)), args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, backend, backend_profile, model, job_name, status, total_count, completed, failed, output_file_id, points_json, owner_id, COALESCE(output_json::text, '[]'), COALESCE(imported_at::text, ''), COALESCE(import_result::text, ''), created_at, updated_at, COALESCE(finished_at::text, '') FROM batch_jobs`+where+` ORDER BY created_at DESC LIMIT $`+fmt.Sprint(len(args)), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1938,7 +1944,7 @@ func (s *Store) SearchBatchJobs(ctx context.Context, name string, limit int) ([]
 	var result []storage.BatchJobRecord
 	for rows.Next() {
 		var j storage.BatchJobRecord
-		if err := rows.Scan(&j.ID, &j.Backend, &j.BackendProfile, &j.Model, &j.JobName, &j.Status, &j.TotalCount, &j.Completed, &j.Failed, &j.OutputFileID, &j.PointsJSON, &j.OwnerID, &j.OutputJSON, &j.ImportedAt, &j.ImportResult, &j.CreatedAt, &j.UpdatedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.Backend, &j.BackendProfile, &j.Model, &j.JobName, &j.Status, &j.TotalCount, &j.Completed, &j.Failed, &j.OutputFileID, &j.PointsJSON, &j.OwnerID, &j.OutputJSON, &j.ImportedAt, &j.ImportResult, &j.CreatedAt, &j.UpdatedAt, &j.FinishedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, j)

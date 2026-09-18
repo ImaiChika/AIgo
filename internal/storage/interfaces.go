@@ -401,6 +401,9 @@ type BatchJobRecord struct {
 	ImportResult string `json:"import_result,omitempty"`
 	CreatedAt    string `json:"created_at"`
 	UpdatedAt    string `json:"updated_at"`
+	// FinishedAt 任务进入终态（completed/failed/cancelled/expired）的时间，
+	// 供前端冻结已用时；非终态为空，重跑回执行中时清空。
+	FinishedAt string `json:"finished_at,omitempty"`
 }
 
 // BatchJobStore 批量任务存储接口。

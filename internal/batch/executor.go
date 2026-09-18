@@ -51,7 +51,9 @@ type BatchJob struct {
 	Failed       int    `json:"failed"`
 	OutputFileID string `json:"output_file_id"`
 	CreatedAt    int64  `json:"created_at"`
-	Error        string `json:"error,omitempty"`
+	// CompletedAt 任务进入终态的 Unix 秒，供前端冻结已用时；运行中任务为 0。
+	CompletedAt int64  `json:"completed_at,omitempty"`
+	Error       string `json:"error,omitempty"`
 	// ImportedAt 非空表示结果已完成导入（导入幂等）；前端据此决定是否触发自动导入。
 	ImportedAt string `json:"imported_at,omitempty"`
 	// Tracked 表示该任务在本地 batch_jobs 有记录（导入幂等可用）。

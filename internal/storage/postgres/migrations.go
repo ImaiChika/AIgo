@@ -19,7 +19,7 @@ var baselineSchemaSQL string
 
 const (
 	// LatestSchemaVersion 是当前程序能够使用的最新数据库版本。
-	LatestSchemaVersion int64 = 30
+	LatestSchemaVersion int64 = 31
 	// migrationLockKey 在同一 PostgreSQL 数据库内串行化所有 AIgo Schema 迁移。
 	migrationLockKey int64 = 0x4149474f5f4d4947 // "AIGO_MIG"
 )
@@ -407,6 +407,13 @@ func configuredMigrations(schemaSQL string) []migration {
 			// DashScope 云端批量执行器已弃置：历史批量任务（含未导入结果）按用户
 			// 决定一并移除，避免任务列表出现无法查询/导入的孤儿记录。
 			`DELETE FROM batch_jobs WHERE backend IS NULL OR backend <> 'local_single_api'`,
+		}},
+		{Version: 31, Name: "batch_job_finished_at", Statements: []string{
+			// 任务终态时间：前端据此冻结“已用时”，终态任务不再无限计时。
+			`ALTER TABLE batch_jobs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ`,
+			// 存量终态任务按最后一次写入时间回填（终态写入即完成；导入只在其后）。
+			`UPDATE batch_jobs SET finished_at = COALESCE(finished_at, updated_at, NOW())
+			 WHERE status IN ('completed','complete','failed','cancelled','expired') AND finished_at IS NULL`,
 		}},
 	}
 }

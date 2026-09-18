@@ -108,6 +108,10 @@ func TestLocalExecutorUsesSingleQuestionAPIAndImportsResults(t *testing.T) {
 	if err != nil || job == nil || job.Status != "completed" || job.Completed != 2 || job.Failed != 0 {
 		t.Fatalf("local batch did not complete: job=%+v err=%v", job, err)
 	}
+	// 终态任务必须携带完成时间，前端据此冻结已用时。
+	if job.CompletedAt == 0 || job.CompletedAt < job.CreatedAt {
+		t.Fatalf("completed job missing finished_at: created=%d completed=%d", job.CreatedAt, job.CompletedAt)
+	}
 
 	result, err := executor.ImportResults(ctx, jobID, nil)
 	if err != nil || result.Saved != 2 || len(result.QuestionIDs) != 2 {
