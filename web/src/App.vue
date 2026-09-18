@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { useRouter, useRoute, isNavigationFailure } from "vue-router";
-import { currentUser, hasPerm, roleName, clearAuth, setAuth, updateUser, isLoggedIn } from "./auth.js";
+import { currentUser, hasPerm, roleName, clearAuth, setAuth, updateUser, isLoggedIn, getToken } from "./auth.js";
 import { api } from "./api.js";
 import SidebarNavigation from "./components/SidebarNavigation.vue";
 import { visibleNavigation, navigationItemActive, permissionAllowed } from "./navigation.js";
@@ -42,9 +42,13 @@ async function refreshCurrentUser() {
   if (meRefreshBusy || isLoginPage.value || !isLoggedIn.value) return;
   if (Date.now() - meRefreshedAt < ME_REFRESH_MIN_INTERVAL) return;
   meRefreshBusy = true;
+  const tokenBefore = getToken();
   try {
     const fresh = await api.me();
-    // 只覆盖同一账号：期间若已切换账号，以本地新登录态为准。
+    // 请求在途期间若已切换身份/账号（token 变化），旧身份快照直接丢弃——
+    // 同一账号的两个身份 userId 相同，不丢就会用旧身份权限覆盖新身份菜单，
+    // 表现为“切到审题老师后侧栏仍显示命题工作页，点进去 403”。
+    if (getToken() !== tokenBefore) return;
     if (fresh?.id && fresh.id === currentUser.value?.id) updateUser(fresh);
   } catch (e) {
     // 服务端不可达时降级沿用本地快照，不打扰当前操作。
@@ -167,6 +171,9 @@ async function switchRole(role) {
 	}
     const data = await api.switchRole(role);
     setAuth(data.token, data.user);
+    // 新身份的完整资料已随切换响应写入；解除 me 节流，让下次导航尽快
+    // 用新 token 拉一次权威快照（同时清掉可能在途的旧身份刷新结果）。
+    meRefreshedAt = 0;
   } catch (error) {
     switchRoleError.value = error.message || "身份切换失败";
   } finally {

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onMounted } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { useRoute } from "vue-router";
 import { currentUser, hasPerm } from "../auth.js";
 import { api } from "../api.js";
@@ -85,8 +85,24 @@ function groupHasPendingWork(group) {
   return (pendingWorkByGroup[group.id] || []).some(key => Number(badgeCounts.value[key]) > 0);
 }
 
-onMounted(loadBadgeCounts);
+onMounted(() => {
+  loadBadgeCounts();
+  // 动作页（送审/审核/决断/退修/分享审批）完成操作后发通知，角标即时刷新。
+  window.addEventListener("aigo:refresh-navigation-badges", loadBadgeCounts);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("aigo:refresh-navigation-badges", loadBadgeCounts);
+});
 watch(identityKey, loadBadgeCounts);
+// 兜底：跨页签或后台变化（他人审批、任务流转）无法发通知，路由切换时
+// 节流刷新一次，保证角标最终一致。
+let lastRouteBadgeRefresh = 0;
+watch(() => route.path, () => {
+  const now = Date.now();
+  if (now - lastRouteBadgeRefresh < 4000) return;
+  lastRouteBadgeRefresh = now;
+  loadBadgeCounts();
+});
 </script>
 
 <template>

@@ -74,3 +74,10 @@ export function visibleNavigation(hasPermission) {
 export function navigationItemActive(item, path) {
   return (item.activePaths || [item.path]).includes(path);
 }
+
+// notifyNavigationWorkChanged 通知侧栏立即重算待办角标。提交送审、审核投票、
+// 最终决断、保存退修、重新送审、分享审批等动作会改变待办数量，而动作页
+// 通常不发生路由跳转，侧栏无法自行感知；相关页面在动作成功后调用本函数。
+export function notifyNavigationWorkChanged() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("aigo:refresh-navigation-badges"));
+}

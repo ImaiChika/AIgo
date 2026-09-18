@@ -2,6 +2,7 @@
 import { ref, onMounted, computed } from "vue";
 import { api } from "../api.js";
 import { currentUser, hasPerm } from "../auth.js";
+import { notifyNavigationWorkChanged } from "../navigation.js";
 import QuestionDetailModal from "../components/QuestionDetailModal.vue";
 import StructuredCommentInput from "../components/StructuredCommentInput.vue";
 import ReviewCommentCard from "../components/ReviewCommentCard.vue";
@@ -172,6 +173,7 @@ async function doReview() {
     mySubmitted.value = true;
     reviewOpinionReset();
     await loadMyTasks();
+    notifyNavigationWorkChanged();
     // 投票后任务可能立即进入下一轮并改派他人；清空当前工作区，避免再请求已无权访问的任务。
     selectedQuestion.value = null;
     reviewTask.value = null;

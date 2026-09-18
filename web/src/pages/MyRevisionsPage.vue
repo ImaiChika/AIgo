@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { onBeforeRouteLeave } from "vue-router";
 import { api } from "../api.js";
+import { notifyNavigationWorkChanged } from "../navigation.js";
 import AICheckScoreButton from "../components/AICheckScoreButton.vue";
 
 const toast = ref("");
@@ -99,6 +100,7 @@ async function saveRevision() {
       change_reason: editForm.value.change_reason || "按审核退修意见修改",
     });
 	showToast("修改已保存，现在可以按原流程重新提交审核");
+    notifyNavigationWorkChanged();
     await load();
     // 更新选中条目为最新题目
     const found = items.value.find((it) => it.task.id === selected.value?.task.id);
@@ -145,6 +147,7 @@ async function resubmit(ids) {
     selectedIds.value = new Set();
     selected.value = null;
     await load();
+    notifyNavigationWorkChanged();
   } catch (e) {
     errorDialog.value = e.message || "重新提交审核失败";
   } finally {

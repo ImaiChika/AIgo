@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import { api } from "../api.js";
 import { currentUser, hasPerm } from "../auth.js";
+import { notifyNavigationWorkChanged } from "../navigation.js";
 import AICheckScoreButton from "../components/AICheckScoreButton.vue";
 import ReviewHistoryPanel from "../components/ReviewHistoryPanel.vue";
 
@@ -52,6 +53,7 @@ async function review(item, status, note = "") {
     await api.reviewQuestionShare(item.request.id, status, note);
     showToast(status === "approved" ? "已批准加入全局正式库" : "已拒绝分享申请");
     await load();
+    notifyNavigationWorkChanged();
   } catch (error) {
     showToast("处理申请失败：" + error.message);
   } finally {

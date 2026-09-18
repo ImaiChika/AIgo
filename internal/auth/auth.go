@@ -127,6 +127,7 @@ func builtinRoles() []domain.Role {
 				domain.PermQuestionGenerate,
 				domain.PermBatchRun,
 				domain.PermQuestionViewFormal, domain.PermQuestionViewEliminated,
+				domain.PermQuestionDownload,
 				domain.PermQuestionShare,
 				domain.PermReviewSubmit,
 				domain.PermStatsView,
@@ -219,12 +220,14 @@ func (s *Service) InitBuiltinRoles(ctx context.Context) error {
 				}
 			}
 			// 命题教师模板默认同时支持单题和批量出题，可以把本人题目送入管理员配置的审核流程，并申请分享正式题。
+			// question:download 支撑个人正式题库的导出出口：命题教师只能导出本人
+			// published 题（导出范围按 owner 强制隔离），分享是否被否决不影响。
 			if r.ID == domain.RoleTeacher {
 				have := make(map[string]bool, len(valid))
 				for _, p := range valid {
 					have[p] = true
 				}
-				for _, p := range []string{domain.PermQuestionGenerate, domain.PermBatchRun, domain.PermQuestionViewFormal, domain.PermQuestionViewEliminated, domain.PermQuestionShare, domain.PermReviewSubmit} {
+				for _, p := range []string{domain.PermQuestionGenerate, domain.PermBatchRun, domain.PermQuestionViewFormal, domain.PermQuestionViewEliminated, domain.PermQuestionDownload, domain.PermQuestionShare, domain.PermReviewSubmit} {
 					if !have[p] {
 						valid = append(valid, p)
 						changed = true

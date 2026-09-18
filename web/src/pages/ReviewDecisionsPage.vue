@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted, computed } from "vue";
 import { api } from "../api.js";
+import { notifyNavigationWorkChanged } from "../navigation.js";
 import StructuredCommentInput from "../components/StructuredCommentInput.vue";
 import ReviewCommentCard from "../components/ReviewCommentCard.vue";
 import CompactPager from "../components/CompactPager.vue";
@@ -167,6 +168,7 @@ async function doFinalize() {
     showToast("决断完成");
     finalizeComment.value = { stem: "", options: "", answer: "", other: "" };
     await loadDecisions();
+    notifyNavigationWorkChanged();
     if (!selected.value) {
       // 已决断完最后一项，清空右侧
       reviewRecords.value = [];

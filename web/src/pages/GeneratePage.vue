@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import { api } from "../api.js";
 import { currentUser, hasPerm } from "../auth.js";
+import { notifyNavigationWorkChanged } from "../navigation.js";
 import { useRoute, useRouter } from "vue-router";
 import { useAICheckProgress } from "../aiCheckProgress.js";
 import { clearGenerationWorkspace, loadGenerationWorkspace, saveGenerationWorkspace } from "../generationWorkspaceState.js";
@@ -10,6 +11,10 @@ import AICheckScoreButton from "../components/AICheckScoreButton.vue";
 
 // AI 检查分段进度（生成成功后轮询，见 aiCheckProgress.js）
 const { progress: aiProgress, start: startAIProgress, stop: stopAIProgress } = useAICheckProgress();
+// 检查完成后通过数即“新题修改与送审”角标的变化来源，通知侧栏立即重算。
+watch(() => !!aiProgress.value && !aiProgress.value.stalled && aiProgress.value.checking === 0, (done) => {
+  if (done) notifyNavigationWorkChanged();
+});
 const route = useRoute();
 const router = useRouter();
 

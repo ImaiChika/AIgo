@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { onBeforeRouteLeave } from "vue-router";
 import { api } from "../api.js";
+import { notifyNavigationWorkChanged } from "../navigation.js";
 import CompactPager from "../components/CompactPager.vue";
 import QuestionDetailModal from "../components/QuestionDetailModal.vue";
 
@@ -187,6 +188,7 @@ async function submit(ids) {
       showToast(`已提交 ${result.submitted} 道题进入审核流程`);
     }
     await loadQuestions();
+    notifyNavigationWorkChanged();
   } catch (error) {
     showToast("提交审核失败：" + error.message);
   } finally {

@@ -2,6 +2,7 @@
 import { ref, computed, watch, nextTick, onMounted, onActivated, onDeactivated, onBeforeUnmount } from "vue";
 import { api } from "../api.js";
 import { hasPerm, currentUser } from "../auth.js";
+import { notifyNavigationWorkChanged } from "../navigation.js";
 import { useAICheckProgress } from "../aiCheckProgress.js";
 import KnowledgePointPicker from "../components/KnowledgePointPicker.vue";
 import QuestionDetailModal from "../components/QuestionDetailModal.vue";
@@ -473,6 +474,8 @@ const passedRows = computed(() => importRows.value.filter(r => !r.discarded));
 const discardedRows = computed(() => importRows.value.filter(r => r.discarded));
 const failedItems = computed(() => (importResult.value?.items || []).filter(i => i.status !== "ok"));
 const checkDone = computed(() => !!aiProgress.value && !aiProgress.value.stalled && aiProgress.value.checking === 0);
+// 检查完成后通过数即“新题修改与送审”角标的变化来源，通知侧栏立即重算。
+watch(checkDone, (done) => { if (done) notifyNavigationWorkChanged(); });
 
 async function openQuestion(id) {
   try {
