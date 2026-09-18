@@ -540,13 +540,19 @@ func (s *Server) handleUnpublishQuestion(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, 200, updated)
 }
 
-// handleDeleteQuestion 删除题目。校验题库范围与题库分层：
-// 正式题库题目需专门的删除权限（question:delete_formal），
-// 过程/淘汰题库沿用 question:delete。
+// handleDeleteQuestion 删除题目（一律归档：移入淘汰题库，版本快照与审核记录
+// 完整保留）。两类调用者：
+//   - 有权限者（question:delete / 正式题库 question:delete_formal）：可删除其
+//     题库范围内的题目，含全局题库清理（如管理员撤下他人题目）。
+//   - 题目所有者本人：无需分配删除权限，可把自己的"刚出未送审"（ai_reviewed）
+//     或"流程完全结束"（published）的题移入淘汰题库。
+//
+// 通用红线（有权限者与所有者同样受限）：淘汰终态不可再删；流程中的题不可删
+// （审核中/待决断/需修改）；暂存态不可见亦不可删；分享审批中或已入全局正式库
+// 的题不可删（分享被否决不阻塞删除）。
 func (s *Server) handleDeleteQuestion(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	// 删除前先判定题目所属题库分层，正式题库要求专门权限
 	q, err := s.questionStore.GetQuestion(r.Context(), id)
 	if err != nil {
 		writeError(w, 500, err.Error())
@@ -556,86 +562,76 @@ func (s *Server) handleDeleteQuestion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "题目不存在")
 		return
 	}
-	perm := domain.PermQuestionDelete
-	if q.Tier() == domain.TierFormal {
-		perm = domain.PermQuestionDeleteFormal
-	}
 
-	// 删除前校验题库范围（删除后无法再核对）
-	if _, status, err := s.loadScopedQuestion(r, id, perm); err != nil {
-		writeError(w, status, err.Error())
-		return
-	}
-
-	// 淘汰终态（驳回锁定/已归档）不可删除：终态留档是审计承诺的一部分
+	// 通用红线：先于权限判定，语义对两类调用者一致
 	if q.Tier() == domain.TierEliminated {
 		writeError(w, http.StatusConflict, "已淘汰的题目为终态留档（驳回锁定或已归档），不可删除")
 		return
 	}
-
-	// 审核中/待决断的题目不可删除：先完成当前审核或做出最终决断，
-	// 避免删除操作打断进行中的审核流程
-	if q.Status == domain.StatusReviewing || q.Status == domain.StatusConflict {
-		writeError(w, http.StatusConflict, "审核中的题目不能删除：请先完成当前审核或做出最终决断")
+	if domain.IsStagingStatus(q.Status) {
+		writeError(w, http.StatusForbidden, "暂存态题目（AI 检查未完成）不可见，也不可删除")
+		return
+	}
+	if q.Status == domain.StatusReviewing || q.Status == domain.StatusConflict || q.Status == domain.StatusRevisionRequired {
+		writeError(w, http.StatusConflict, "流程中的题目不能删除（审核中/待决断/需修改）：请先完成当前环节")
 		return
 	}
 
-	// 已提交全局题库分享的题目不能删除（与撤回一致）：先完成或结束分享申请
-	if share := s.questionShare(r, id); share != nil {
-		writeError(w, http.StatusConflict, "题目已经提交全局题库分享，不能删除；请先完成或结束分享申请")
+	perm := domain.PermQuestionDelete
+	if q.Tier() == domain.TierFormal {
+		perm = domain.PermQuestionDeleteFormal
+	}
+	privileged := s.hasPermission(r, perm)
+	userID := auth.GetUserID(r.Context())
+	isOwner := q.OwnerID != "" && q.OwnerID == userID
+
+	if !privileged && !isOwner {
+		writeError(w, http.StatusForbidden, "无权删除该题目：只能删除本人题目，或由有权限者操作")
 		return
+	}
+	// 所有者路径：仅"刚出未送审"与"流程完全结束"两态可移入淘汰题库
+	if !privileged && q.Status != domain.StatusAIReviewed && q.Status != domain.StatusPublished {
+		writeError(w, http.StatusConflict, "只能把刚出未送审或流程完全结束的题目移入淘汰题库")
+		return
+	}
+
+	// 分享守卫：审批中/已入全局正式库不可删；被否决的分享不阻塞
+	if share := s.questionShare(r, id); share != nil &&
+		(share.Status == domain.QuestionSharePending || share.Status == domain.QuestionShareApproved) {
+		writeError(w, http.StatusConflict, "分享审批中或已进入全局正式库的题目不能删除；请先完成或结束分享申请")
+		return
+	}
+
+	// 有权限者按题库范围与分层权限校验（全局题库清理走同一入口）
+	if privileged {
+		if _, status, err := s.loadScopedQuestion(r, id, perm); err != nil {
+			writeError(w, status, err.Error())
+			return
+		}
 	}
 
 	actor := auth.GetUsername(r.Context())
-
-	// 归档删除：已通过（published）或存在审核任务历史的题目改为归档（进淘汰
-	// 题库）——版本快照、审核记录与审计链全部保留；仅无人工审核史的
-	// 草稿/未送审题物理删除。
-	hasHistory, err := s.reviewSvc.HasReviewHistory(r.Context(), id)
-	if err != nil {
-		writeError(w, 500, "查询审核历史失败: "+err.Error())
-		return
-	}
-	if q.Status == domain.StatusPublished || hasHistory {
-		archived := *q
-		archived.Status = domain.StatusArchived
-		archived.UpdatedAt = time.Now()
-		note := "题目撤下并归档（保留版本快照与审核记录）"
-		archiveCtx := storage.WithQuestionChange(r.Context(), storage.QuestionChange{
-			Actor: actor, ChangeType: "archive", ChangeNote: note,
-		})
-		ok := s.withAuditedTx(w, r, "归档题目",
-			func(txCtx context.Context) error {
-				if err := s.questionStore.SaveQuestion(archiveCtx, archived); err != nil {
-					return fmt.Errorf("归档失败: %w", err)
-				}
-				return nil
-			},
-			func(txCtx context.Context) error {
-				return s.auditSvc.Log(txCtx, id, "archive", actor, note)
-			})
-		if !ok {
-			return
-		}
-		writeJSON(w, 200, map[string]any{"status": "ok", "id": id, "archived": true})
-		return
-	}
-
-	// 物理删除（无人工审核史的草稿/未送审题）：业务与审计同事务
-	ok := s.withAuditedTx(w, r, "删除题目",
+	note := "题目移入淘汰题库归档（保留版本快照与审核记录）"
+	archived := *q
+	archived.Status = domain.StatusArchived
+	archived.UpdatedAt = time.Now()
+	archiveCtx := storage.WithQuestionChange(r.Context(), storage.QuestionChange{
+		Actor: actor, ChangeType: "archive", ChangeNote: note,
+	})
+	ok := s.withAuditedTx(w, r, "归档题目",
 		func(txCtx context.Context) error {
-			if err := s.questionStore.DeleteQuestion(txCtx, id); err != nil {
-				return fmt.Errorf("删除失败: %w", err)
+			if err := s.questionStore.SaveQuestion(archiveCtx, archived); err != nil {
+				return fmt.Errorf("归档失败: %w", err)
 			}
 			return nil
 		},
 		func(txCtx context.Context) error {
-			return s.auditSvc.LogDelete(txCtx, id, actor)
+			return s.auditSvc.Log(txCtx, id, "archive", actor, note)
 		})
 	if !ok {
 		return
 	}
-	writeJSON(w, 200, map[string]any{"status": "ok", "id": id, "archived": false})
+	writeJSON(w, 200, map[string]any{"status": "ok", "id": id, "archived": true})
 }
 
 // handlePublishQuestion 将审核通过的题目发布到正式题库。

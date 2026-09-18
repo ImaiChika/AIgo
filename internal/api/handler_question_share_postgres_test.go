@@ -63,7 +63,9 @@ func TestPersonalQuestionIsolationAndOneTimeGlobalShare(t *testing.T) {
 	if personal.Code != http.StatusOK || !strings.Contains(personal.Body.String(), q.ID) || strings.Contains(personal.Body.String(), other.ID) {
 		t.Fatalf("personal question scope leaked or missed data: status=%d body=%s", personal.Code, personal.Body.String())
 	}
-	if strings.Contains(personal.Body.String(), "created_by") || strings.Contains(personal.Body.String(), "owner_id") {
+	// owner_id 允许暴露（前端据此渲染"本人的题"删除入口，ID 为不透明标识）；
+	// created_by 等审计追溯字段仍不向前端暴露。
+	if strings.Contains(personal.Body.String(), "created_by") {
 		t.Fatalf("personal question API exposed creator fields: %s", personal.Body.String())
 	}
 	globalForbidden := serveAuthJSON(t, handler, http.MethodGet, "/api/questions?scope=global&tier=formal", ownerToken, "203.0.113.50", nil)

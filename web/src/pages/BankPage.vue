@@ -2,7 +2,7 @@
 import { ref, onMounted, computed, watch, nextTick } from "vue";
 import { useRoute } from "vue-router";
 import { api } from "../api.js";
-import { hasPerm } from "../auth.js";
+import { hasPerm, currentUser } from "../auth.js";
 import AICheckScoreButton from "../components/AICheckScoreButton.vue";
 import ReviewHistoryPanel from "../components/ReviewHistoryPanel.vue";
 
@@ -13,15 +13,23 @@ const route = useRoute();
 const canDelete = computed(() => hasPerm("question:delete"));
 const canDownload = computed(() => hasPerm("question:download"));
 const canUnpublish = computed(() => hasPerm("user:manage"));
-// 正式题库（已通过）为定稿密封区：删除需要专门权限（question:delete_formal）
+// 有权限者可删正式题库（question:delete_formal）；普通所有者也可删自己流程
+// 完全结束的 published 题（无需权限，见 canDeleteQuestion）
 const canDeleteFormal = computed(() => hasPerm("question:delete_formal"));
 
-// 按题目状态选择删除权限：已通过（正式题库）走 question:delete_formal，其余走 question:delete
+// 删除=移入淘汰题库留档。两类入口：
+// - 有权限者（question:delete / 正式题库 question:delete_formal）：个人与全局题库均可删；
+// - 所有人：本人的"刚出未送审"（ai_reviewed）或"流程完全结束"（published）的题，
+//   无需分配权限（后端按 owner_id 校验）。
+// 流程中的题（审核中/待决断/需修改）与淘汰终态不可删。
+const DELETABLE_OWNER_STATUSES = ["ai_reviewed", "published"];
 function canDeleteQuestion(q) {
-  // 淘汰终态（驳回锁定/已归档）为留档题，不可删除；审核中/待决断须先完成审核或决断
-  if (q.status === "rejected" || q.status === "archived") return false;
-  if (q.status === "reviewing" || q.status === "conflict") return false;
-  return q.status === "published" ? canDeleteFormal.value : canDelete.value;
+  if (["rejected", "archived", "reviewing", "conflict", "revision_required"].includes(q.status)) return false;
+  if (q.status === "ai_draft" || q.status === "auto_checked") return false;
+  if (q.status === "published" ? canDeleteFormal.value : canDelete.value) return true;
+  return !isGlobalScope.value
+    && q.owner_id === currentUser.value?.id
+    && DELETABLE_OWNER_STATUSES.includes(q.status);
 }
 
 // 个人题库按 owner_id 隔离，三个分层都由 question:view 控制；
@@ -395,11 +403,11 @@ watch(selectedQuestion, (q) => {
 
 async function deleteQuestion(q) {
   if (mutating.value) return;
-  if (!confirm(`确定删除题目？\n${(q.clinical_stem || "").slice(0, 50)}...`)) return;
+  if (!confirm(`确定删除题目？删除后将移入淘汰题库留档（版本与审核记录保留）。\n${(q.clinical_stem || "").slice(0, 50)}...`)) return;
   mutating.value = true;
   try {
     const data = await api.deleteQuestion(q.id);
-    showToast(data?.archived ? "已归档，题目移入淘汰题库（审核记录保留）" : "已删除");
+    showToast(data?.archived ? "已移入淘汰题库留档（审核记录保留）" : "已删除");
     questions.value = questions.value.filter((item) => item.id !== q.id);
     totalCount.value = Math.max(0, totalCount.value - 1);
     if (selectedQuestion.value?.id === q.id) selectedQuestion.value = null;
@@ -588,8 +596,8 @@ onMounted(async () => {
               </div>
               <div class="q-actions">
                 <span class="q-status" :class="statusClass(q.status)">{{ statusText(q.status) }}</span>
-                <span v-if="!isGlobalScope && shareStatus(q.id)" class="share-status">{{ shareStatusText(shareStatus(q.id)) }}</span>
-                <button v-if="!isGlobalScope && canDeleteQuestion(q)" class="delete-btn" type="button" :disabled="mutating" @click.stop="deleteQuestion(q)" title="删除">×</button>
+                <span v-if="!isGlobalScope && shareStatus(q.id) && q.status !== 'archived'" class="share-status">{{ shareStatusText(shareStatus(q.id)) }}</span>
+                <button v-if="canDeleteQuestion(q)" class="delete-btn" type="button" :disabled="mutating" @click.stop="deleteQuestion(q)" title="删除（移入淘汰题库）">×</button>
               </div>
             </div>
           </div>

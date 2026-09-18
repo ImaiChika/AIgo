@@ -158,7 +158,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/questions/{id}/bank", s.requireAuth(domain.PermBankManage, s.handleAddQuestionBank))
 	mux.HandleFunc("DELETE /api/questions/{id}/bank/{bankId}", s.requireAuth(domain.PermBankManage, s.handleRemoveQuestionBank))
 	mux.HandleFunc("POST /api/questions/bank-move-batch", s.requireAuth(domain.PermBankManage, s.handleMoveQuestionsBankBatch))
-	mux.HandleFunc("DELETE /api/questions/{id}", s.requireAuth(domain.PermQuestionDelete, s.handleDeleteQuestion))
+	// 删除=移入淘汰题库留档：有权限者可删其范围内题目（含全局题库清理），
+	// 题目所有者本人无需删除权限；细分校验在 handler 内完成。
+	mux.HandleFunc("DELETE /api/questions/{id}", s.requireAuth("", s.handleDeleteQuestion))
 	mux.HandleFunc("POST /api/questions/{id}/publish", s.requireAuth(domain.PermReviewFinal, s.handlePublishQuestion))
 
 	// 个人题目分享至全局题库：申请人只能看自己的申请，管理员可看待审批队列并一次性审批。

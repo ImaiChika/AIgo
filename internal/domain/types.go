@@ -49,7 +49,7 @@ type A2Question struct {
 	Status          QuestionStatus   `json:"status"`           // 审核状态
 	Version         int              `json:"version"`          // 版本号，每次修改递增
 	CreatedBy       string           `json:"-"`                // 生成者（仅审计/内部追溯，题目接口不向前端暴露）
-	OwnerID         string           `json:"-"`                // 个人题库归属用户 ID（仅服务端范围过滤）
+	OwnerID         string           `json:"owner_id"`         // 个人题库归属用户 ID（前端判定"自己的题"以展示删除入口）
 	CreatedAt       time.Time        `json:"created_at"`       // 创建时间
 	UpdatedAt       time.Time        `json:"updated_at"`       // 最后更新时间
 }
