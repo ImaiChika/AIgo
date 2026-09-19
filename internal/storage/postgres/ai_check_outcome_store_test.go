@@ -84,6 +84,7 @@ func passOutcome(q domain.A2Question, taskID string) storage.AICheckOutcome {
 }
 
 func failOutcome(q domain.A2Question, taskID string) storage.AICheckOutcome {
+	snapshot := q
 	return storage.AICheckOutcome{
 		Result: domain.AIReviewResult{
 			ID: "air-" + q.ID, QuestionID: q.ID, QuestionVersion: q.Version, Verdict: "reject",
@@ -92,7 +93,11 @@ func failOutcome(q domain.A2Question, taskID string) storage.AICheckOutcome {
 		},
 		Discard: &domain.AICheckDiscard{
 			ID: "aicd-" + q.ID, QuestionID: q.ID, Verdict: "reject",
+			Scores: domain.ReviewScores{Scientific: 40, Logic: 50, A2Fit: 45, Answer: 55},
+			Issues: []domain.ReviewIssue{{Field: "stem", Severity: "error", Message: "题干信息不足"}},
+			Suggestion: "建议重写题干", Model: "test-model",
 			StemSummary: "患者，男，60岁……", CreatedAt: time.Now(),
+			OwnerID: "owner-1", Question: &snapshot,
 		},
 		DeleteQuestionID: q.ID,
 		CompleteTaskID:   taskID,
@@ -146,8 +151,16 @@ func TestApplyAICheckOutcomeFailDeletesDraftAndKeepsDiscard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := discards[q.ID]; !ok {
+	d, ok := discards[q.ID]
+	if !ok {
 		t.Fatal("淘汰档案应随事务留档")
+	}
+	// 淘汰档案含归属人、评分与完整题目快照，题目删除后仍可查看原题
+	if d.OwnerID != "owner-1" || d.Scores.Answer != 55 || len(d.Issues) != 1 || d.Suggestion == "" {
+		t.Fatalf("淘汰档案字段不完整: %+v", d)
+	}
+	if d.Question == nil || d.Question.ID != q.ID || len(d.Question.Options) != len(q.Options) || d.Question.Answer != q.Answer {
+		t.Fatalf("淘汰档案应保留完整题目快照: %+v", d.Question)
 	}
 	if result, err := store.GetLatestByQuestionID(ctx, q.ID); err != nil || result != nil {
 		t.Fatalf("题目删除后检查结果应级联清理: %v %+v", err, result)
