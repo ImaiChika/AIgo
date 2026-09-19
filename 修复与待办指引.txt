@@ -515,6 +515,42 @@ N/A 暂无修复版，CI 对该 ID 临时放行（.github/workflows/ci.yml），
         （记入《账号密码.txt》）。
     提交：f51556b、e96f32e。
 
+27.【批量回放全显"待检查"+ 他人历史不可见】P1（2026-09-19 完成）
+    问题：a) 批量任务详情回放的状态映射只认 ai_reviewed，其余状态（published
+        定稿/archived 归档/reviewing 审核中）一律兜底显示"待检查"——expert2
+        两批题（2 定稿 2 归档）在专家和管理员界面全部误显"待检查"；
+        b) 被管理员清理（无淘汰留档）的题目 ID 在进度接口里被静默剔除，
+        回放永远停在"检查中"；c) 任务卡片只显示"其他用户任务"，看不出由谁
+        生成；d) 角色拆分后原提交人失去 batch:run（如 expert2 仅剩
+        question:view + review:do），批量页整页被权限面板挡住，连自己
+        历史都进不去（路由 perm=batch:run + 接口 list/status/download 均
+        要求 batch:run 三层拦截）。
+    修复（提交 785e57a + 后续）：a) 回放行按题目当前生命周期展示：已通过/
+        已定稿/审核中/已归档/已驳回；进度接口对已物理删除且无留档的 ID 回带
+        missing 标记（显示"已删除"，不参与计数）；b) BatchJob 增加 owner_name
+        由 API 回填，任务卡片显示"XX 的任务 · 只读"、详情面板显示"该任务由
+        XX 提交"；c) 历史回看改为过程库查看权（question:view）：路由
+        generation-batch 降为 question:view + generationRouteRedirect 对纯
+        查看者放行（点"AI 出题"直达批量只读页）+ 接口 list/status/download
+        降为 question:view（归属规则 handler 内二次校验，提交/能力/重跑仍
+        batch:run）+ 批量页对无 batch:run 者渲染只读横幅并隐藏生成配置。
+    权限矩阵（API 实测）：归属人本人回放 200；全局查看管理员回放他人
+        "已导入"任务 200、未导入 403；无全局权限他人任务 403；expert2
+        （仅 question:view）可列出并回放本人任务。
+    验证：本地改库模拟 published/archived/删除三态 + 浏览器核验；服务器
+        expert2 登录实测只读横幅 + 本人两任务正确显示"已归档/已定稿"；
+        admin 任务列表显示全部 5 个任务归属人（expert/expert2/simteacher）。
+    附带事故记录：一次 rsync 因 shell 工作目录停留在 web/ 子目录执行，把
+        前端文件错拷到服务器 /opt/aigo 根部（src/public/dist/node_modules
+        等），且 /opt/aigo/web/src 未更新导致镜像沿用旧 bundle。已清理根部
+        残留并从项目根目录重新 rsync（md5 比对 router.js/navigation.js 一致）
+        后重建。教训：rsync 前显式 cd 项目根目录。
+    出题历史审计结论（服务器）：26 道题全部为真实 LLM 生成（含 expert 9-10
+        社交焦虑 2 题、各账号批量/单题产物），按"真实生成不删"原则全部保留；
+        无手工/脚本伪造测试遗留需要清理。simteacher 1 道 reviewing 流程中
+        题目保持不动。本地开发库的 mock 数据已于当日验证后清理。
+    提交：785e57a + 本次提交。
+
 ================================================================================
 六、已删去项（2026-09-17 复核判定无行为影响，不再作为待办）
 ================================================================================

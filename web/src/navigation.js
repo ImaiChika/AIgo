@@ -6,17 +6,22 @@ export function permissionAllowed(permission, hasPermission) {
 }
 
 // 命题工作区的两个子页面分别受各自权限保护：
-// - 只有单题权限：进入单题页；误打开批量地址时回到单题页并提示原因。
+// - 有单题权限：进入单题页；误打开批量地址时回到单题页并提示原因。
 // - 只有批量权限：保留命题工作区入口，直接进入批量页。
-// - 两者都没有：回到登录后所有用户可访问的个人数据页。
+// - 两者都没有但有 question:view（角色拆分后的纯审题老师）：进入批量页
+//   只读回看自己的历史任务与淘汰明细。
+// - 全都没有：回到登录后所有用户可访问的个人数据页。
 export function generationRouteRedirect(routeName, hasPermission) {
   const canGenerate = hasPermission("question:generate");
   const canBatch = hasPermission("batch:run");
   if (routeName === "generation-single") {
     if (canGenerate) return null;
-    return canBatch ? "/generate/batch" : "/my";
+    if (canBatch) return "/generate/batch";
+    if (hasPermission("question:view")) return "/generate/batch";
+    return "/my";
   }
   if (routeName === "generation-batch" && !canBatch) {
+    if (hasPermission("question:view")) return null;
     return canGenerate
       ? { path: "/generate", query: { notice: "batch-permission" } }
       : "/my";
@@ -31,7 +36,7 @@ export const navigationGroups = [
   ] },
   { id: "authoring", label: "命题工作", icon: "M14 4l6 6M4 20l4-1L20 7l-3-3L5 16Z M13 20h7", items: [
     { id: "knowledge", label: "考试大纲", path: "/knowledge" },
-    { id: "generate", label: "AI 出题", path: "/generate", activePaths: ["/generate", "/generate/batch", "/batch"], permission: ["question:generate", "batch:run"] },
+    { id: "generate", label: "AI 出题", path: "/generate", activePaths: ["/generate", "/generate/batch", "/batch"], permission: ["question:generate", "batch:run", "question:view"] },
     { id: "new-questions", label: "新题修改与送审", path: "/new-questions", permission: "review:submit", badgeKey: "newQuestions" },
     { id: "my-revisions", label: "待我修改", path: "/my-revisions", permission: "question:edit", badgeKey: "revisions" },
   ] },

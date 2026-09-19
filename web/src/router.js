@@ -29,7 +29,9 @@ const routes = [
   { path: "/settings", component: PersonalSettingsPage, meta: { title: "个人设置" } },
   { path: "/generate", name: "generation", component: GenerationWorkspace, children: [
     { path: "", name: "generation-single", component: GeneratePage, meta: { title: "试题生成", perm: "question:generate" } },
-    { path: "batch", name: "generation-batch", component: BatchPage, meta: { title: "批量推理", perm: "batch:run" } },
+    // 批量页按过程库查看权放行：无 batch:run 的原提交人仍可进入只读回看
+    // 自己的历史任务；页面内部再按 batch:run 隐藏提交配置。
+    { path: "batch", name: "generation-batch", component: BatchPage, meta: { title: "批量推理", perm: "question:view" } },
   ] },
   { path: "/new-questions", component: NewQuestionsPage, meta: { title: "新题修改与提交审核", perm: "review:submit" } },
   { path: "/knowledge", component: KnowledgePage, meta: { title: "考试大纲" } },
