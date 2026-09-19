@@ -15,6 +15,18 @@ import (
 	"aigo/internal/storage"
 )
 
+// withBatchOwnerName 回填任务归属人用户名，供任务卡片展示"由谁生成"。
+// 查不到（如账号已注销）时保持为空，前端回退为"其他用户"。
+func (s *Server) withBatchOwnerName(job *batch.BatchJob) *batch.BatchJob {
+	if job == nil || job.OwnerID == "" {
+		return job
+	}
+	if owner, err := s.authSvc.GetUserByID(job.OwnerID); err == nil && owner != nil {
+		job.OwnerName = owner.Username
+	}
+	return job
+}
+
 // handleBatchCapabilities 返回脱敏后的批量执行器状态。
 func (s *Server) handleBatchCapabilities(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.batchSvc.Capabilities())
@@ -203,7 +215,7 @@ func (s *Server) handleBatchStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, 200, job)
+	writeJSON(w, 200, s.withBatchOwnerName(job))
 }
 
 // handleBatchList 查询批量任务列表（支持按名称搜索）。
@@ -232,6 +244,9 @@ func (s *Server) handleBatchList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		jobs = filtered
+	}
+	for i := range jobs {
+		s.withBatchOwnerName(&jobs[i])
 	}
 
 	writeJSON(w, 200, map[string]any{
@@ -332,7 +347,7 @@ func (s *Server) handleBatchRetryFailed(w http.ResponseWriter, r *http.Request) 
 		writeError(w, status, "重跑失败: "+err.Error())
 		return
 	}
-	writeJSON(w, 200, retried)
+	writeJSON(w, 200, s.withBatchOwnerName(retried))
 }
 
 func (s *Server) canAccessBatchJob(r *http.Request, job *batch.BatchJob) bool {

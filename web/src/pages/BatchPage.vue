@@ -11,6 +11,9 @@ import DiscardDetailModal from "../components/DiscardDetailModal.vue";
 // AI 检查分段进度（导入成功后轮询，见 aiCheckProgress.js）
 const { progress: aiProgress, start: startAIProgress } = useAICheckProgress();
 const batchPermission = computed(() => hasPerm("batch:run"));
+// 历史回看只需过程库查看权：角色拆分后原提交人（如转为纯审题）仍可回看
+// 自己任务的进度、结果与淘汰明细，但不能再提交新任务。
+const canViewHistory = computed(() => hasPerm("question:view"));
 
 const toast = ref("");
 const stats = ref({ question_count: 0, knowledge_count: 0, knowledge_categories: {} });
@@ -374,7 +377,7 @@ function startPolling(jobId) {
 }
 onActivated(() => {
   pageActive = true;
-  if (!batchPermission.value) {
+  if (!batchPermission.value && !canViewHistory.value) {
     stopPolling();
     return;
   }
@@ -459,7 +462,8 @@ async function downloadResult(jobId, { replay = false } = {}) {
 }
 
 // 本次导入的题目行：以导入顺序为基线编号，AI 检查进度提供状态与题干缩略信息。
-// 列表只承载关键信息；点击检查通过的行弹窗查看完整题目。
+// 检查通过的题会继续走审核生命周期（送审→定稿/驳回、或被归档），回放时按
+// 当前真实状态展示，不能把非 ai_reviewed 的一律当"待检查"。
 const importRows = computed(() => {
   const items = new Map((aiProgress.value?.items || []).map(i => [i.question_id, i]));
   return (importResult.value?.question_ids || []).map((id, idx) => {
@@ -468,14 +472,39 @@ const importRows = computed(() => {
       no: idx + 1,
       id,
       stem: it.stem_summary || "",
-      passed: it.question_status === "ai_reviewed",
+      status: it.question_status || "",
       checking: !it.task_status || it.task_status === "pending" || it.task_status === "running",
       exhausted: it.task_status === "exhausted",
       discarded: !!it.discarded,
+      missing: !!it.missing,
       reason: it.suggestion || "",
     };
   });
 });
+
+// 行状态：标签 + 样式类；有题干（未淘汰且题目仍存在）的行可点击查看全貌。
+function rowStateFor(row) {
+  if (row.discarded) return { label: "已淘汰", cls: "failed" };
+  if (row.missing) return { label: "已删除", cls: "failed" };
+  if (row.exhausted) return { label: "检查失败", cls: "failed" };
+  if (row.checking) return { label: "检查中", cls: "checking" };
+  switch (row.status) {
+    case "ai_reviewed":
+    case "auto_checked":
+      return { label: "已通过", cls: "passed" };
+    case "published":
+      return { label: "已定稿", cls: "passed" };
+    case "reviewing":
+      return { label: "审核中", cls: "checking" };
+    case "archived":
+      return { label: "已归档", cls: "muted" };
+    case "rejected":
+      return { label: "已驳回", cls: "failed" };
+    default:
+      return { label: "待检查", cls: "" };
+  }
+}
+const rowClickable = (row) => !row.discarded && !row.missing && !!row.stem;
 // 主列表只保留未淘汰的题；淘汰题移入下方失败提醒，点击查看原题与淘汰原因
 const passedRows = computed(() => importRows.value.filter(r => !r.discarded));
 const discardedRows = computed(() => importRows.value.filter(r => r.discarded));
@@ -551,9 +580,9 @@ function isRunning(status) {
 }
 
 onMounted(() => {
-  if (!batchPermission.value) return;
+  if (!batchPermission.value && !canViewHistory.value) return;
   loadStats();
-  loadBatchCapabilities();
+  if (batchPermission.value) loadBatchCapabilities();
   loadJobsFromDB();
   tickTimer = setInterval(() => { nowTick.value = Date.now(); }, 1000);
 });
@@ -566,7 +595,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section v-if="!batchPermission" class="panel batch-permission-panel" role="alert">
+  <section v-if="!batchPermission && !canViewHistory" class="panel batch-permission-panel" role="alert">
     <div class="section-heading">
       <span class="dot red"></span>
       <h2>暂无批量推理权限</h2>
@@ -579,6 +608,10 @@ onBeforeUnmount(() => {
   </section>
 
   <div v-else class="batch-layout">
+    <!-- 无批量推理权限时仅开放只读回看：自己的历史任务与 AI 检查结果 -->
+    <p v-if="!batchPermission" class="readonly-banner">
+      当前账号未分配批量推理权限，仅可回看自己的历史任务与 AI 检查结果；如需提交新任务请联系超级管理员。
+    </p>
     <!-- 统计信息 -->
     <section class="panel">
       <div class="section-heading">
@@ -601,8 +634,8 @@ onBeforeUnmount(() => {
 
     </section>
 
-    <!-- 配置 -->
-    <section class="panel">
+    <!-- 配置（需要批量推理权限；只读回看视图不渲染） -->
+    <section v-if="batchPermission" class="panel">
       <div class="section-heading">
         <span class="dot blue"></span>
         <h2>生成配置</h2>
@@ -711,7 +744,7 @@ onBeforeUnmount(() => {
 
         <!-- 任务完成后的处理：自动触发，无需手动点击 -->
 	    <div v-if="!currentJobOwned" class="job-actions">
-	      <span class="field-hint">其他用户任务为只读：已导入任务可查看生成与 AI 检查结果（含淘汰明细），重跑与导入仅限原提交人。</span>
+	      <span class="field-hint">该任务由 {{ currentJob.owner_name || "其他用户" }} 提交，为只读：已导入任务可查看生成与 AI 检查结果（含淘汰明细），重跑与导入仅限原提交人。</span>
 	    </div>
 	    <div v-else-if="isCompleted(currentJob.status) && currentJob.imported_at" class="job-actions">
 	      <span class="action-hint">AI 生成完毕，结果已提交 AI 质量检查；通过检查的题目才会进入个人题库（待审核）</span>
@@ -764,16 +797,13 @@ onBeforeUnmount(() => {
       </p>
 
       <div class="result-list">
-        <div v-for="row in passedRows" :key="row.id" class="result-row" :class="{ clickable: row.passed }" @click="row.passed && openQuestion(row.id)">
+        <div v-for="row in passedRows" :key="row.id" class="result-row" :class="{ clickable: rowClickable(row) }" @click="rowClickable(row) && openQuestion(row.id)">
           <span class="row-no">{{ row.no }}</span>
-          <span class="row-stem">{{ row.stem || (row.passed ? row.id : "检查通过后展示题目内容") }}</span>
-          <span v-if="row.passed" class="row-state passed">已通过</span>
-          <span v-else-if="row.checking" class="row-state checking">检查中</span>
-          <span v-else-if="row.exhausted" class="row-state failed">检查失败</span>
-          <span v-else class="row-state">待检查</span>
+          <span class="row-stem">{{ row.stem || (row.missing ? row.id : "检查通过后展示题目内容") }}</span>
+          <span class="row-state" :class="rowStateFor(row).cls">{{ rowStateFor(row).label }}</span>
         </div>
       </div>
-      <p class="result-hint">点击题目行查看完整内容；未通过 AI 检查的题目不会出现在上表。</p>
+      <p class="result-hint">点击题目行查看完整内容；已淘汰的题目见下方说明，归档/驳回的题在淘汰题库。</p>
 
       <!-- 失败与淘汰提醒：持久显示，不随 toast 消失 -->
       <div v-if="failedItems.length" class="result-notice">
@@ -818,7 +848,7 @@ onBeforeUnmount(() => {
             <span>已完成：{{ job.completed || 0 }}</span>
             <span>失败：{{ job.failed || 0 }}</span>
             <span>已用时：{{ elapsedText(job) }}</span>
-            <span v-if="job.owner_id && job.owner_id !== currentUser?.id">其他用户任务 · 只读</span>
+            <span v-if="job.owner_id && job.owner_id !== currentUser?.id">{{ job.owner_name || "其他用户" }} 的任务 · 只读</span>
           </div>
           <div class="job-actions">
             <button class="ghost-button" type="button" @click="checkStatus(job.job_id)">刷新状态</button>
@@ -851,6 +881,18 @@ onBeforeUnmount(() => {
 .batch-layout {
   max-width: 800px;
   margin: 0 auto;
+}
+
+.readonly-banner {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid #f0e0b5;
+  border-left: 3px solid #c78112;
+  border-radius: 7px;
+  background: #fffcf4;
+  color: #8a6d1f;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .batch-permission-panel {
@@ -1155,6 +1197,7 @@ onBeforeUnmount(() => {
 .row-state.passed { background: #f0fff8; color: #087c55; }
 .row-state.checking { background: #eff8ff; color: #0571dc; }
 .row-state.failed { background: #fff0f0; color: #c54858; }
+.row-state.muted { background: #f0f3f7; color: #6e7b8f; }
 
 .result-hint {
   margin: 8px 0 0;

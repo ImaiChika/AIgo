@@ -28,9 +28,12 @@ type CheckProgress struct {
 	Issues      []domain.ReviewIssue `json:"issues,omitempty"`
 	Suggestion  string               `json:"suggestion,omitempty"`
 	// 淘汰详情补充：四维评分、检查模型与完整题目快照（旧留档无快照时为空）
-	Scores  *domain.ReviewScores `json:"scores,omitempty"`
-	Model   string               `json:"model,omitempty"`
-	Question *domain.A2Question  `json:"question,omitempty"`
+	Scores   *domain.ReviewScores `json:"scores,omitempty"`
+	Model    string               `json:"model,omitempty"`
+	Question *domain.A2Question   `json:"question,omitempty"`
+	// Missing=true 表示题目已物理删除且无淘汰留档（如管理员清理淘汰层）：
+	// 仅供批量回放把该行显示为"已删除"，不含任何题目内容。
+	Missing bool `json:"missing,omitempty"`
 	// DiscardOwnerID 淘汰题归属人，供接口层做越权过滤，不外发
 	DiscardOwnerID string `json:"-"`
 }

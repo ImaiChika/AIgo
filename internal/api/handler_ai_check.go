@@ -134,7 +134,14 @@ func (s *Server) handleAICheckProgress(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		q, err := s.questionStore.GetQuestion(r.Context(), it.QuestionID)
-		if err != nil || q == nil {
+		if err != nil {
+			continue
+		}
+		if q == nil {
+			// 题目已物理删除且无淘汰留档（如管理员清理淘汰层）：回带 missing
+			// 标记，批量回放显示"已删除"而不是永远停在"检查中"；不含题目内容。
+			it.Missing = true
+			filtered = append(filtered, it)
 			continue
 		}
 		if domain.IsStagingStatus(q.Status) {
@@ -147,11 +154,14 @@ func (s *Server) handleAICheckProgress(w http.ResponseWriter, r *http.Request) {
 			filtered = append(filtered, it)
 		}
 	}
-	// 重算全部计数（淘汰计数以过滤后的可见明细为准）
+	// 重算全部计数（淘汰计数以过滤后的可见明细为准；missing 行不参与计数）
 	recount := map[string]int{}
 	for _, it := range filtered {
 		if it.Discarded {
 			recount["discarded"]++
+			continue
+		}
+		if it.Missing {
 			continue
 		}
 		switch it.TaskStatus {

@@ -42,6 +42,7 @@ type Executor interface {
 type BatchJob struct {
 	JobID        string `json:"job_id"`
 	OwnerID      string `json:"owner_id,omitempty"` // 提交任务的用户；管理员查看他人任务时用于只读标识
+	OwnerName    string `json:"owner_name,omitempty"` // 归属人用户名，API 层回填，供任务卡片展示"由谁生成"
 	Backend      string `json:"backend,omitempty"`
 	Model        string `json:"model,omitempty"`
 	JobName      string `json:"job_name"` // 自定义任务名称
