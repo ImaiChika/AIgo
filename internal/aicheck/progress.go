@@ -31,6 +31,8 @@ type CheckProgress struct {
 	Scores   *domain.ReviewScores `json:"scores,omitempty"`
 	Model    string               `json:"model,omitempty"`
 	Question *domain.A2Question   `json:"question,omitempty"`
+	// OutlineCode 淘汰题的大纲代码（取自题目快照），供淘汰列表行首定位
+	OutlineCode string `json:"outline_code,omitempty"`
 	// Missing=true 表示题目已物理删除且无淘汰留档（如管理员清理淘汰层）：
 	// 仅供批量回放把该行显示为"已删除"，不含任何题目内容。
 	Missing bool `json:"missing,omitempty"`
@@ -112,6 +114,9 @@ func (s *Service) ProgressByQuestionIDs(ctx context.Context, questionIDs []strin
 			item.Scores = &discard.Scores
 			item.Model = discard.Model
 			item.Question = discard.Question
+			if discard.Question != nil {
+				item.OutlineCode = discard.Question.OutlineCode
+			}
 			item.DiscardOwnerID = discard.OwnerID
 			completedAt := discard.CreatedAt
 			item.CheckCompletedAt = &completedAt

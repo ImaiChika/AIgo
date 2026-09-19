@@ -466,12 +466,18 @@ async function downloadResult(jobId, { replay = false } = {}) {
 // 当前真实状态展示，不能把非 ai_reviewed 的一律当"待检查"。
 const importRows = computed(() => {
   const items = new Map((aiProgress.value?.items || []).map(i => [i.question_id, i]));
+  // 大纲代码兜底：旧淘汰留档无快照时，用导入明细的成功单元按序对应题目 ID
+  const okItems = (importResult.value?.items || []).filter(i => i.status === "ok");
+  const itemById = new Map((importResult.value?.question_ids || []).map((id, i) => [id, okItems[i]]));
   return (importResult.value?.question_ids || []).map((id, idx) => {
     const it = items.get(id) || {};
+    const fallback = itemById.get(id) || {};
     return {
       no: idx + 1,
       id,
       stem: it.stem_summary || "",
+      outlineCode: it.outline_code || fallback.outline_code || "",
+      topic: fallback.topic || it.question?.knowledge_points?.[0]?.topic || "",
       status: it.question_status || "",
       checking: !it.task_status || it.task_status === "pending" || it.task_status === "running",
       exhausted: it.task_status === "exhausted",
@@ -508,11 +514,11 @@ const rowClickable = (row) => !row.discarded && !row.missing && !!row.stem;
 // 主列表只保留未淘汰的题；淘汰题移入下方失败提醒，点击查看原题与淘汰原因
 const passedRows = computed(() => importRows.value.filter(r => !r.discarded));
 const discardedRows = computed(() => importRows.value.filter(r => r.discarded));
-// 淘汰明细项（含评分与题目快照），供弹窗展示
+// 淘汰明细项（含评分与题目快照），供弹窗展示；行内补充大纲信息后传入
 const discardedItems = computed(() => new Map((aiProgress.value?.items || []).map(i => [i.question_id, i])));
 function openDiscardDetail(row) {
   const item = discardedItems.value.get(row.id);
-  if (item) discardDetail.value = item;
+  if (item) discardDetail.value = { ...item, outline_code: item.outline_code || row.outlineCode, topic: row.topic };
 }
 const failedItems = computed(() => (importResult.value?.items || []).filter(i => i.status !== "ok"));
 const checkDone = computed(() => !!aiProgress.value && !aiProgress.value.stalled && aiProgress.value.checking === 0);
@@ -817,9 +823,9 @@ onBeforeUnmount(() => {
           :key="row.id"
           type="button"
           class="notice-line discard-line"
-          :title="row.reason || '质量不达标'"
+          :title="(row.outlineCode || '无大纲代码') + (row.topic ? ' ' + row.topic : '')"
           @click="openDiscardDetail(row)"
-        >序号{{ row.no }} {{ row.stem || row.id }}：{{ row.reason || "质量不达标" }} <span class="discard-line-open">详情 ›</span></button>
+        ><span class="discard-code">{{ row.outlineCode || "无大纲代码" }}</span>{{ row.topic ? ` ${row.topic}` : "" }}：{{ row.reason || "质量不达标" }} <span class="discard-line-open">详情 ›</span></button>
       </div>
     </section>
 
@@ -1244,6 +1250,13 @@ onBeforeUnmount(() => {
 .notice-line.discard-line:hover {
   background: #fff0f0;
   border-color: #f0c9cf;
+}
+/* 行首大纲代码：等宽字体突出，老师一眼定位知识点 */
+.discard-code {
+  font-family: ui-monospace, Menlo, monospace;
+  font-weight: 700;
+  color: #a23b4b;
+  margin-right: 6px;
 }
 .discard-line-open {
   color: #0571dc;

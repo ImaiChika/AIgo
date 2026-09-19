@@ -21,6 +21,22 @@ const scores = computed(() => props.item.scores || null);
 const options = computed(() => question.value?.options || []);
 const optionLabel = (i) => String.fromCharCode(65 + i);
 const severityText = (s) => ({ error: "错误", warning: "警告", info: "提示" }[s] || s);
+// 知识点完整层级：优先取题目快照内关联的知识点；旧留档无快照时回退到
+// 列表行补充的大纲代码与要点（批量页导入明细提供）。
+const kp = computed(() => question.value?.knowledge_points?.[0] || null);
+const outlineCode = computed(() => kp.value?.outline_code || props.item.outline_code || "");
+const topic = computed(() => kp.value?.topic || props.item.topic || "");
+const kpRows = computed(() => {
+  if (!kp.value) return [];
+  return [
+    ["分类", kp.value.category],
+    ["专业", kp.value.subject],
+    ["单元", kp.value.unit],
+    ["细目", kp.value.sub_item],
+    ["要点", kp.value.topic],
+    ["大纲版本", kp.value.version_name],
+  ].filter(([, v]) => v);
+});
 </script>
 
 <template>
@@ -35,7 +51,20 @@ const severityText = (s) => ({ error: "错误", warning: "警告", info: "提示
         <div class="ddm-body">
           <div class="ddm-verdict-row">
             <span class="ddm-verdict">{{ verdictText }}</span>
+            <span v-if="outlineCode" class="ddm-outline-code">{{ outlineCode }}</span>
             <span class="ddm-eliminated">该题未进入题库，已自动淘汰</span>
+          </div>
+
+          <!-- 知识点定位：完整大纲层级，老师据此判断哪个考点出的问题 -->
+          <div v-if="kpRows.length || topic" class="ddm-kp">
+            <p class="ddm-section-title">知识点</p>
+            <p v-if="topic && !kpRows.length" class="ddm-kp-topic">{{ topic }}</p>
+            <dl v-else class="ddm-kp-list">
+              <div v-for="[label, value] in kpRows" :key="label" class="ddm-kp-row">
+                <dt>{{ label }}</dt>
+                <dd>{{ value }}</dd>
+              </div>
+            </dl>
           </div>
 
           <div v-if="scores" class="ddm-scores">
@@ -169,6 +198,51 @@ const severityText = (s) => ({ error: "错误", warning: "警告", info: "提示
 .ddm-eliminated {
   font-size: 11px;
   color: #a23b4b;
+}
+
+.ddm-outline-code {
+  padding: 2px 8px;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: #a23b4b;
+  background: #ffe9e9;
+  border-radius: 2px;
+}
+
+.ddm-kp {
+  margin-bottom: 14px;
+}
+
+.ddm-kp-topic {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #172033;
+}
+
+.ddm-kp-list {
+  margin: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.ddm-kp-row {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.ddm-kp-row dt {
+  flex: none;
+  width: 64px;
+  color: #8a97a8;
+}
+
+.ddm-kp-row dd {
+  margin: 0;
+  color: #172033;
 }
 
 .ddm-scores {

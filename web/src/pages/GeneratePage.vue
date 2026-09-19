@@ -615,6 +615,7 @@ onBeforeUnmount(() => {
           @click="discardDetail = item"
         >
           <span class="discard-verdict">{{ item.verdict === "reject" ? "不合格" : "存在问题" }}</span>
+          <span class="discard-code">{{ item.outline_code || "无大纲代码" }}</span>
           <span class="discard-stem">{{ item.stem_summary || item.question_id }}</span>
           <span v-if="item.scores" class="discard-score">最低分 {{ Math.min(item.scores.scientific ?? 100, item.scores.logic ?? 100, item.scores.a2_fit ?? 100, item.scores.answer ?? 100) }}</span>
           <span class="discard-open">查看详情 ›</span>
@@ -1389,6 +1390,14 @@ onBeforeUnmount(() => {
   color: #a23b4b;
   font-size: 11px;
   font-weight: 700;
+}
+
+/* 行首大纲代码：等宽字体突出，老师一眼定位知识点 */
+.discard-code {
+  flex: none;
+  font-family: ui-monospace, Menlo, monospace;
+  font-weight: 700;
+  color: #c07b22;
 }
 
 .discard-stem {
