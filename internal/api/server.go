@@ -199,14 +199,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/export/download/{filename}", s.requireAuth(domain.PermQuestionDownload, s.handleDownloadExport))
 
 	// === 批量推理（逐题调用单题生成 API，本地队列落库）===
-	// 提交/能力/重跑要求批量推理权限；历史回看（列表、状态、结果回放）按
-	// 过程库查看权放行——角色拆分后原提交人可能只剩 question:view，仍应能
-	// 看到自己任务的进度、结果与淘汰明细。归属规则在 handler 内二次校验。
+	// 列表/状态/结果回放与提交一样要求批量推理权限：没有推理权限的账号
+	// （含多身份未切换到出题身份者）不应看到批量任务面。
 	mux.HandleFunc("GET /api/batch/capabilities", s.requireAuth(domain.PermBatchRun, s.handleBatchCapabilities))
 	mux.HandleFunc("POST /api/batch/submit", s.requireAuth(domain.PermBatchRun, s.handleBatchSubmit))
-	mux.HandleFunc("GET /api/batch/list", s.requireAuth(domain.PermQuestionView, s.handleBatchList))
-	mux.HandleFunc("GET /api/batch/status/{jobId}", s.requireAuth(domain.PermQuestionView, s.handleBatchStatus))
-	mux.HandleFunc("POST /api/batch/download/{jobId}", s.requireAuth(domain.PermQuestionView, s.handleBatchDownload))
+	mux.HandleFunc("GET /api/batch/list", s.requireAuth(domain.PermBatchRun, s.handleBatchList))
+	mux.HandleFunc("GET /api/batch/status/{jobId}", s.requireAuth(domain.PermBatchRun, s.handleBatchStatus))
+	mux.HandleFunc("POST /api/batch/download/{jobId}", s.requireAuth(domain.PermBatchRun, s.handleBatchDownload))
 	mux.HandleFunc("POST /api/batch/retry-failed/{jobId}", s.requireAuth(domain.PermBatchRun, s.handleBatchRetryFailed))
 
 	// === AI 检查（题目首次生成后唯一一次自动执行）===

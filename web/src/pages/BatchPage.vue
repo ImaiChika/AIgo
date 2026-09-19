@@ -11,9 +11,6 @@ import DiscardDetailModal from "../components/DiscardDetailModal.vue";
 // AI 检查分段进度（导入成功后轮询，见 aiCheckProgress.js）
 const { progress: aiProgress, start: startAIProgress } = useAICheckProgress();
 const batchPermission = computed(() => hasPerm("batch:run"));
-// 历史回看只需过程库查看权：角色拆分后原提交人（如转为纯审题）仍可回看
-// 自己任务的进度、结果与淘汰明细，但不能再提交新任务。
-const canViewHistory = computed(() => hasPerm("question:view"));
 
 const toast = ref("");
 const stats = ref({ question_count: 0, knowledge_count: 0, knowledge_categories: {} });
@@ -377,7 +374,7 @@ function startPolling(jobId) {
 }
 onActivated(() => {
   pageActive = true;
-  if (!batchPermission.value && !canViewHistory.value) {
+  if (!batchPermission.value) {
     stopPolling();
     return;
   }
@@ -586,9 +583,9 @@ function isRunning(status) {
 }
 
 onMounted(() => {
-  if (!batchPermission.value && !canViewHistory.value) return;
+  if (!batchPermission.value) return;
   loadStats();
-  if (batchPermission.value) loadBatchCapabilities();
+  loadBatchCapabilities();
   loadJobsFromDB();
   tickTimer = setInterval(() => { nowTick.value = Date.now(); }, 1000);
 });
@@ -601,7 +598,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section v-if="!batchPermission && !canViewHistory" class="panel batch-permission-panel" role="alert">
+  <section v-if="!batchPermission" class="panel batch-permission-panel" role="alert">
     <div class="section-heading">
       <span class="dot red"></span>
       <h2>暂无批量推理权限</h2>
@@ -614,10 +611,6 @@ onBeforeUnmount(() => {
   </section>
 
   <div v-else class="batch-layout">
-    <!-- 无批量推理权限时仅开放只读回看：自己的历史任务与 AI 检查结果 -->
-    <p v-if="!batchPermission" class="readonly-banner">
-      当前账号未分配批量推理权限，仅可回看自己的历史任务与 AI 检查结果；如需提交新任务请联系超级管理员。
-    </p>
     <!-- 统计信息 -->
     <section class="panel">
       <div class="section-heading">
@@ -640,8 +633,8 @@ onBeforeUnmount(() => {
 
     </section>
 
-    <!-- 配置（需要批量推理权限；只读回看视图不渲染） -->
-    <section v-if="batchPermission" class="panel">
+    <!-- 配置 -->
+    <section class="panel">
       <div class="section-heading">
         <span class="dot blue"></span>
         <h2>生成配置</h2>
@@ -887,18 +880,6 @@ onBeforeUnmount(() => {
 .batch-layout {
   max-width: 800px;
   margin: 0 auto;
-}
-
-.readonly-banner {
-  margin: 0 0 14px;
-  padding: 10px 12px;
-  border: 1px solid #f0e0b5;
-  border-left: 3px solid #c78112;
-  border-radius: 7px;
-  background: #fffcf4;
-  color: #8a6d1f;
-  font-size: 13px;
-  line-height: 1.6;
 }
 
 .batch-permission-panel {
