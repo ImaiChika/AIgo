@@ -268,9 +268,12 @@ async function hydrateJobDetail(jobId) {
 
 // 历史任务回看：已完成的本人任务在选中时重放后端保存的导入结果
 // （幂等，不重复入库），让"查看详情"在重新登录后仍有结果可看。
+// 全局查看权限的管理员可回放任何已导入任务（后端同样放行已导入回放），
+// 角色拆分后原主失去批量权限的存量任务由管理员兜底查看。
 function maybeLoadImportReplay(job) {
   if (!job || !isCompleted(job.status) || !job.imported_at) return;
-  if (job.owner_id && job.owner_id !== currentUser.value?.id) return;
+  const isOwner = !job.owner_id || job.owner_id === currentUser.value?.id;
+  if (!isOwner && !hasPerm("question:view_global")) return;
   if (importJobId.value === job.job_id && importResult.value) return;
   downloadResult(job.job_id, { replay: true });
 }
@@ -708,7 +711,7 @@ onBeforeUnmount(() => {
 
         <!-- 任务完成后的处理：自动触发，无需手动点击 -->
 	    <div v-if="!currentJobOwned" class="job-actions">
-	      <span class="field-hint">其他用户任务仅供管理员查看，只有原提交人可以导入结果。</span>
+	      <span class="field-hint">其他用户任务为只读：已导入任务可查看生成与 AI 检查结果（含淘汰明细），重跑与导入仅限原提交人。</span>
 	    </div>
 	    <div v-else-if="isCompleted(currentJob.status) && currentJob.imported_at" class="job-actions">
 	      <span class="action-hint">AI 生成完毕，结果已提交 AI 质量检查；通过检查的题目才会进入个人题库（待审核）</span>

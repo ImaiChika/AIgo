@@ -256,12 +256,16 @@ func (s *Server) handleBatchDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "查询批量任务失败: "+statusErr.Error())
 		return
 	}
-	if job == nil || job.OwnerID == "" || job.OwnerID != auth.GetUserID(r.Context()) {
-		writeError(w, http.StatusForbidden, "无权导入其他用户的批量任务")
-		return
-	}
-
 	// 执行器按统一 job ID 导入结果；具体 provider 文件 ID 留在适配器内部。
+	// 访问规则：任务归属人全权导入/重放；全局查看权限的管理员仅可回放
+	// 已导入任务（ImportResults 对已导入任务只重放存量结果、不再入库），
+	// 解决角色拆分后存量任务的原主失去批量权限时无人能看结果的问题。
+	if job == nil || job.OwnerID == "" || job.OwnerID != auth.GetUserID(r.Context()) {
+		if !(job != nil && s.hasPermission(r, domain.PermQuestionViewGlobal) && job.ImportedAt != "") {
+			writeError(w, http.StatusForbidden, "无权导入其他用户的批量任务")
+			return
+		}
+	}
 	owner, ownerErr := s.authSvc.GetUserByID(job.OwnerID)
 	if ownerErr != nil || owner == nil || !owner.Enabled {
 		writeError(w, http.StatusConflict, "批量任务原所有者不存在或已停用，不能导入")
