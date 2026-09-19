@@ -498,7 +498,8 @@ onMounted(async () => {
       <div class="section-heading">
         <span class="dot blue"></span>
         <h2>{{ isGlobalScope ? "全局题库" : "我的题库" }}</h2>
-        <small>{{ questions.length }} 道</small>
+        <!-- 总数取接口 total（跨分页），当前页只有前 100 条 -->
+        <small>{{ totalCount }} 道</small>
       </div>
 
       <!-- 筛选与题库栏固定：列表滚动时保持可见 -->
