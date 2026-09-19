@@ -144,6 +144,8 @@ func (s *Service) applyCheckOutcome(ctx context.Context, result *domain.AIReview
 		}
 	} else if q.Status == domain.StatusAIDraft {
 		// 首次检查不通过 → 淘汰：留档原因后删除题目（题库只保留检查通过的题）
+		snapshot := *q
+		snapshot.Options = append([]domain.Option(nil), q.Options...)
 		outcome.Discard = &domain.AICheckDiscard{
 			ID:          fmt.Sprintf("aicd-%s-%d", q.ID, time.Now().UnixNano()),
 			QuestionID:  q.ID,
@@ -154,6 +156,9 @@ func (s *Service) applyCheckOutcome(ctx context.Context, result *domain.AIReview
 			Model:       result.Model,
 			StemSummary: stemSummary(q.ClinicalStem, 60),
 			CreatedAt:   time.Now(),
+			OwnerID:     q.OwnerID,
+			// 完整题目快照：题目即将物理删除，凭快照供前端"查看原题"
+			Question: &snapshot,
 		}
 		outcome.DeleteQuestionID = q.ID
 	}

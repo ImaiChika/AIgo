@@ -112,19 +112,25 @@ func (s *Server) handleAICheckProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, counts, err := s.aiCheckSvc.ProgressByQuestionIDs(r.Context(), req.QuestionIDs)
+	items, _, err := s.aiCheckSvc.ProgressByQuestionIDs(r.Context(), req.QuestionIDs)
 	if err != nil {
 		writeError(w, 500, "查询进度失败: "+err.Error())
 		return
 	}
 	// 范围过滤：存活的题目逐题校验题库范围；
-	// 已淘汰的题目（检查不通过自动删除）不在任何题库中，直接放行其淘汰原因；
+	// 已淘汰的题目（检查不通过自动删除）不在任何题库中，按淘汰留档的归属人
+	// 放行：归属人或全局查看权限可见完整淘汰详情（含题目快照）；旧留档无
+	// 归属人（题目已删无法回填）时沿用历史行为，登录即可查看摘要与原因；
 	// 暂存态题目（检查未完成）对用户界面不可见，但进度状态对本人放行——
 	// 生成页/批量页正是靠本接口在检查期间展示"检查中 x/N"，内容不泄露。
 	filtered := make([]aicheck.CheckProgress, 0, len(items))
 	for _, it := range items {
 		if it.Discarded {
-			filtered = append(filtered, it)
+			if it.DiscardOwnerID == "" ||
+				it.DiscardOwnerID == auth.GetUserID(r.Context()) ||
+				s.hasPermission(r, domain.PermQuestionViewGlobal) {
+				filtered = append(filtered, it)
+			}
 			continue
 		}
 		q, err := s.questionStore.GetQuestion(r.Context(), it.QuestionID)
@@ -141,10 +147,11 @@ func (s *Server) handleAICheckProgress(w http.ResponseWriter, r *http.Request) {
 			filtered = append(filtered, it)
 		}
 	}
-	// 重算存活题计数（淘汰计数已由服务端给出）
-	recount := map[string]int{"discarded": counts["discarded"]}
+	// 重算全部计数（淘汰计数以过滤后的可见明细为准）
+	recount := map[string]int{}
 	for _, it := range filtered {
 		if it.Discarded {
+			recount["discarded"]++
 			continue
 		}
 		switch it.TaskStatus {

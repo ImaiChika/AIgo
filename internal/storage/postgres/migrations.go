@@ -19,7 +19,7 @@ var baselineSchemaSQL string
 
 const (
 	// LatestSchemaVersion 是当前程序能够使用的最新数据库版本。
-	LatestSchemaVersion int64 = 31
+	LatestSchemaVersion int64 = 32
 	// migrationLockKey 在同一 PostgreSQL 数据库内串行化所有 AIgo Schema 迁移。
 	migrationLockKey int64 = 0x4149474f5f4d4947 // "AIGO_MIG"
 )
@@ -414,6 +414,13 @@ func configuredMigrations(schemaSQL string) []migration {
 			// 存量终态任务按最后一次写入时间回填（终态写入即完成；导入只在其后）。
 			`UPDATE batch_jobs SET finished_at = COALESCE(finished_at, updated_at, NOW())
 			 WHERE status IN ('completed','complete','failed','cancelled','expired') AND finished_at IS NULL`,
+		}},
+		{Version: 32, Name: "ai_check_discard_snapshot", Statements: []string{
+			// 淘汰留档升级：记录淘汰题归属人与完整题目快照，供前端"查看原题、
+			// AI 评分与淘汰原因"。存量记录无归属与快照（题目已删除无法回填），
+			// 继续以题干摘要 + 评分 + 原因展示。
+			`ALTER TABLE ai_check_discards ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE ai_check_discards ADD COLUMN IF NOT EXISTS question_json JSONB`,
 		}},
 	}
 }

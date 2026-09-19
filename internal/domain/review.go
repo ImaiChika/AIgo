@@ -279,4 +279,10 @@ type AICheckDiscard struct {
 	Model       string        `json:"model"`
 	StemSummary string        `json:"stem_summary"` // 题干摘要（题目已删除，供辨认）
 	CreatedAt   time.Time     `json:"created_at"`
+	// OwnerID 淘汰题的归属人（题目已删除，用于淘汰详情的越权校验）；
+	// 旧记录无此字段（空串）时沿用历史行为：登录即可查看摘要与原因。
+	OwnerID string `json:"-"`
+	// Question 淘汰时的完整题目快照（含题干、选项、答案、解析），
+	// 供前端"查看原题"使用；旧记录未留档，为 nil。
+	Question *A2Question `json:"question,omitempty"`
 }

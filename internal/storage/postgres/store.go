@@ -2206,11 +2206,19 @@ func (s *Store) SaveDiscardResult(ctx context.Context, discard domain.AICheckDis
 func (s *Store) saveDiscardResult(ctx context.Context, discard domain.AICheckDiscard) error {
 	scoresJSON, _ := json.Marshal(discard.Scores)
 	issuesJSON, _ := json.Marshal(discard.Issues)
+	var questionJSON any
+	if discard.Question != nil {
+		payload, err := json.Marshal(discard.Question)
+		if err != nil {
+			return fmt.Errorf("序列化淘汰题目快照失败: %w", err)
+		}
+		questionJSON = string(payload)
+	}
 	_, err := s.execContext(ctx, `
-		INSERT INTO ai_check_discards (id, question_id, verdict, scores, issues, suggestion, model, stem_summary, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+		INSERT INTO ai_check_discards (id, question_id, verdict, scores, issues, suggestion, model, stem_summary, owner_id, question_json, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
 	`, discard.ID, discard.QuestionID, discard.Verdict, string(scoresJSON), string(issuesJSON),
-		discard.Suggestion, discard.Model, discard.StemSummary)
+		discard.Suggestion, discard.Model, discard.StemSummary, discard.OwnerID, questionJSON)
 	return err
 }
 
@@ -2294,7 +2302,7 @@ func (s *Store) ListDiscardResultsByQuestionIDs(ctx context.Context, questionIDs
 		return map[string]domain.AICheckDiscard{}, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT ON (question_id) id, question_id, verdict, scores, issues, suggestion, model, stem_summary, created_at
+		SELECT DISTINCT ON (question_id) id, question_id, verdict, scores, issues, suggestion, model, stem_summary, created_at, owner_id, question_json
 		FROM ai_check_discards WHERE question_id = ANY($1)
 		ORDER BY question_id, created_at DESC
 	`, pq.Array(questionIDs))
@@ -2306,12 +2314,19 @@ func (s *Store) ListDiscardResultsByQuestionIDs(ctx context.Context, questionIDs
 	for rows.Next() {
 		var d domain.AICheckDiscard
 		var scoresJSON, issuesJSON string
+		var questionJSON []byte
 		if err := rows.Scan(&d.ID, &d.QuestionID, &d.Verdict, &scoresJSON, &issuesJSON,
-			&d.Suggestion, &d.Model, &d.StemSummary, &d.CreatedAt); err != nil {
+			&d.Suggestion, &d.Model, &d.StemSummary, &d.CreatedAt, &d.OwnerID, &questionJSON); err != nil {
 			return nil, err
 		}
 		json.Unmarshal([]byte(scoresJSON), &d.Scores)
 		json.Unmarshal([]byte(issuesJSON), &d.Issues)
+		if len(questionJSON) > 0 {
+			var q domain.A2Question
+			if err := json.Unmarshal(questionJSON, &q); err == nil && q.ID != "" {
+				d.Question = &q
+			}
+		}
 		out[d.QuestionID] = d
 	}
 	return out, rows.Err()

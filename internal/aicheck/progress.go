@@ -27,6 +27,12 @@ type CheckProgress struct {
 	StemSummary string               `json:"stem_summary,omitempty"`
 	Issues      []domain.ReviewIssue `json:"issues,omitempty"`
 	Suggestion  string               `json:"suggestion,omitempty"`
+	// 淘汰详情补充：四维评分、检查模型与完整题目快照（旧留档无快照时为空）
+	Scores  *domain.ReviewScores `json:"scores,omitempty"`
+	Model   string               `json:"model,omitempty"`
+	Question *domain.A2Question  `json:"question,omitempty"`
+	// DiscardOwnerID 淘汰题归属人，供接口层做越权过滤，不外发
+	DiscardOwnerID string `json:"-"`
 }
 
 // ProgressByQuestionIDs 汇总多题的检查进度。
@@ -100,6 +106,10 @@ func (s *Service) ProgressByQuestionIDs(ctx context.Context, questionIDs []strin
 			item.StemSummary = discard.StemSummary
 			item.Issues = discard.Issues
 			item.Suggestion = discard.Suggestion
+			item.Scores = &discard.Scores
+			item.Model = discard.Model
+			item.Question = discard.Question
+			item.DiscardOwnerID = discard.OwnerID
 			completedAt := discard.CreatedAt
 			item.CheckCompletedAt = &completedAt
 		}

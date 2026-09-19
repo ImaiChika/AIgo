@@ -159,10 +159,12 @@ func TestOutcomeStorePassAdvancesDraftAndCompletesTask(t *testing.T) {
 }
 
 // 首检不通过：淘汰档案留档、题目删除、任务完成，三者同事务。
+// 淘汰档案同时记录归属人与完整题目快照，供前端"查看原题"使用。
 func TestOutcomeStoreFailDeletesDraftAndArchivesDiscard(t *testing.T) {
 	svc, stub := newOutcomeTestService(&failingCheckClient{})
 	ctx := context.Background()
 	q := testDraft("q-fail", 1)
+	q.OwnerID = "owner-1"
 	if err := stub.SaveQuestion(ctx, q); err != nil {
 		t.Fatalf("准备题目失败: %v", err)
 	}
@@ -185,8 +187,27 @@ func TestOutcomeStoreFailDeletesDraftAndArchivesDiscard(t *testing.T) {
 	if !strings.Contains(d.StemSummary, "男，45岁") {
 		t.Fatalf("淘汰档案应包含题干摘要: %q", d.StemSummary)
 	}
+	if d.OwnerID != "owner-1" {
+		t.Fatalf("淘汰档案应记录归属人，实际 %q", d.OwnerID)
+	}
+	if d.Question == nil {
+		t.Fatal("淘汰档案应保留完整题目快照")
+	}
+	if !strings.Contains(d.Question.ClinicalStem, "男，45岁") || len(d.Question.Options) != 5 || d.Question.Answer != "A" {
+		t.Fatalf("题目快照应含题干、选项与答案: %+v", d.Question)
+	}
 	if got := taskStatus(t, stub.tasks, ctx, q.ID); got != domain.AICheckTaskSucceeded {
 		t.Fatalf("任务应为 succeeded，实际 %s", got)
+	}
+
+	// 进度接口同样应带回评分、模型与题目快照，供淘汰详情展示。
+	items, _, err := svc.ProgressByQuestionIDs(ctx, []string{q.ID})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("查询进度失败: items=%v err=%v", items, err)
+	}
+	it := items[0]
+	if !it.Discarded || it.DiscardOwnerID != "owner-1" || it.Scores == nil || it.Question == nil {
+		t.Fatalf("淘汰进度项应带归属、评分与快照: %+v", it)
 	}
 }
 

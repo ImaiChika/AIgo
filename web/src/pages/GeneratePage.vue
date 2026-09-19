@@ -8,6 +8,7 @@ import { useAICheckProgress } from "../aiCheckProgress.js";
 import { clearGenerationWorkspace, loadGenerationWorkspace, saveGenerationWorkspace } from "../generationWorkspaceState.js";
 import KnowledgePointPicker from "../components/KnowledgePointPicker.vue";
 import AICheckScoreButton from "../components/AICheckScoreButton.vue";
+import DiscardDetailModal from "../components/DiscardDetailModal.vue";
 
 // AI 检查分段进度（生成成功后轮询，见 aiCheckProgress.js）
 const { progress: aiProgress, start: startAIProgress, stop: stopAIProgress } = useAICheckProgress();
@@ -89,6 +90,8 @@ const stem = ref("");
 const options = ref([]);
 const answer = ref("");
 const explanation = ref("");
+// 淘汰详情弹窗：当前点开的淘汰明细项（aiProgress.items 中 discarded 的条目）
+const discardDetail = ref(null);
 let optionIdCounter = 0;
 
 function timestamp(value) {
@@ -155,7 +158,9 @@ const workflowSteps = computed(() => [
     number: "01",
     title: "题目生成",
     detail: loading.value ? "命题请求已提交，系统正在生成试题" : selectedKP.value ? `围绕「${selectedKP.value.topic || selectedKP.value.outline_code}」生成` : "选择大纲要点与难度后开始",
-    state: loading.value ? "active" : stem.value ? "done" : workspaceStatus.value === "failed" ? "attention" : "waiting",
+    // 全部题目被淘汰时没有可预览的题干，完成态以生成结束时间为准，
+    // 不能依赖 stem（预览字段）判断第一步是否完成。
+    state: loading.value ? "active" : generationCompletedAt.value ? "done" : workspaceStatus.value === "failed" ? "attention" : "waiting",
     timing: generationDuration.value,
     timingLabel: loading.value ? "已用时" : "处理耗时",
   },
@@ -407,6 +412,7 @@ function clearWorkspace() {
   checkCompletedAt.value = 0;
   workspaceStatus.value = "idle";
   aiProgress.value = null;
+  discardDetail.value = null;
   resetQuestionPreview();
   clearGenerationWorkspace(currentUser.value?.id);
   showToast("本次命题记录已从工作台清空，题库数据未受影响");
@@ -441,6 +447,7 @@ async function generateQuestion() {
   stopAIProgress();
   window.clearTimeout(recoveryTimer);
   aiProgress.value = null;
+  discardDetail.value = null;
   resetQuestionPreview();
   loading.value = true;
   progressMsg.value = "正在生成试题，请稍候...";
@@ -594,23 +601,25 @@ onBeforeUnmount(() => {
         </template>
       </div>
 
-      <!-- 淘汰明细：检查不通过的题目已自动删除，展示原因 -->
+      <!-- 淘汰明细：检查不通过的题目已自动删除，点击查看原题、AI 评分与淘汰原因 -->
       <section v-if="aiProgress && aiProgress.discarded > 0" class="panel discard-panel">
         <div class="section-heading">
           <span class="dot red"></span>
-          <h2>未通过检查的题目（已自动删除）</h2>
+          <h2>未通过检查的题目（已自动淘汰）</h2>
         </div>
-        <div v-for="item in (aiProgress.items || []).filter(i => i.discarded)" :key="item.question_id" class="discard-item">
-          <p class="discard-stem">{{ item.stem_summary }}</p>
-          <p class="discard-verdict">
-            检查结论：{{ item.verdict === "reject" ? "不合格" : "存在问题" }}
-          </p>
-          <ul v-if="(item.issues || []).length" class="discard-issues">
-            <li v-for="(issue, i) in item.issues" :key="i">{{ issue.message }}</li>
-          </ul>
-          <p v-if="item.suggestion" class="discard-suggestion">AI 建议：{{ item.suggestion }}</p>
-        </div>
-        <p class="discard-hint">被淘汰的题目不会进入题库；可调整生成参数后重新出题。</p>
+        <button
+          v-for="item in (aiProgress.items || []).filter(i => i.discarded)"
+          :key="item.question_id"
+          type="button"
+          class="discard-item"
+          @click="discardDetail = item"
+        >
+          <span class="discard-verdict">{{ item.verdict === "reject" ? "不合格" : "存在问题" }}</span>
+          <span class="discard-stem">{{ item.stem_summary || item.question_id }}</span>
+          <span v-if="item.scores" class="discard-score">最低分 {{ Math.min(item.scores.scientific ?? 100, item.scores.logic ?? 100, item.scores.a2_fit ?? 100, item.scores.answer ?? 100) }}</span>
+          <span class="discard-open">查看详情 ›</span>
+        </button>
+        <p class="discard-hint">点击淘汰题目查看原题快照、AI 评分与淘汰原因；被淘汰的题目不会进入题库，可调整生成参数后重新出题。</p>
       </section>
 
       <section class="panel workflow-panel">
@@ -729,6 +738,9 @@ onBeforeUnmount(() => {
   </div>
 
   <div class="toast" :class="{ show: toast }" role="status" aria-live="polite">{{ toast }}</div>
+
+  <!-- 淘汰题目详情弹窗（原题快照 + AI 评分 + 淘汰原因） -->
+  <DiscardDetailModal v-if="discardDetail" :item="discardDetail" @close="discardDetail = null" />
 </template>
 
 <style scoped>
@@ -1344,43 +1356,62 @@ onBeforeUnmount(() => {
   .workflow-step { min-height: 0; }
 }
 
-/* 淘汰明细 */
+/* 淘汰明细：一行一题，点击弹出原题快照与评分 */
 .discard-panel {
   border-color: #f3d9b0;
 }
 
 .discard-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
   border: 1px solid #f3e2c2;
   background: #fffdf7;
   border-radius: 8px;
   padding: 10px 12px;
   margin-bottom: 8px;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
 }
 
-.discard-stem {
-  font-size: 13px;
-  font-weight: 600;
-  color: #172033;
-  margin: 0 0 6px;
+.discard-item:hover {
+  border-color: #e4b96a;
+  background: #fff9ec;
 }
 
 .discard-verdict {
-  font-size: 12px;
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #ffe9e9;
+  color: #a23b4b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.discard-stem {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #172033;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discard-score {
+  flex: none;
+  font-size: 11px;
   color: #c07b22;
-  margin: 0 0 6px;
 }
 
-.discard-issues {
-  margin: 0 0 6px;
-  padding-left: 18px;
+.discard-open {
+  flex: none;
   font-size: 12px;
-  color: #3a4658;
-}
-
-.discard-suggestion {
-  font-size: 12px;
-  color: #6e7b8f;
-  margin: 0 0 4px;
+  color: #0571dc;
 }
 
 .discard-hint {

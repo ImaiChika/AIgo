@@ -6,6 +6,7 @@ import { notifyNavigationWorkChanged } from "../navigation.js";
 import { useAICheckProgress } from "../aiCheckProgress.js";
 import KnowledgePointPicker from "../components/KnowledgePointPicker.vue";
 import QuestionDetailModal from "../components/QuestionDetailModal.vue";
+import DiscardDetailModal from "../components/DiscardDetailModal.vue";
 
 // AI 检查分段进度（导入成功后轮询，见 aiCheckProgress.js）
 const { progress: aiProgress, start: startAIProgress } = useAICheckProgress();
@@ -72,6 +73,7 @@ const jobHistory = ref([]);
 const polling = ref(false);
 const importResult = ref(null); // 导入结果详情（落库为 AI 草稿，需经 AI 检查后才可见）
 const detailQuestion = ref(null); // 弹窗查看的题目全貌（复用题库详情弹窗）
+const discardDetail = ref(null); // 淘汰详情弹窗：当前点开的淘汰明细项
 const currentJobOwned = computed(() => !!currentJob.value && currentJob.value.owner_id === currentUser.value?.id);
 
 // 等待计时：每秒刷新一次当前时间，任务项展示自提交起已用时。
@@ -234,6 +236,7 @@ const jobPanel = ref(null);
 function selectJob(job, { silent = false } = {}) {
   if (!job) return;
   currentJob.value = job;
+  discardDetail.value = null; // 切换任务时关闭上一任务的淘汰详情弹窗
   hydrateJobDetail(job.job_id);
   if (isRunning(job.status)) {
     if (!silent) {
@@ -303,6 +306,7 @@ async function submitBatch() {
     importResult.value = null;
     importJobId.value = "";
     importError.value = "";
+    discardDetail.value = null;
     currentJob.value = {
       job_id: data.job_id,
       owner_id: currentUser.value?.id || "",
@@ -469,9 +473,15 @@ const importRows = computed(() => {
     };
   });
 });
-// 主列表只保留未淘汰的题；淘汰题移入下方失败提醒，附原因
+// 主列表只保留未淘汰的题；淘汰题移入下方失败提醒，点击查看原题与淘汰原因
 const passedRows = computed(() => importRows.value.filter(r => !r.discarded));
 const discardedRows = computed(() => importRows.value.filter(r => r.discarded));
+// 淘汰明细项（含评分与题目快照），供弹窗展示
+const discardedItems = computed(() => new Map((aiProgress.value?.items || []).map(i => [i.question_id, i])));
+function openDiscardDetail(row) {
+  const item = discardedItems.value.get(row.id);
+  if (item) discardDetail.value = item;
+}
 const failedItems = computed(() => (importResult.value?.items || []).filter(i => i.status !== "ok"));
 const checkDone = computed(() => !!aiProgress.value && !aiProgress.value.stalled && aiProgress.value.checking === 0);
 // 检查完成后通过数即“新题修改与送审”角标的变化来源，通知侧栏立即重算。
@@ -768,8 +778,15 @@ onBeforeUnmount(() => {
         <p v-for="(f, i) in failedItems" :key="i" class="notice-line">{{ f.outline_code }}：{{ f.error }}</p>
       </div>
       <div v-if="discardedRows.length" class="result-notice">
-        <p class="notice-title">未通过 AI 检查，已自动淘汰（{{ discardedRows.length }} 题）</p>
-        <p v-for="row in discardedRows" :key="row.id" class="notice-line">序号{{ row.no }} {{ row.stem || row.id }}：{{ row.reason || "质量不达标" }}</p>
+        <p class="notice-title">未通过 AI 检查，已自动淘汰（{{ discardedRows.length }} 题）——点击查看原题、AI 评分与淘汰原因</p>
+        <button
+          v-for="row in discardedRows"
+          :key="row.id"
+          type="button"
+          class="notice-line discard-line"
+          :title="row.reason || '质量不达标'"
+          @click="openDiscardDetail(row)"
+        >序号{{ row.no }} {{ row.stem || row.id }}：{{ row.reason || "质量不达标" }} <span class="discard-line-open">详情 ›</span></button>
       </div>
     </section>
 
@@ -822,6 +839,9 @@ onBeforeUnmount(() => {
 
   <!-- 题目全貌弹窗（与题库/审核页共用同一组件） -->
   <QuestionDetailModal v-if="detailQuestion" :question="detailQuestion" @close="detailQuestion = null" />
+
+  <!-- 淘汰题目详情弹窗（原题快照 + AI 评分 + 淘汰原因） -->
+  <DiscardDetailModal v-if="discardDetail" :item="discardDetail" @close="discardDetail = null" />
 </template>
 
 <style scoped>
@@ -1161,6 +1181,27 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 淘汰行可点击：弹出原题快照与 AI 评分 */
+.notice-line.discard-line {
+  display: block;
+  width: 100%;
+  padding: 4px 6px;
+  margin: 2px 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.notice-line.discard-line:hover {
+  background: #fff0f0;
+  border-color: #f0c9cf;
+}
+.discard-line-open {
+  color: #0571dc;
+  font-weight: 600;
 }
 .elapsed-time {
   font-variant-numeric: tabular-nums;
