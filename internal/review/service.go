@@ -313,6 +313,28 @@ func (s *Service) UserAssignmentReferences(ctx context.Context, userID string) (
 	return references, nil
 }
 
+// RevisionPendingQuestions 返回指定归属人名下处于"退回修改中"的题目。
+// 收回命题教师编辑权限、停用或删除账号前必须先处理这些题目：
+// 退修题只有出题人本人能改（或管理员逐题代办），否则题目将滞留退修态无人可改。
+func (s *Service) RevisionPendingQuestions(ctx context.Context, ownerID string) ([]string, error) {
+	tasks, err := s.reviewStore.ListAllTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var refs []string
+	for _, task := range tasks {
+		if task.Status != domain.StatusRevisionRequired {
+			continue
+		}
+		q, err := s.questionStore.GetQuestion(ctx, task.QuestionID)
+		if err != nil || q == nil || q.OwnerID != ownerID {
+			continue
+		}
+		refs = append(refs, "退回修改中的题目 "+task.QuestionID)
+	}
+	return refs, nil
+}
+
 func containsID(ids []string, target string) bool {
 	for _, id := range ids {
 		if id == target {

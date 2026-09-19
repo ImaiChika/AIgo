@@ -85,7 +85,12 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 // handleMySummary 返回个人中心需要的轻量累计指标，不暴露题目内容或他人数据。
 func (s *Server) handleMySummary(w http.ResponseWriter, r *http.Request) {
 	userID := auth.GetUserID(r.Context())
-	_, generated, err := s.questionStore.SearchQuestions(r.Context(), storage.QuestionFilter{OwnerID: userID}, 1, 1)
+	// "我已出题"只统计本人实际可见过的题（三层题库）：
+	// AI 检查未完成/耗尽的暂存题从未进入题库，不计入，避免与分层之和矛盾。
+	_, generated, err := s.questionStore.SearchQuestions(r.Context(), storage.QuestionFilter{
+		OwnerID: userID,
+		Tiers:   []string{string(domain.TierFormal), string(domain.TierWorking), string(domain.TierEliminated)},
+	}, 1, 1)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取个人数据失败")
 		return
@@ -336,7 +341,10 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		}
 		losesReviewRole := current != nil && slices.Contains(current.Permissions, domain.PermReviewDo) && !slices.Contains(futurePermissions, domain.PermReviewDo)
 		losesFinalRole := current != nil && slices.Contains(current.Permissions, domain.PermReviewFinal) && !slices.Contains(futurePermissions, domain.PermReviewFinal)
-		if currentErr == nil && permissionErr == nil && current != nil && (!futureEnabled || losesReviewRole || losesFinalRole) {
+		// 编辑权限对称守卫：教师名下有退回修改中的题目时，收走 question:edit
+		// 会让题目滞留退修态无人可改（与审题侧的收权守卫同口径）。
+		losesEditRole := current != nil && slices.Contains(current.Permissions, domain.PermQuestionEdit) && !slices.Contains(futurePermissions, domain.PermQuestionEdit)
+		if currentErr == nil && permissionErr == nil && current != nil && (!futureEnabled || losesReviewRole || losesFinalRole || losesEditRole) {
 			references, referenceErr := s.reviewSvc.UserAssignmentReferences(r.Context(), userID)
 			if referenceErr != nil {
 				writeError(w, http.StatusInternalServerError, "检查审核任务引用失败")
@@ -345,6 +353,18 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 			if len(references) > 0 {
 				writeError(w, http.StatusConflict, "该用户仍被审核流程或进行中任务引用，请先调整："+strings.Join(references, "；"))
 				return
+			}
+			if losesEditRole || !futureEnabled {
+				pendings, pendErr := s.reviewSvc.RevisionPendingQuestions(r.Context(), userID)
+				if pendErr != nil {
+					writeError(w, http.StatusInternalServerError, "检查退回修改题目失败")
+					return
+				}
+				if len(pendings) > 0 {
+					writeError(w, http.StatusConflict, fmt.Sprintf("该用户仍有 %d 道退回修改中的题目，收回编辑权限或停用后题目将无人可改；请先让本人完成修改重送，或由管理员处理后再操作：%s",
+						len(pendings), strings.Join(pendings, "；")))
+					return
+				}
 			}
 		}
 	}
@@ -373,6 +393,17 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(references) > 0 {
 			writeError(w, http.StatusConflict, "该用户仍被审核流程或进行中任务引用，请先调整："+strings.Join(references, "；"))
+			return
+		}
+		// 删除账号同样会使其名下退修中的题目永久无人可改，按同一守卫拦截。
+		pendings, pendErr := s.reviewSvc.RevisionPendingQuestions(r.Context(), userID)
+		if pendErr != nil {
+			writeError(w, http.StatusInternalServerError, "检查退回修改题目失败")
+			return
+		}
+		if len(pendings) > 0 {
+			writeError(w, http.StatusConflict, fmt.Sprintf("该用户仍有 %d 道退回修改中的题目，删除后题目将永久无人可改；请先处理：%s",
+				len(pendings), strings.Join(pendings, "；")))
 			return
 		}
 	}
