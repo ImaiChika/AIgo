@@ -171,13 +171,29 @@ async function deleteUser(u) {
   }
 }
 
-async function resetPassword(u) {
+// 重置密码：默认重置为 12345678，管理员可在弹窗中改选其他至少 8 位的口令。
+const resetTarget = ref(null);
+const resetFormPassword = ref("12345678");
+
+function openResetDialog(u) {
   if (isProtectedUser(u)) return;
-  if (!confirm(`确定重置「${u.username}」的登录密码？将生成随机初始口令；该账号已登录的会话在 token 过期前仍有效。`)) return;
+  resetTarget.value = u;
+  resetFormPassword.value = "12345678";
+}
+
+async function confirmResetPassword() {
+  const target = resetTarget.value;
+  if (!target) return;
+  const password = resetFormPassword.value.trim();
+  if (password.length < 8) {
+    showToast("密码至少 8 位");
+    return;
+  }
   try {
-    const data = await api.resetUserPassword(u.id, {});
+    const data = await api.resetUserPassword(target.id, { new_password: password });
     passwordGranted.value = { username: data.username, password: data.new_password };
-    showToast(`已重置 ${u.username} 的密码`);
+    showToast(`已重置 ${target.username} 的密码`);
+    resetTarget.value = null;
   } catch (e) {
     showToast("重置失败: " + e.message);
   }
@@ -281,7 +297,7 @@ onMounted(loadAll);
                 <button class="expand-btn" type="button" @click="expandedRow = expandedRow === u.id ? '' : u.id">
                   {{ expandedRow === u.id ? "收起权限" : "分配权限" }}
                 </button>
-                <button v-if="!isProtectedUser(u)" class="expand-btn" type="button" @click="resetPassword(u)">重置密码</button>
+                <button v-if="!isProtectedUser(u)" class="expand-btn" type="button" @click="openResetDialog(u)">重置密码</button>
                 <button v-if="!isProtectedUser(u)" class="delete-user-btn" type="button" @click="deleteUser(u)">删除</button>
               </td>
             </tr>
@@ -315,6 +331,23 @@ onMounted(loadAll);
       </table>
     </section>
 
+    <div v-if="resetTarget" class="modal-overlay" @click.self="resetTarget = null">
+      <div class="password-granted-card" role="dialog" aria-label="重置密码">
+        <div class="form-title-row">
+          <div><p class="eyebrow">重置密码</p><h3>重置「{{ resetTarget.username }}」的登录密码</h3></div>
+          <button class="modal-close" type="button" aria-label="关闭" @click="resetTarget = null">×</button>
+        </div>
+        <label class="reset-password-field">
+          新密码
+          <input v-model="resetFormPassword" type="text" autocomplete="off" spellcheck="false" />
+        </label>
+        <p class="granted-note">默认重置为 12345678，可直接修改为其他至少 8 位的口令；该账号已登录的会话在 token 过期前仍有效，请提醒本人首次登录后及时修改。</p>
+        <div class="reset-dialog-actions">
+          <button class="ghost-button" type="button" @click="resetTarget = null">取消</button>
+          <button class="primary-button" type="button" @click="confirmResetPassword">确认重置</button>
+        </div>
+      </div>
+    </div>
     <div v-if="passwordGranted" class="modal-overlay" @click.self="passwordGranted = null">
       <div class="password-granted-card" role="dialog" aria-label="新密码">
         <div class="form-title-row">
@@ -748,6 +781,31 @@ onMounted(loadAll);
   color: #6e7b8f;
   padding: 2px 6px;
 }
+.reset-password-field {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: #3a4658;
+  margin: 4px 0 2px;
+}
+
+.reset-password-field input {
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid #cdd9ea;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 14px;
+  letter-spacing: 0.5px;
+}
+
+.reset-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
 .password-granted-card {
   background: #fff;
   border-radius: 10px;

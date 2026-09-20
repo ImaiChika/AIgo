@@ -1044,6 +1044,9 @@ type MemoryAIReviewStore struct {
 	mu       sync.Mutex
 	results  []domain.AIReviewResult
 	discards []domain.AICheckDiscard
+	// QuestionOwner 可注入的题目归属解析（个人范围统计用）。未注入时归属未知，
+	// 按归属人统计的方法返回空计数；需要验证个人口径的测试自行接线。
+	QuestionOwner func(questionID string) string
 }
 
 func NewMemoryAIReviewStore() *MemoryAIReviewStore {
@@ -1165,11 +1168,40 @@ func (s *MemoryAIReviewStore) CountReviewResultsByVerdict(_ context.Context) (ma
 	return counts, nil
 }
 
+// CountReviewResultsByVerdictForOwner 按题目归属人统计 AI 检查结果数量。
+func (s *MemoryAIReviewStore) CountReviewResultsByVerdictForOwner(_ context.Context, ownerID string) (map[string]int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	counts := map[string]int{}
+	if s.QuestionOwner == nil {
+		return counts, nil
+	}
+	for _, r := range s.results {
+		if s.QuestionOwner(r.QuestionID) == ownerID {
+			counts[r.Verdict]++
+		}
+	}
+	return counts, nil
+}
+
 // CountDiscardResults 统计淘汰留档总数。
 func (s *MemoryAIReviewStore) CountDiscardResults(_ context.Context) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.discards), nil
+}
+
+// CountDiscardResultsForOwner 统计某归属人的淘汰留档数。
+func (s *MemoryAIReviewStore) CountDiscardResultsForOwner(_ context.Context, ownerID string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := 0
+	for _, d := range s.discards {
+		if d.OwnerID == ownerID {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // DiscardCount 返回淘汰记录数（测试观测用）。
@@ -1320,6 +1352,33 @@ func (s *MemoryAuditStore) ListLogs(_ context.Context, limit int) ([]domain.Audi
 		result[i] = s.logs[total-1-i]
 	}
 	return result, nil
+}
+
+func (s *MemoryAuditStore) ListLogsPage(_ context.Context, limit, offset int) ([]domain.AuditLog, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	total := len(s.logs)
+	if offset < 0 || offset >= total {
+		return []domain.AuditLog{}, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	result := make([]domain.AuditLog, 0, end-offset)
+	for i := total - 1 - offset; i >= total-end; i-- {
+		result = append(result, s.logs[i])
+	}
+	return result, nil
+}
+
+func (s *MemoryAuditStore) CountLogs(_ context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.logs), nil
 }
 
 func (s *MemoryAuditStore) ListLogsByQuestion(_ context.Context, qid string) ([]domain.AuditLog, error) {

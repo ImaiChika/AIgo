@@ -76,10 +76,10 @@ func TestInitBuiltinRolesHealsAdminRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(expertAfter.Permissions) != 2 {
-		t.Fatalf("expert 角色应固定为 2 个审核权限: %v", expertAfter.Permissions)
+	if len(expertAfter.Permissions) != 3 {
+		t.Fatalf("expert 角色应固定为 3 个审核权限（含我的审核记录）: %v", expertAfter.Permissions)
 	}
-	for _, permission := range []string{domain.PermQuestionView, domain.PermReviewDo} {
+	for _, permission := range []string{domain.PermQuestionView, domain.PermReviewDo, domain.PermReviewResults} {
 		if !slices.Contains(expertAfter.Permissions, permission) {
 			t.Fatalf("expert 角色自愈后缺少个人工作权限 %s: %v", permission, expertAfter.Permissions)
 		}

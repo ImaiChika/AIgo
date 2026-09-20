@@ -102,6 +102,19 @@ func (s *Service) ListLogs(ctx context.Context, limit int) ([]domain.AuditLog, e
 	return s.store.ListLogs(ctx, limit)
 }
 
+// ListLogsPaged 按页读取操作日志，并返回日志总数（分页展示用）。
+func (s *Service) ListLogsPaged(ctx context.Context, limit, offset int) ([]domain.AuditLog, int, error) {
+	total, err := s.store.CountLogs(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	logs, err := s.store.ListLogsPage(ctx, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	return logs, total, nil
+}
+
 // ListByQuestion 列出某题目的操作日志。
 func (s *Service) ListByQuestion(ctx context.Context, questionID string) ([]domain.AuditLog, error) {
 	return s.store.ListLogsByQuestion(ctx, questionID)

@@ -534,7 +534,7 @@ func (s *Server) handleReviewResults(w http.ResponseWriter, r *http.Request) {
 		filter.BankID = bankID
 	}
 	requestedScope := strings.TrimSpace(r.URL.Query().Get("scope"))
-	if requestedScope != "" && requestedScope != "personal" && requestedScope != "global" {
+	if requestedScope != "" && requestedScope != "personal" && requestedScope != "global" && requestedScope != "mine" {
 		writeError(w, http.StatusBadRequest, "无效的审核记录范围: "+requestedScope)
 		return
 	}
@@ -553,6 +553,10 @@ func (s *Server) handleReviewResults(w http.ResponseWriter, r *http.Request) {
 				filter.GlobalStatuses = append(filter.GlobalStatuses, string(globalShareStatusForTier(tier)))
 			}
 		}
+	} else if requestedScope == "mine" {
+		// 我的审核记录（审题人视角）：仅本人提交过审核意见/决断的题目。
+		// 评语可见性仍由 AttachRecordsForItems 按非全量可见规则裁剪。
+		filter.ReviewerID = auth.GetUserID(r.Context())
 	} else if requestedScope == "personal" || (requestedScope == "" && !s.hasPermission(r, domain.PermQuestionViewGlobal)) {
 		filter.OwnerID = auth.GetUserID(r.Context())
 		filter.IncludeLegacyOwner = requestedScope == ""
@@ -565,6 +569,10 @@ func (s *Server) handleReviewResults(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "无权查看个人题库审核记录")
 			return
 		}
+		visible = []domain.QuestionTier{domain.TierFormal, domain.TierWorking, domain.TierEliminated}
+	}
+	// 我的审核记录跨全部三层：审题人参审的题目后续定稿/淘汰不改变其本人历史。
+	if requestedScope == "mine" {
 		visible = []domain.QuestionTier{domain.TierFormal, domain.TierWorking, domain.TierEliminated}
 	}
 	if len(visible) == 0 {
@@ -580,13 +588,14 @@ func (s *Server) handleReviewResults(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	filter.BankScope, filter.ScopeRestricted = s.questionBankScope(r, domain.TierViewPerm(visible[0]))
-	if requestedScope == "personal" {
+	if requestedScope == "personal" || requestedScope == "mine" {
 		filter.BankScope, filter.ScopeRestricted = nil, false
 	}
 	statsFilter := storage.QuestionFilter{
 		Tiers: append([]string(nil), filter.Tiers...), GlobalStatuses: append([]string(nil), filter.GlobalStatuses...),
 		IncludeLegacyGlobal: filter.IncludeLegacyGlobal, BankScope: append([]string(nil), filter.BankScope...),
 		ScopeRestricted: filter.ScopeRestricted, OwnerID: filter.OwnerID, IncludeLegacyOwner: filter.IncludeLegacyOwner,
+		ReviewerID: filter.ReviewerID,
 	}
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))

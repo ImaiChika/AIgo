@@ -818,6 +818,10 @@ func questionFilterWhere(f storage.QuestionFilter) (string, []any) {
 		}
 		clauses = append(clauses, ownerClause)
 	}
+	if f.ReviewerID != "" {
+		// 我的审核记录：该用户在任何审核任务下提交过审核意见（含最终把关决断）的题目
+		clauses = append(clauses, "EXISTS (SELECT 1 FROM review_records rr JOIN review_tasks rt ON rr.task_id=rt.id WHERE rt.question_id = q.id AND rr.expert_id = "+placeholder(f.ReviewerID)+")")
+	}
 	if len(f.GlobalStatuses) > 0 {
 		statuses := make([]string, 0, len(f.GlobalStatuses))
 		for _, status := range f.GlobalStatuses {
@@ -945,7 +949,10 @@ func (s *Store) SearchQuestions(ctx context.Context, filter storage.QuestionFilt
 	return questions, total, nil
 }
 
+// 审核结果终态：archived（管理员归档删除）优先于一切任务状态——归档题已物理
+// 淘汰，不得再按其历史任务显示“需修改”，更不得落入 pending 被算成“未提交审核”。
 const reviewFinalStatusSQL = `CASE
+	WHEN q.status = 'archived' THEN 'archived'
 	WHEN q.status = 'published' THEN 'published'
 	WHEN q.status = 'rejected' THEN 'rejected'
 	WHEN lt.status = 'revision_required' THEN 'revision_required'
@@ -966,7 +973,7 @@ func reviewResultWhere(filter storage.QuestionFilter, finalStatus string) (strin
 		return where, args, nil
 	}
 	switch finalStatus {
-	case "pending", "reviewing", "conflict", "revision_required", "rejected", "published":
+	case "pending", "reviewing", "conflict", "revision_required", "rejected", "published", "archived":
 	default:
 		return "", nil, fmt.Errorf("无效的审核结果状态: %s", finalStatus)
 	}
@@ -1597,6 +1604,29 @@ func (s *Store) ListLogs(ctx context.Context, limit int) ([]domain.AuditLog, err
 	}
 	defer rows.Close()
 	return scanAuditLogs(rows)
+}
+
+func (s *Store) ListLogsPage(ctx context.Context, limit, offset int) ([]domain.AuditLog, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, question_id, action, actor, detail, created_at FROM audit_logs ORDER BY created_at DESC LIMIT $1 OFFSET $2`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAuditLogs(rows)
+}
+
+func (s *Store) CountLogs(ctx context.Context) (int, error) {
+	var n int
+	if err := s.queryRowContext(ctx, `SELECT COUNT(*) FROM audit_logs`).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 func (s *Store) ListLogsByQuestion(ctx context.Context, questionID string) ([]domain.AuditLog, error) {
@@ -2288,6 +2318,18 @@ func (s *Store) CountReviewResultsByVerdict(ctx context.Context) (map[string]int
 	return counts, nil
 }
 
+// CountReviewResultsByVerdictForOwner 按题目归属人统计 AI 检查结果（JOIN questions 过滤）。
+func (s *Store) CountReviewResultsByVerdictForOwner(ctx context.Context, ownerID string) (map[string]int, error) {
+	counts := map[string]int{}
+	if err := s.scanCounts(ctx, `
+		SELECT r.verdict, COUNT(*) FROM ai_review_results r
+		JOIN questions q ON q.id = r.question_id
+		WHERE q.owner_id = $1 GROUP BY r.verdict`, []any{ownerID}, counts); err != nil {
+		return nil, err
+	}
+	return counts, nil
+}
+
 // CountDiscardResults 统计 AI 检查淘汰留档总数。
 func (s *Store) CountDiscardResults(ctx context.Context) (int, error) {
 	var n int
@@ -2295,6 +2337,27 @@ func (s *Store) CountDiscardResults(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+// CountDiscardResultsForOwner 统计某归属人的 AI 检查淘汰留档数。
+func (s *Store) CountDiscardResultsForOwner(ctx context.Context, ownerID string) (int, error) {
+	var n int
+	if err := s.queryRowContext(ctx, `SELECT COUNT(*) FROM ai_check_discards WHERE owner_id = $1`, ownerID).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// CountCheckTasksByStatusForOwner 按题目归属人统计 AI 检查任务状态数（JOIN questions 过滤）。
+func (s *Store) CountCheckTasksByStatusForOwner(ctx context.Context, ownerID string) (map[string]int, error) {
+	counts := map[string]int{}
+	if err := s.scanCounts(ctx, `
+		SELECT t.status, COUNT(*) FROM ai_check_tasks t
+		JOIN questions q ON q.id = t.question_id
+		WHERE q.owner_id = $1 GROUP BY t.status`, []any{ownerID}, counts); err != nil {
+		return nil, err
+	}
+	return counts, nil
 }
 
 func (s *Store) ListDiscardResultsByQuestionIDs(ctx context.Context, questionIDs []string) (map[string]domain.AICheckDiscard, error) {

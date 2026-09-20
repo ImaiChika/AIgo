@@ -153,6 +153,30 @@ func (s *Service) TaskSummary(ctx context.Context) (map[string]int, error) {
 	return s.taskStore.CountCheckTasksByStatus(ctx)
 }
 
+// TaskSummaryForOwner 按题目归属人统计检查任务状态（数据统计页“我的数据”用）。
+func (s *Service) TaskSummaryForOwner(ctx context.Context, ownerID string) (map[string]int, error) {
+	if s.taskStore == nil {
+		return map[string]int{}, nil
+	}
+	return s.taskStore.CountCheckTasksByStatusForOwner(ctx, ownerID)
+}
+
+// VerdictSummaryForOwner 按题目归属人统计 AI 检查结论（数据统计页“我的数据”用）。
+func (s *Service) VerdictSummaryForOwner(ctx context.Context, ownerID string) (map[string]int, error) {
+	if s.aiReviewStore == nil {
+		return map[string]int{}, nil
+	}
+	return s.aiReviewStore.CountReviewResultsByVerdictForOwner(ctx, ownerID)
+}
+
+// DiscardCountForOwner 统计某归属人的 AI 检查淘汰留档数（数据统计页“我的数据”用）。
+func (s *Service) DiscardCountForOwner(ctx context.Context, ownerID string) (int, error) {
+	if s.aiReviewStore == nil {
+		return 0, nil
+	}
+	return s.aiReviewStore.CountDiscardResultsForOwner(ctx, ownerID)
+}
+
 // VerdictSummary 按结论统计全部 AI 检查结果（数据统计页用）。
 func (s *Service) VerdictSummary(ctx context.Context) (map[string]int, error) {
 	if s.aiReviewStore == nil {

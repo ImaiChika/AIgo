@@ -79,7 +79,7 @@ func TestKnowledgeVersionAPIAndPermissions(t *testing.T) {
 	}
 }
 
-func TestExpertReadsKnowledgeAndOwnReviewResultsButNotStats(t *testing.T) {
+func TestExpertReadsKnowledgeOwnReviewResultsAndPersonalStats(t *testing.T) {
 	server, _, cleanup := authHandlerTestServer(t)
 	defer cleanup()
 	server.kpSvc = knowledge.NewService(server.questionStore.(*postgres.Store))
@@ -110,15 +110,25 @@ func TestExpertReadsKnowledgeAndOwnReviewResultsButNotStats(t *testing.T) {
 	if slices.Contains(profile.Permissions, domain.PermBatchRun) {
 		t.Fatalf("expert 默认不应拥有批量推理权限: %v", profile.Permissions)
 	}
-	// 审核记录汇总属于独立管理能力，审题老师只处理分配到自己的任务。
-	if response := serveAuthJSON(t, handler, http.MethodGet, "/api/review/results?scope=personal", expert, "198.51.100.21", nil); response.Code != http.StatusForbidden {
-		t.Fatalf("expert should not access review results summary: status=%d body=%s", response.Code, response.Body.String())
+	// 审核记录：审题老师可见“我的审核记录”与本人题库范围（2026-09-20 需求更新），
+	// 全局审核记录仍要求 question:view_global（管理员级）。
+	if response := serveAuthJSON(t, handler, http.MethodGet, "/api/review/results?scope=mine", expert, "198.51.100.21", nil); response.Code != http.StatusOK {
+		t.Fatalf("expert should access own review records: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := serveAuthJSON(t, handler, http.MethodGet, "/api/review/results?scope=personal", expert, "198.51.100.21", nil); response.Code != http.StatusOK {
+		t.Fatalf("expert should access personal bank review records: status=%d body=%s", response.Code, response.Body.String())
 	}
 	if response := serveAuthJSON(t, handler, http.MethodGet, "/api/review/results?scope=global", expert, "198.51.100.21", nil); response.Code != http.StatusForbidden {
 		t.Fatalf("expert should not access global review results: status=%d body=%s", response.Code, response.Body.String())
 	}
-	if response := serveAuthJSON(t, handler, http.MethodGet, "/api/stats", expert, "198.51.100.21", nil); response.Code != http.StatusForbidden {
-		t.Fatalf("expert should not access stats: status=%d body=%s", response.Code, response.Body.String())
+	// 数据统计与题库同口径：审题老师（question:view）可进入个人范围统计，
+	// 但全局统计仍要求 question:view_global（2026-09-20 需求更新）。
+	statsResp := serveAuthJSON(t, handler, http.MethodGet, "/api/stats?scope=personal", expert, "198.51.100.21", nil)
+	if statsResp.Code != http.StatusOK {
+		t.Fatalf("expert should access personal stats: status=%d body=%s", statsResp.Code, statsResp.Body.String())
+	}
+	if response := serveAuthJSON(t, handler, http.MethodGet, "/api/stats?scope=global", expert, "198.51.100.21", nil); response.Code != http.StatusForbidden {
+		t.Fatalf("expert should not access global stats: status=%d body=%s", response.Code, response.Body.String())
 	}
 	if response := serveAuthJSON(t, handler, http.MethodGet, "/api/knowledge-points", expert, "198.51.100.21", nil); response.Code != http.StatusOK {
 		t.Fatalf("expert should read knowledge points: status=%d body=%s", response.Code, response.Body.String())

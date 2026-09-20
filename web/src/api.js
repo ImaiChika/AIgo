@@ -157,7 +157,7 @@ export const api = {
   stats: (scope = "") => request(`/stats${scope ? `?scope=${encodeURIComponent(scope)}` : ""}`),
 
   // 操作日志
-  auditLogs: (limit = 100) => request(`/audit-logs?limit=${limit}`),
+  auditLogs: (page = 1, limit = 200) => request(`/audit-logs?page=${page}&limit=${limit}`),
   auditLogsByQuestion: (id) => request(`/audit-logs/question/${id}`),
   auditLogsByActor: (actor) => request(`/audit-logs/actor/${actor}`),
 

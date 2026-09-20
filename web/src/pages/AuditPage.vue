@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { api } from "../api.js";
 
 const toast = ref("");
@@ -8,6 +8,10 @@ const loading = ref(false);
 const filterType = ref("all");
 const filterValue = ref("");
 const users = ref([]); // 用于把 actor 的 user ID 映射为可读用户名
+const page = ref(1);
+const pageSize = 200;
+const total = ref(0);
+const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)));
 
 // actor 显示名：user ID → 昵称/用户名
 function actorName(actor) {
@@ -41,9 +45,10 @@ async function loadLogs() {
     } else if (filterType.value === "actor" && filterValue.value) {
       data = await api.auditLogsByActor(filterValue.value);
     } else {
-      data = await api.auditLogs(200);
+      data = await api.auditLogs(page.value, pageSize);
     }
     logs.value = data.logs || [];
+    total.value = data.total ?? logs.value.length;
   } catch (e) {
     showToast("加载失败: " + e.message);
   } finally {
@@ -52,12 +57,21 @@ async function loadLogs() {
 }
 
 function doFilter() {
+  page.value = 1;
+  loadLogs();
+}
+
+function turnPage(delta) {
+  const next = page.value + delta;
+  if (next < 1 || next > totalPages.value) return;
+  page.value = next;
   loadLogs();
 }
 
 function clearFilter() {
   filterType.value = "all";
   filterValue.value = "";
+  page.value = 1;
   loadLogs();
 }
 
@@ -90,6 +104,7 @@ function actionText(action) {
     user_register: "自主注册",
     user_update_permissions: "改权限",
     user_reset_password: "重置密码",
+    auth_login: "登录成功",
     auth_login_failed: "登录失败",
     auth_rate_limited: "登录限速",
   };
@@ -98,7 +113,7 @@ function actionText(action) {
 
 function actionClass(action) {
   if (action === "create" || action === "import" || action === "export" || action === "expert_create" || action === "user_create" || action === "user_register") return "action-create";
-  if (action === "update" || action === "flow_update" || action === "expert_update") return "action-update";
+  if (action === "update" || action === "flow_update" || action === "expert_update" || action === "auth_login") return "action-update";
   if (action === "delete" || action === "flow_delete" || action === "expert_delete" || action === "auth_login_failed" || action === "auth_rate_limited" || action === "final_rejected" || action === "question_share_reject") return "action-delete";
   if (action === "review" || action === "submit" || action === "resubmit" || action === "submit_bank" || action === "question_share_request") return "action-review";
   if (action === "publish" || action === "final_approved" || action === "question_share_approve") return "action-publish";
@@ -125,7 +140,8 @@ onMounted(() => {
       <div class="section-heading">
         <span class="dot blue"></span>
         <h2>操作日志</h2>
-        <small>{{ logs.length }} 条记录</small>
+        <small v-if="filterType === 'all'">共 {{ total }} 条记录 · 第 {{ page }} / {{ totalPages }} 页</small>
+        <small v-else>{{ logs.length }} 条记录</small>
       </div>
 
       <div class="filter-row">
@@ -143,6 +159,10 @@ onMounted(() => {
         />
         <button class="primary-button" type="button" @click="doFilter">查询</button>
         <button class="ghost-button" type="button" @click="clearFilter">重置</button>
+        <template v-if="filterType === 'all'">
+          <button class="ghost-button" type="button" :disabled="page <= 1 || loading" @click="turnPage(-1)">上一页</button>
+          <button class="ghost-button" type="button" :disabled="page >= totalPages || loading" @click="turnPage(1)">下一页</button>
+        </template>
       </div>
 
       <div v-if="loading" class="loading">加载中...</div>

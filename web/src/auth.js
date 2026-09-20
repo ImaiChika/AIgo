@@ -7,7 +7,7 @@ const user = ref(JSON.parse(localStorage.getItem("aigo_user") || "null"));
 export const isLoggedIn = computed(() => !!token.value);
 export const currentUser = computed(() => user.value);
 
-// 角色显示名映射
+// 角色显示名映射（内置角色的本地兜底）
 export const roleNames = {
   super_admin: "超级管理员",
   admin: "管理员",
@@ -15,7 +15,12 @@ export const roleNames = {
   teacher: "命题教师",
 };
 
-export function roleName(role) {
+// 自定义角色（ID 形如 role-<时间戳>）的显示名由服务端随登录/me 响应下发，
+// 本地映射只认识内置角色，必须优先查 currentUser.role_names，否则界面会把
+// 原始 ID 当名字展示。
+export function roleName(role, roleNamesFromServer) {
+  if (role && roleNamesFromServer && roleNamesFromServer[role]) return roleNamesFromServer[role];
+  if (role && user.value?.role_names && user.value.role_names[role]) return user.value.role_names[role];
   return roleNames[role] || (role ? role : "未分配角色");
 }
 

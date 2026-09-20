@@ -8,6 +8,8 @@ const loading = ref(false);
 const error = ref("");
 const canViewGlobal = computed(() => hasPerm("question:view_global"));
 const statsScope = ref(canViewGlobal.value ? "global" : "personal");
+// 后端仅授权“全局数据 + 用户管理权限”时才返回 user_count；缺省即隐藏卡片。
+const hasUserCount = computed(() => stats.value?.user_count != null);
 
 const statusNames = {
   ai_draft: "草稿",
@@ -37,6 +39,7 @@ const verdictNames = {
 const taskStatusNames = {
   pending: "待执行",
   running: "执行中",
+  succeeded: "已完成",
   done: "已完成",
   failed: "待重试",
   exhausted: "最终失败",
@@ -161,8 +164,9 @@ onMounted(loadStats);
       <div v-if="loading" class="loading">加载中...</div>
       <div v-else-if="error" class="error-box">加载失败: {{ error }}</div>
       <div v-else-if="stats" class="stats-content">
-        <!-- 概览卡片 -->
-        <div class="cards-row six">
+        <!-- 概览卡片：用户数是系统级指标，仅后端在“全局数据+用户管理权限”时返回；
+             字段缺省时隐藏卡片，避免把“无权查看”显示成“用户数 0” -->
+        <div class="cards-row" :class="hasUserCount ? 'six' : 'five'">
           <div class="stat-card">
             <strong>{{ stats.question_count }}</strong>
             <span>待审核题库</span>
@@ -185,8 +189,8 @@ onMounted(loadStats);
             <strong>{{ stats.ai_check?.discarded ?? 0 }}</strong>
             <span>AI 检查淘汰</span>
           </div>
-          <div class="stat-card">
-            <strong>{{ stats.user_count ?? "-" }}</strong>
+          <div v-if="hasUserCount" class="stat-card">
+            <strong>{{ stats.user_count }}</strong>
             <span>用户数</span>
           </div>
         </div>
@@ -404,8 +408,13 @@ onMounted(loadStats);
   grid-template-columns: repeat(6, 1fr);
 }
 
+.cards-row.five {
+  grid-template-columns: repeat(5, 1fr);
+}
+
 @media (max-width: 1100px) {
-  .cards-row.six {
+  .cards-row.six,
+  .cards-row.five {
     grid-template-columns: repeat(3, 1fr);
   }
 }

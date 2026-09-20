@@ -42,7 +42,7 @@ const routes = [
   // 旧分类子题库地址只做兼容跳转，当前不再提供分类子题库页面。
   { path: "/banks", redirect: "/bank" },
   { path: "/batch", redirect: to => ({ path: "/generate/batch", query: to.query, hash: to.hash }) },
-  { path: "/stats", component: StatsPage, meta: { title: "数据统计", perm: "stats:view" } },
+  { path: "/stats", component: StatsPage, meta: { title: "数据统计", perm: ["stats:view", "question:view", "question:view_formal", "question:view_eliminated"] } },
   { path: "/review-flows", component: ReviewFlowPage, meta: { title: "审核流程", perm: "flow:manage" } },
   { path: "/audit", component: AuditPage, meta: { title: "操作日志", perm: "audit:view" } },
   { path: "/users", component: UsersPage, meta: { title: "用户管理", perm: "user:manage" } },

@@ -12,7 +12,24 @@ const total = ref(0);
 const hasMore = ref(false);
 let resultSearchTicket = 0;
 const loading = ref(false);
-const reviewScope = ref(hasPerm("question:view") ? "personal" : "global");
+// 审核记录范围：我的审核记录（review:view_results，审题人本人参审题目）、
+// 我的题库（question:view，本人归属题目）、全局题库（question:view_global，管理员级）。
+// 双身份账号默认停在管理员口径（我的题库）；纯审题身份默认进入“我的审核记录”。
+const canMineReviews = computed(() => hasPerm("review:view_results"));
+const canPersonalBank = computed(() => hasPerm("question:view"));
+const canGlobalBank = computed(() => hasPerm("question:view_global"));
+const reviewScope = ref(
+  canGlobalBank.value
+    ? "personal"
+    : canMineReviews.value
+      ? "mine"
+      : canPersonalBank.value
+        ? "personal"
+        : "global",
+);
+const scopeLabel = computed(
+  () => ({ mine: "我的审核记录", personal: "我的题库", global: "全局题库" })[reviewScope.value] || "",
+);
 
 const filterStatus = ref("");
 const searchQuery = ref("");
@@ -28,6 +45,7 @@ const statusMeta = {
   revision_required: { label: "需修改", cls: "s-revision" },
   rejected: { label: "已驳回", cls: "s-rejected" },
   published: { label: "已通过", cls: "s-published" },
+  archived: { label: "已归档", cls: "s-archived" },
 };
 
 function statusText(s) {
@@ -163,15 +181,20 @@ onMounted(() => {
 
 <template>
   <div class="results-layout">
-    <div v-if="hasPerm('question:view_global')" class="review-scope" aria-label="审核记录范围">
-      <button type="button" :class="{ active: reviewScope === 'personal' }" @click="switchScope('personal')">我的题库</button>
-      <button type="button" :class="{ active: reviewScope === 'global' }" @click="switchScope('global')">全局题库</button>
+    <div
+      v-if="canMineReviews || canPersonalBank || canGlobalBank"
+      class="review-scope"
+      aria-label="审核记录范围"
+    >
+      <button v-if="canMineReviews" type="button" :class="{ active: reviewScope === 'mine' }" @click="switchScope('mine')">我的审核记录</button>
+      <button v-if="canPersonalBank" type="button" :class="{ active: reviewScope === 'personal' }" @click="switchScope('personal')">我的题库</button>
+      <button v-if="canGlobalBank" type="button" :class="{ active: reviewScope === 'global' }" @click="switchScope('global')">全局题库</button>
     </div>
     <!-- 统计卡片 -->
     <section class="panel" v-if="stats">
       <div class="section-heading">
         <span class="dot blue"></span>
-        <h2>{{ reviewScope === 'personal' ? '我的题库' : '全局题库' }} · 审核结果统计</h2>
+        <h2>{{ scopeLabel }} · 审核结果统计</h2>
         <small>共 {{ stats.total }} 道题</small>
       </div>
       <div class="stats-grid">
@@ -192,6 +215,9 @@ onMounted(() => {
         </button>
         <button type="button" class="stat-card s-published" :class="{ active: filterStatus === 'published' }" @click="setStatusFilter('published')">
           <strong>{{ stats.published }}</strong><span>已通过</span>
+        </button>
+        <button type="button" class="stat-card s-archived" :class="{ active: filterStatus === 'archived' }" @click="setStatusFilter('archived')">
+          <strong>{{ stats.archived }}</strong><span>已归档</span>
         </button>
       </div>
     </section>
@@ -217,6 +243,7 @@ onMounted(() => {
           <option value="revision_required">需修改</option>
           <option value="rejected">已驳回</option>
           <option value="published">已通过</option>
+          <option value="archived">已归档</option>
         </select>
         <button class="ghost-button" type="button" @click="doSearch">搜索</button>
         <button class="ghost-button" type="button" @click="clearFilters">重置</button>
@@ -372,6 +399,20 @@ onMounted(() => {
 .stat-card.s-rejected,
 .stat-card.s-published {
   background: #fff;
+}
+
+.stat-card.s-archived {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+}
+
+.stat-card.s-archived strong {
+  color: #6b7280;
+}
+
+.status-tag.s-archived {
+  background: #f3f4f6;
+  color: #6b7280;
 }
 
 .stat-card.s-pending { border-top-color: #aeb9c7; }

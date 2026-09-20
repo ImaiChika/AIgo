@@ -135,8 +135,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/users/{id}/reset-password", s.requireAuth(domain.PermUserManage, s.handleResetUserPassword))
 	mux.HandleFunc("DELETE /api/users/{id}", s.requireAuth(domain.PermUserManage, s.handleDeleteUser))
 
-	// === 统计（需统计分析权限） ===
-	mux.HandleFunc("GET /api/stats", s.requireAuth(domain.PermStatsView, s.handleStats))
+	// === 统计：与题库入口同口径，任一题库分层查看权限即可进入；
+	// 页内数据按各权限点独立裁剪（分层计数、AI 检查、用户数等） ===
+	mux.HandleFunc("GET /api/stats", s.requireAuthAny([]string{
+		domain.PermStatsView,
+		domain.PermQuestionView,
+		domain.PermQuestionViewFormal,
+		domain.PermQuestionViewEliminated,
+	}, s.handleStats))
 
 	// === 操作日志 ===
 	mux.HandleFunc("GET /api/audit-logs", s.requireAuth(domain.PermAuditView, s.handleListAuditLogs))
@@ -278,11 +284,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	globalStats := requestedStatsScope == "global" || (requestedStatsScope == "" && s.hasPermission(r, domain.PermQuestionViewGlobal))
 	legacyStats := requestedStatsScope == ""
-	// 题库范围一次取回：统计权限与待审核层查看权限必须同时具备（与原逐题校验语义一致）。
+	// 题库范围一次取回：待审核层统计与题库页同口径，只看 question:view 的范围。
+	// stats:view 不再叠加额外限制——users.bank_ids 是用户级边界，两个权限点的
+	// 题库范围完全一致，历史上要求“同时具备”只会把只有查看权限的老师挡在门外。
 	// 全局统计即系统真实总量：不再按分享状态筛题，各分层总量与分布覆盖全部用户。
-	statsScope := s.bankScopeEvalFor(ctx, userID, domain.PermStatsView)
 	viewScope := s.bankScopeEvalFor(ctx, userID, domain.PermQuestionView)
-	workingFilter := tierFilter(domain.TierWorking, statsScope, viewScope)
+	workingFilter := tierFilter(domain.TierWorking, viewScope)
 	if workingFilter != nil && !globalStats {
 		workingFilter.OwnerID = userID
 		workingFilter.IncludeLegacyOwner = legacyStats
@@ -349,7 +356,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	for _, tier := range []domain.QuestionTier{domain.TierFormal, domain.TierEliminated} {
 		viewPerm := domain.TierViewPerm(tier)
 		scope := s.bankScopeEvalFor(ctx, userID, viewPerm)
-		filter := tierFilter(tier, statsScope, scope)
+		filter := tierFilter(tier, scope)
 		if filter == nil {
 			continue
 		}
@@ -368,17 +375,31 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		tierCounts[string(tier)] = total
 	}
 
-	// ===== AI 质量检查统计（全局指标：淘汰档案的题目已物理删除，无法按题库范围过滤） =====
+	// ===== AI 质量检查统计：全局按全量聚合；个人范围按题目归属人过滤。
+	// 此前只在全局范围计算，导致“我的数据”下即使个人题库有题，AI 检查也永远为空。
+	// 淘汰档案带 owner_id（旧档案无归属仅计入全局）；检查结果经 JOIN questions 按归属过滤。
 	aiCheck := map[string]any{}
-	if s.aiCheckSvc != nil && globalStats {
-		if verdicts, err := s.aiCheckSvc.VerdictSummary(ctx); err == nil {
-			aiCheck["verdicts"] = verdicts
-		}
-		if discarded, err := s.aiCheckSvc.DiscardCount(ctx); err == nil {
-			aiCheck["discarded"] = discarded
-		}
-		if tasks, err := s.aiCheckSvc.TaskSummary(ctx); err == nil {
-			aiCheck["tasks"] = tasks
+	if s.aiCheckSvc != nil {
+		if globalStats {
+			if verdicts, err := s.aiCheckSvc.VerdictSummary(ctx); err == nil {
+				aiCheck["verdicts"] = verdicts
+			}
+			if discarded, err := s.aiCheckSvc.DiscardCount(ctx); err == nil {
+				aiCheck["discarded"] = discarded
+			}
+			if tasks, err := s.aiCheckSvc.TaskSummary(ctx); err == nil {
+				aiCheck["tasks"] = tasks
+			}
+		} else {
+			if verdicts, err := s.aiCheckSvc.VerdictSummaryForOwner(ctx, userID); err == nil {
+				aiCheck["verdicts"] = verdicts
+			}
+			if discarded, err := s.aiCheckSvc.DiscardCountForOwner(ctx, userID); err == nil {
+				aiCheck["discarded"] = discarded
+			}
+			if tasks, err := s.aiCheckSvc.TaskSummaryForOwner(ctx, userID); err == nil {
+				aiCheck["tasks"] = tasks
+			}
 		}
 	}
 
@@ -393,15 +414,19 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// ===== 用户数（仅用户管理员可见，保持原行为） =====
+	// ===== 用户数：系统级指标，仅“全局数据 + 用户管理权限”才返回；字段缺省时前端隐藏卡片 =====
 	userCount := 0
-	if canManageUsers, _ := s.authSvc.HasPermission(ctx, userID, domain.PermUserManage); canManageUsers {
-		if users, err := s.authSvc.ListUsers(); err == nil {
-			userCount = len(users)
+	hasUserCount := false
+	if globalStats {
+		if canManageUsers, _ := s.authSvc.HasPermission(ctx, userID, domain.PermUserManage); canManageUsers {
+			if users, err := s.authSvc.ListUsers(); err == nil {
+				userCount = len(users)
+				hasUserCount = true
+			}
 		}
 	}
 
-	writeJSON(w, 200, map[string]any{
+	response := map[string]any{
 		// 兼容保留的旧字段
 		"question_count":          questionCount,
 		"knowledge_count":         kpTotal,
@@ -410,7 +435,6 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"difficulty_distribution": difficultyDist,
 		"bank_distribution":       bankDist,
 		"tier_distribution":       map[string]int{"working": questionCount},
-		"user_count":              userCount,
 		// 新增统计
 		"kp_version":              kpVersion,
 		"kp_versions_total":       kpVersionsTotal,
@@ -421,7 +445,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"ai_check":                aiCheck,
 		"batch_jobs":              batchStats,
 		"generated_at":            time.Now().Format(time.RFC3339),
-	})
+	}
+	if hasUserCount {
+		// 仅授权时携带，未授权时不输出 user_count=0（前端会把 0 当成真实值展示）。
+		response["user_count"] = userCount
+	}
+	writeJSON(w, 200, response)
 }
 
 // requireAuth 创建带 JWT 认证和权限检查的 handler 包装函数。

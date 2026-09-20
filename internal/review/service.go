@@ -635,10 +635,11 @@ type ReviewResultItem struct {
 type ReviewStats struct {
 	Published        int `json:"published"`         // 已通过（唯一成功终态）
 	Rejected         int `json:"rejected"`          // 已驳回
+	Archived         int `json:"archived"`          // 已归档（管理员删除留档，从未进入或已退出审核流）
 	RevisionRequired int `json:"revision_required"` // 需修改
 	Reviewing        int `json:"reviewing"`         // 审核中
 	Conflict         int `json:"conflict"`          // 待决断
-	Pending          int `json:"pending"`           // 未提交审核
+	Pending          int `json:"pending"`           // 未提交审核（仅待审核层尚未送审的题目）
 	Total            int `json:"total"`             // 题目总数
 }
 
@@ -649,15 +650,48 @@ func addReviewStat(stats *ReviewStats, finalStatus string, count int) {
 		stats.Published += count
 	case "rejected":
 		stats.Rejected += count
+	case "archived":
+		stats.Archived += count
 	case "revision_required":
 		stats.RevisionRequired += count
 	case "reviewing":
 		stats.Reviewing += count
 	case "conflict":
 		stats.Conflict += count
-	default:
+	case "pending":
 		stats.Pending += count
+	default:
+		// 未知状态不并入任何既有桶（历史上曾把 archived 静默算成“未提交审核”），
+		// 只计总数，避免统计口径被未知值污染。
 	}
+}
+
+// reviewerQuestionIDs 返回该审题人参与过（提交过审核意见或最终把关决断）的题目集合。
+// 供“我的审核记录”内存回退路径使用；生产存储在 SQL 端用 EXISTS 完成同一过滤。
+func (s *Service) reviewerQuestionIDs(ctx context.Context, reviewerID string) (map[string]bool, error) {
+	tasks, err := s.reviewStore.ListAllTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	taskIDs := make([]string, 0, len(tasks))
+	taskQuestion := make(map[string]string, len(tasks))
+	for _, t := range tasks {
+		taskIDs = append(taskIDs, t.ID)
+		taskQuestion[t.ID] = t.QuestionID
+	}
+	records, err := s.reviewStore.ListRecordsByTaskIDs(ctx, taskIDs)
+	if err != nil {
+		return nil, err
+	}
+	set := map[string]bool{}
+	for _, r := range records {
+		if r.ExpertID == reviewerID {
+			if qid, ok := taskQuestion[r.TaskID]; ok {
+				set[qid] = true
+			}
+		}
+	}
+	return set, nil
 }
 
 // SearchResultsForViewer 优先使用生产存储的数据库端审核记录查询能力，只加载当前页。
@@ -683,6 +717,26 @@ func (s *Service) SearchResultsForViewer(ctx context.Context, query storage.Revi
 		return items, page.Total, stats, nil
 	}
 
+	// 内存回退路径支持“我的审核记录”：先解析审题人参与过的题目集合
+	var reviewerFilterSet, reviewerStatsSet map[string]bool
+	if query.Filter.ReviewerID != "" {
+		var err error
+		reviewerFilterSet, err = s.reviewerQuestionIDs(ctx, query.Filter.ReviewerID)
+		if err != nil {
+			return nil, 0, ReviewStats{}, err
+		}
+	}
+	if query.StatsFilter.ReviewerID != "" {
+		if query.StatsFilter.ReviewerID == query.Filter.ReviewerID {
+			reviewerStatsSet = reviewerFilterSet
+		} else {
+			var err error
+			reviewerStatsSet, err = s.reviewerQuestionIDs(ctx, query.StatsFilter.ReviewerID)
+			if err != nil {
+				return nil, 0, ReviewStats{}, err
+			}
+		}
+	}
 	items, _, err := s.ListResultsForViewer(ctx, userID, fullAccess)
 	if err != nil {
 		return nil, 0, ReviewStats{}, err
@@ -690,10 +744,12 @@ func (s *Service) SearchResultsForViewer(ctx context.Context, query storage.Revi
 	stats := ReviewStats{}
 	filtered := make([]ReviewResultItem, 0, len(items))
 	for _, item := range items {
-		if matchesReviewQuestionFilter(item.Question, query.StatsFilter) {
+		if matchesReviewQuestionFilter(item.Question, query.StatsFilter) &&
+			(reviewerStatsSet == nil || reviewerStatsSet[item.Question.ID]) {
 			addReviewStat(&stats, item.FinalStatus, 1)
 		}
 		if !matchesReviewQuestionFilter(item.Question, query.Filter) ||
+			(reviewerFilterSet != nil && !reviewerFilterSet[item.Question.ID]) ||
 			(query.FinalStatus != "" && item.FinalStatus != query.FinalStatus) {
 			continue
 		}
@@ -796,6 +852,10 @@ func matchesReviewQuestionFilter(q domain.A2Question, filter storage.QuestionFil
 
 // finalStatusOf 根据题目与任务计算最终状态分类。
 func finalStatusOf(q domain.A2Question, task *domain.ReviewTask) string {
+	// 归档题已物理淘汰，终态优先于任何历史任务状态（与 SQL 口径 reviewFinalStatusSQL 一致）
+	if q.Status == domain.StatusArchived {
+		return "archived"
+	}
 	if task != nil {
 		switch task.Status {
 		case domain.StatusRevisionRequired:

@@ -14,6 +14,9 @@ type MemoryAICheckTaskStore struct {
 	mu    sync.Mutex
 	tasks map[string]domain.AICheckTask
 	order []string // 按插入顺序记录任务 ID，模拟 ORDER BY created_at
+	// QuestionOwner 可注入的题目归属解析（个人范围统计用）。未注入时归属未知，
+	// 按归属人统计的方法返回空计数；需要验证个人口径的测试自行接线。
+	QuestionOwner func(questionID string) string
 }
 
 func NewMemoryAICheckTaskStore() *MemoryAICheckTaskStore {
@@ -124,6 +127,22 @@ func (s *MemoryAICheckTaskStore) CountCheckTasksByStatus(_ context.Context) (map
 	out := map[string]int{}
 	for _, t := range s.tasks {
 		out[t.Status]++
+	}
+	return out, nil
+}
+
+// CountCheckTasksByStatusForOwner 按题目归属人统计任务状态数。
+func (s *MemoryAICheckTaskStore) CountCheckTasksByStatusForOwner(_ context.Context, ownerID string) (map[string]int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]int{}
+	if s.QuestionOwner == nil {
+		return out, nil
+	}
+	for _, t := range s.tasks {
+		if s.QuestionOwner(t.QuestionID) == ownerID {
+			out[t.Status]++
+		}
 	}
 	return out, nil
 }

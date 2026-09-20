@@ -47,17 +47,18 @@ var (
 // Permissions 为有效权限并集（角色权限 ∪ 直接分配权限），供前端展示与判断。
 // DirectPermissions 为用户直接分配的权限点（用户管理矩阵编辑用）。
 type User struct {
-	ID                string    `json:"id"`
-	Username          string    `json:"username"`
-	DisplayName       string    `json:"display_name"`
-	Role              string    `json:"role"`               // 角色模板 ID（空=未分配角色）
-	Roles             []string  `json:"roles"`              // 可切换的角色模板；Role 为当前/默认角色
-	Permissions       []string  `json:"permissions"`        // 有效权限点列表
-	DirectPermissions []string  `json:"direct_permissions"` // 直接分配的权限点
-	BankIDs           []string  `json:"bank_ids"`           // 用户级题库范围（空=全部）
-	Enabled           bool      `json:"enabled"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                string            `json:"id"`
+	Username          string            `json:"username"`
+	DisplayName       string            `json:"display_name"`
+	Role              string            `json:"role"`               // 角色模板 ID（空=未分配角色）
+	Roles             []string          `json:"roles"`              // 可切换的角色模板；Role 为当前/默认角色
+	RoleNames         map[string]string `json:"role_names"`         // 角色模板 ID → 显示名（自定义角色前端展示用）
+	Permissions       []string          `json:"permissions"`        // 有效权限点列表
+	DirectPermissions []string          `json:"direct_permissions"` // 直接分配的权限点
+	BankIDs           []string          `json:"bank_ids"`           // 用户级题库范围（空=全部）
+	Enabled           bool              `json:"enabled"`
+	CreatedAt         time.Time         `json:"created_at"`
+	UpdatedAt         time.Time         `json:"updated_at"`
 }
 
 // Claims JWT 声明（payload），包含用户基本信息和过期时间。
@@ -116,6 +117,9 @@ func builtinRoles() []domain.Role {
 			Permissions: []string{
 				domain.PermQuestionView,
 				domain.PermReviewDo,
+				// 审题老师可查看“我的审核记录”（本人参审题目）；全局审核记录
+				// 仍要求 question:view_global（管理员级），与题库分层口径一致。
+				domain.PermReviewResults,
 			},
 		},
 		{
@@ -324,6 +328,23 @@ func (s *Service) InitAdmin(username, password, displayName string) (bool, strin
 	return true, password, nil
 }
 
+// attachRoleNames 填充角色模板 ID → 显示名映射。登录/me 响应会把它带给前端，
+// 自定义角色（ID 形如 role-<时间戳>）没有前端硬编码的显示名，必须由服务端下发。
+func (s *Service) attachRoleNames(user *User) error {
+	names := make(map[string]string, len(user.Roles))
+	for _, roleID := range user.Roles {
+		role, err := s.GetRole(context.Background(), roleID)
+		if err != nil {
+			return err
+		}
+		if role != nil {
+			names[roleID] = role.Name
+		}
+	}
+	user.RoleNames = names
+	return nil
+}
+
 // GetUserByUsername 根据用户名查询用户，不存在时返回 nil。
 func (s *Service) GetUserByUsername(username string) (*User, error) {
 	var user User
@@ -340,6 +361,9 @@ func (s *Service) GetUserByUsername(username string) (*User, error) {
 	}
 	user.Roles = normalizeRoleIDs(user.Role, user.Roles)
 	user.Role = defaultRoleID(user.Role, user.Roles)
+	if err := s.attachRoleNames(&user); err != nil {
+		return nil, err
+	}
 	user.Permissions, user.DirectPermissions, user.BankIDs, err = s.effectivePermissions(user.ID)
 	if err != nil {
 		return nil, err
@@ -373,6 +397,9 @@ func (s *Service) Login(username, password string) (string, *User, error) {
 
 	user.Roles = normalizeRoleIDs(user.Role, user.Roles)
 	user.Role = defaultRoleID(user.Role, user.Roles)
+	if err := s.attachRoleNames(&user); err != nil {
+		return "", nil, err
+	}
 	loginCtx := context.WithValue(context.Background(), RoleKey, user.Role)
 	user.Permissions, user.DirectPermissions, user.BankIDs, err = s.effectivePermissionsForRole(loginCtx, user.ID, user.Role)
 	if err != nil {
@@ -465,6 +492,9 @@ func (s *Service) GetUserByID(id string) (*User, error) {
 	}
 	user.Roles = normalizeRoleIDs(user.Role, user.Roles)
 	user.Role = defaultRoleID(user.Role, user.Roles)
+	if err := s.attachRoleNames(&user); err != nil {
+		return nil, err
+	}
 	user.Permissions, user.DirectPermissions, user.BankIDs, err = s.effectivePermissions(user.ID)
 	if err != nil {
 		return nil, err
@@ -541,6 +571,9 @@ func (s *Service) ListUsers() ([]User, error) {
 		}
 		u.Roles = normalizeRoleIDs(u.Role, u.Roles)
 		u.Role = defaultRoleID(u.Role, u.Roles)
+		if err := s.attachRoleNames(&u); err != nil {
+			return nil, err
+		}
 		u.Permissions, u.DirectPermissions, u.BankIDs, err = s.effectivePermissions(u.ID)
 		if err != nil {
 			return nil, err

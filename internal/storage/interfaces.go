@@ -111,6 +111,7 @@ type ReadinessChecker interface {
 // QuestionFilter 描述题目列表/搜索在数据库端的过滤条件。空值/空切片表示不过滤。
 type QuestionFilter struct {
 	OwnerID             string   // 个人题库范围：仅返回该用户归属的题目
+	ReviewerID          string   // 我的审核记录范围：仅返回该用户作为审题人参与过（有审核意见）的题目
 	IncludeLegacyOwner  bool     // 兼容未迁移归属的历史题目（仅旧版未显式 scope 的查询使用）
 	IncludeLegacyGlobal bool     // 全局库兼容迁移前无个人归属的旧题目
 	GlobalStatuses      []string // 全局题库分享状态（pending/approved/rejected）
@@ -360,6 +361,10 @@ type KnowledgeStore interface {
 type AuditStore interface {
 	SaveLog(ctx context.Context, log domain.AuditLog) error
 	ListLogs(ctx context.Context, limit int) ([]domain.AuditLog, error)
+	// ListLogsPage 按页读取操作日志（时间倒序），offset 为跳过的条数。
+	ListLogsPage(ctx context.Context, limit, offset int) ([]domain.AuditLog, error)
+	// CountLogs 返回操作日志总数（分页展示用）。
+	CountLogs(ctx context.Context) (int, error)
 	ListLogsByQuestion(ctx context.Context, questionID string) ([]domain.AuditLog, error)
 	ListLogsByActor(ctx context.Context, actor string) ([]domain.AuditLog, error)
 }
@@ -438,8 +443,12 @@ type AIReviewStore interface {
 	ListDiscardResultsByQuestionIDs(ctx context.Context, questionIDs []string) (map[string]domain.AICheckDiscard, error)
 	// CountReviewResultsByVerdict 按 verdict 统计 AI 检查结果数量（存储端聚合）。
 	CountReviewResultsByVerdict(ctx context.Context) (map[string]int, error)
+	// CountReviewResultsByVerdictForOwner 按题目归属人统计 AI 检查结果（数据统计页“我的数据”用）。
+	CountReviewResultsByVerdictForOwner(ctx context.Context, ownerID string) (map[string]int, error)
 	// CountDiscardResults 统计 AI 检查淘汰留档总数。
 	CountDiscardResults(ctx context.Context) (int, error)
+	// CountDiscardResultsForOwner 统计某归属人的 AI 检查淘汰留档数（数据统计页“我的数据”用）。
+	CountDiscardResultsForOwner(ctx context.Context, ownerID string) (int, error)
 }
 
 // AICheckOutcome 汇总一次 AI 检查结论需要落库的全部写入。
@@ -479,4 +488,6 @@ type AICheckTaskStore interface {
 	LatestCheckTasksByQuestionIDs(ctx context.Context, questionIDs []string) (map[string]domain.AICheckTask, error)
 	// CountCheckTasksByStatus 按状态统计全量任务数。
 	CountCheckTasksByStatus(ctx context.Context) (map[string]int, error)
+	// CountCheckTasksByStatusForOwner 按题目归属人统计任务状态数（数据统计页“我的数据”用）。
+	CountCheckTasksByStatusForOwner(ctx context.Context, ownerID string) (map[string]int, error)
 }

@@ -434,3 +434,108 @@ func serveAuthJSON(t *testing.T, handler http.Handler, method, path, token, clie
 	handler.ServeHTTP(recorder, request)
 	return recorder
 }
+
+// 登录成功必须在审计日志留痕（含管理员自身），且登录/me 响应要携带
+// role_names，否则挂自定义角色的账号在界面只能看到 role-<时间戳> 原始 ID。
+func TestLoginAuditLogAndCustomRoleNames(t *testing.T) {
+	server, _, cleanup := authHandlerTestServer(t)
+	defer cleanup()
+	handler := server.Handler()
+
+	adminToken := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.1")
+
+	createdRole := serveAuthJSON(t, handler, http.MethodPost, "/api/roles", adminToken, "198.51.100.1", map[string]any{
+		"name": "访客测试角色", "description": "登录日志与角色名集成测试", "permissions": []string{domain.PermQuestionView},
+	})
+	if createdRole.Code != http.StatusCreated {
+		t.Fatalf("create role status=%d body=%s", createdRole.Code, createdRole.Body.String())
+	}
+	var role domain.Role
+	if err := json.Unmarshal(createdRole.Body.Bytes(), &role); err != nil || role.ID == "" {
+		t.Fatalf("parse role: %+v err=%v", role, err)
+	}
+	if !strings.HasPrefix(role.ID, "role-") {
+		t.Fatalf("auto role id should look like role-<timestamp>, got %q", role.ID)
+	}
+
+	createdUser := serveAuthJSON(t, handler, http.MethodPost, "/api/users", adminToken, "198.51.100.1", map[string]any{
+		"username": "guest-login-test", "password": "guest-password-1", "display_name": "访客登录测试", "role": role.ID,
+	})
+	if createdUser.Code != http.StatusCreated {
+		t.Fatalf("create user status=%d body=%s", createdUser.Code, createdUser.Body.String())
+	}
+
+	login := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/login", "", "203.0.113.20", map[string]any{"username": "guest-login-test", "password": "guest-password-1"})
+	if login.Code != http.StatusOK {
+		t.Fatalf("guest login status=%d body=%s", login.Code, login.Body.String())
+	}
+	var loginPayload struct {
+		Token string    `json:"token"`
+		User  auth.User `json:"user"`
+	}
+	if err := json.Unmarshal(login.Body.Bytes(), &loginPayload); err != nil {
+		t.Fatal(err)
+	}
+	if loginPayload.User.Role != role.ID {
+		t.Fatalf("guest role=%q want %q", loginPayload.User.Role, role.ID)
+	}
+	if name := loginPayload.User.RoleNames[role.ID]; name != "访客测试角色" {
+		t.Fatalf("login role_names[%s]=%q want 访客测试角色", role.ID, name)
+	}
+
+	// 管理员登录响应同样要带内置角色的显示名。
+	adminLogin := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/login", "", "198.51.100.1", map[string]any{"username": "admin", "password": "admin-password"})
+	if adminLogin.Code != http.StatusOK {
+		t.Fatalf("admin login status=%d body=%s", adminLogin.Code, adminLogin.Body.String())
+	}
+	var adminPayload struct {
+		User auth.User `json:"user"`
+	}
+	if err := json.Unmarshal(adminLogin.Body.Bytes(), &adminPayload); err != nil {
+		t.Fatal(err)
+	}
+	if name := adminPayload.User.RoleNames[domain.RoleSuperAdmin]; name != "超级管理员" {
+		t.Fatalf("admin role_names[%s]=%q want 超级管理员", domain.RoleSuperAdmin, name)
+	}
+
+	me := serveAuthJSON(t, handler, http.MethodGet, "/api/auth/me", loginPayload.Token, "203.0.113.20", nil)
+	if me.Code != http.StatusOK {
+		t.Fatalf("me status=%d body=%s", me.Code, me.Body.String())
+	}
+	var meUser auth.User
+	if err := json.Unmarshal(me.Body.Bytes(), &meUser); err != nil {
+		t.Fatal(err)
+	}
+	if meUser.RoleNames[role.ID] != "访客测试角色" {
+		t.Fatalf("me role_names[%s]=%q want 访客测试角色", role.ID, meUser.RoleNames[role.ID])
+	}
+
+	logs := serveAuthJSON(t, handler, http.MethodGet, "/api/audit-logs?limit=50", adminToken, "198.51.100.1", nil)
+	if logs.Code != http.StatusOK {
+		t.Fatalf("audit logs status=%d body=%s", logs.Code, logs.Body.String())
+	}
+	var logPayload struct {
+		Logs []domain.AuditLog `json:"logs"`
+	}
+	if err := json.Unmarshal(logs.Body.Bytes(), &logPayload); err != nil {
+		t.Fatal(err)
+	}
+	sawAdmin, sawGuest := false, false
+	for _, entry := range logPayload.Logs {
+		if entry.Action != "auth_login" {
+			continue
+		}
+		if entry.Actor == "admin" {
+			sawAdmin = true
+		}
+		if entry.Actor == "guest-login-test" && strings.Contains(entry.Detail, "访客测试角色") && strings.Contains(entry.Detail, "source=") {
+			sawGuest = true
+		}
+	}
+	if !sawAdmin {
+		t.Fatal("admin's own successful login is missing from audit logs")
+	}
+	if !sawGuest {
+		t.Fatal("guest's successful login (with role name and hashed source) is missing from audit logs")
+	}
+}

@@ -222,3 +222,120 @@ func TestStatsHandlerScopedAndPermissionGated(t *testing.T) {
 		t.Fatalf("stats-only user question_count=%d, want 0", payload2.QuestionCount)
 	}
 }
+
+// 数据统计入口与题库同口径 + 个人范围 AI 检查统计 + 用户数门控：
+// 1) 仅持有 question:view 的老师（审题身份）也能进入数据统计；
+// 2) “我的数据”下 AI 质量检查按题目归属人过滤，个人题库有题就有检查数据；
+// 3) 用户数仅“全局数据 + 用户管理权限”返回，个人范围与普通老师不返回该字段。
+func TestStatsTierEntryPersonalAICheckAndUserCountGating(t *testing.T) {
+	server, store, cleanup := authHandlerTestServer(t)
+	defer cleanup()
+	seedStatsFixtures(t, store)
+	server.aiCheckSvc = aicheck.NewService(nil, store, store, store, "test-model")
+	handler := server.Handler()
+	adminToken := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.1")
+	adminUser, err := server.authSvc.GetUserByUsername("admin")
+	if err != nil || adminUser == nil {
+		t.Fatalf("load admin: user=%v err=%v", adminUser, err)
+	}
+
+	// 审题身份：只有 question:view（没有 stats:view），此前连接口都会 403。
+	viewerToken := createScopedTierUser(t, handler, adminToken, "stats-viewer", "", []string{
+		domain.PermQuestionView,
+	}, nil)
+	resp := serveAuthJSON(t, handler, http.MethodGet, "/api/stats?scope=personal", viewerToken, "203.0.113.10", nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("question:view-only user GET /api/stats status=%d body=%s", resp.Code, resp.Body.String())
+	}
+
+	viewerUser, err := server.authSvc.GetUserByUsername("stats-viewer")
+	if err != nil || viewerUser == nil {
+		t.Fatalf("load viewer: user=%v err=%v", viewerUser, err)
+	}
+	// 造数据：viewer 名下 1 题（有检查结论 + 淘汰留档），admin 名下 1 题。
+	ctx := t.Context()
+	if err := store.SaveQuestion(ctx, domain.A2Question{
+		ID: "stats-own-q1", Status: domain.StatusAIReviewed, Difficulty: "0.65",
+		Profession: "内科", ClinicalStem: "个人统计-归属题", Answer: "A", OwnerID: viewerUser.ID, Version: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveQuestion(ctx, domain.A2Question{
+		ID: "stats-own-q2", Status: domain.StatusAIReviewed, Difficulty: "0.65",
+		Profession: "内科", ClinicalStem: "个人统计-管理员题", Answer: "A", OwnerID: adminUser.ID, Version: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveReviewResult(ctx, domain.AIReviewResult{ID: "own-air-1", QuestionID: "stats-own-q1", Verdict: "pass", QuestionVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveReviewResult(ctx, domain.AIReviewResult{ID: "own-air-2", QuestionID: "stats-own-q2", Verdict: "reject", QuestionVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveDiscardResult(ctx, domain.AICheckDiscard{
+		ID: "own-disc-1", QuestionID: "stats-gone-viewer", Verdict: "reject", OwnerID: viewerUser.ID, StemSummary: "个人淘汰留档",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveDiscardResult(ctx, domain.AICheckDiscard{
+		ID: "own-disc-2", QuestionID: "stats-gone-admin", Verdict: "reject", OwnerID: adminUser.ID, StemSummary: "管理员淘汰留档",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	personal := serveAuthJSON(t, handler, http.MethodGet, "/api/stats?scope=personal", viewerToken, "203.0.113.10", nil)
+	if personal.Code != http.StatusOK {
+		t.Fatalf("viewer personal stats status=%d body=%s", personal.Code, personal.Body.String())
+	}
+	var personalPayload struct {
+		QuestionCount int `json:"question_count"`
+		AICheck       struct {
+			Discarded int            `json:"discarded"`
+			Verdicts  map[string]int `json:"verdicts"`
+		} `json:"ai_check"`
+		UserCount *int `json:"user_count"`
+	}
+	if err := json.Unmarshal(personal.Body.Bytes(), &personalPayload); err != nil {
+		t.Fatal(err)
+	}
+	if personalPayload.QuestionCount != 1 {
+		t.Fatalf("viewer personal question_count=%d, want 1（仅本人归属题）", personalPayload.QuestionCount)
+	}
+	if personalPayload.AICheck.Verdicts["pass"] != 1 || personalPayload.AICheck.Verdicts["reject"] != 0 {
+		t.Fatalf("viewer personal ai_check.verdicts=%v, want 仅本人检查结论 pass=1", personalPayload.AICheck.Verdicts)
+	}
+	if personalPayload.AICheck.Discarded != 1 {
+		t.Fatalf("viewer personal ai_check.discarded=%d, want 1（仅本人淘汰留档）", personalPayload.AICheck.Discarded)
+	}
+	if personalPayload.UserCount != nil {
+		t.Fatalf("普通老师个人范围不应返回 user_count: %v", *personalPayload.UserCount)
+	}
+
+	// 管理员：全局范围返回 user_count；个人范围不返回（系统级指标不属于“我的数据”）。
+	global := serveAuthJSON(t, handler, http.MethodGet, "/api/stats?scope=global", adminToken, "198.51.100.1", nil)
+	if global.Code != http.StatusOK {
+		t.Fatalf("admin global stats status=%d", global.Code)
+	}
+	var globalPayload struct {
+		UserCount *int `json:"user_count"`
+	}
+	if err := json.Unmarshal(global.Body.Bytes(), &globalPayload); err != nil {
+		t.Fatal(err)
+	}
+	if globalPayload.UserCount == nil || *globalPayload.UserCount < 2 {
+		t.Fatalf("admin global should include user_count>=2: %v", globalPayload.UserCount)
+	}
+	adminPersonal := serveAuthJSON(t, handler, http.MethodGet, "/api/stats?scope=personal", adminToken, "198.51.100.1", nil)
+	if adminPersonal.Code != http.StatusOK {
+		t.Fatalf("admin personal stats status=%d", adminPersonal.Code)
+	}
+	var adminPersonalPayload struct {
+		UserCount *int `json:"user_count"`
+	}
+	if err := json.Unmarshal(adminPersonal.Body.Bytes(), &adminPersonalPayload); err != nil {
+		t.Fatal(err)
+	}
+	if adminPersonalPayload.UserCount != nil {
+		t.Fatalf("个人范围不应返回系统级 user_count: %v", *adminPersonalPayload.UserCount)
+	}
+}

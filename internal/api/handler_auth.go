@@ -63,11 +63,26 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "登录服务暂时不可用")
 		return
 	}
+	s.logAuthenticationSuccess(r, user, clientIP)
 
 	writeJSON(w, 200, map[string]any{
 		"token": token, // 前端保存此 token，后续请求带在 Authorization 头
 		"user":  user,  // 用户基本信息（不含密码）
 	})
+}
+
+// logAuthenticationSuccess 登录成功也留痕：管理员界面的操作日志必须能看到
+// 每个账号（含管理员自身）的登录记录。来源 IP 与失败日志同口径做哈希脱敏。
+func (s *Server) logAuthenticationSuccess(r *http.Request, user *auth.User, clientIP string) {
+	if s.auditSvc == nil {
+		return
+	}
+	roleName := user.Role
+	if name, ok := user.RoleNames[user.Role]; ok && name != "" {
+		roleName = name
+	}
+	detail := fmt.Sprintf("account=%s role=%s source=%s", user.Username, roleName, auth.AuditSubject("ip", clientIP))
+	_ = s.auditSvc.Log(r.Context(), "", "auth_login", user.Username, detail)
 }
 
 // handleMe 获取当前登录用户信息。

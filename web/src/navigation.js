@@ -46,7 +46,8 @@ export const navigationGroups = [
     // 题库按生命周期分层（正式/过程/淘汰），任一分层的查看权限即可进入，页内按权限展示 tab
     { id: "bank", label: "题库", path: "/bank", permission: ["question:view", "question:view_formal", "question:view_eliminated"] },
     { id: "share-requests", label: "分享管理", path: "/share-requests", permission: ["question:share", "question:share_review"], badgeKey: "shares" },
-    { id: "stats", label: "数据统计", path: "/stats", permission: "stats:view" },
+    // 数据统计与题库同口径：任一题库分层查看权限即可进入，页内数据按权限独立裁剪
+    { id: "stats", label: "数据统计", path: "/stats", permission: ["stats:view", "question:view", "question:view_formal", "question:view_eliminated"] },
   ] },
   { id: "system", label: "系统管理", icon: "M4 7h16M4 17h16 M8 4v6M16 14v6", items: [
     { id: "users", label: "用户管理", path: "/users", permission: "user:manage" },
