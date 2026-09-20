@@ -4,6 +4,7 @@ import { useRouter, useRoute, isNavigationFailure } from "vue-router";
 import { currentUser, hasPerm, roleName, clearAuth, setAuth, updateUser, isLoggedIn, getToken } from "./auth.js";
 import { api } from "./api.js";
 import SidebarNavigation from "./components/SidebarNavigation.vue";
+import BeianFooter from "./components/BeianFooter.vue";
 import { visibleNavigation, navigationItemActive, permissionAllowed } from "./navigation.js";
 import "./navigation-shell.css";
 
@@ -253,6 +254,7 @@ async function switchRole(role) {
       </header>
 
       <router-view />
+      <BeianFooter />
     </main>
   </div>
 

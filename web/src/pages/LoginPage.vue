@@ -3,6 +3,7 @@ import { onMounted, ref } from "vue";
 import { useRouter, useRoute } from "vue-router";
 import { api } from "../api.js";
 import { setAuth } from "../auth.js";
+import BeianFooter from "../components/BeianFooter.vue";
 
 const router = useRouter();
 const route = useRoute();
@@ -145,6 +146,9 @@ function switchMode(m) {
       </div>
 
     </div>
+    <div class="login-beian">
+      <BeianFooter />
+    </div>
   </div>
 </template>
 
@@ -153,7 +157,19 @@ function switchMode(m) {
   display: grid;
   place-items: center;
   min-height: 100vh;
+  padding-bottom: 44px;
   background: #f3f6fb;
+}
+
+.login-beian {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 10px;
+}
+
+.login-beian .beian-footer {
+  margin-top: 0;
 }
 
 .login-card {
