@@ -27,12 +27,14 @@ test("permission filtering removes inaccessible children and empty categories", 
 });
 
 test("teacher and reviewer identities expose mutually exclusive work navigation", () => {
-  const reviewerIds = visibleNavigation(permissions("question:view", "review:do"))
+  // 数据统计与题库同口径（任一题库分层查看权限即可见）；审题老师另有
+  // review:view_results 查看“我的审核记录”。命题与送审入口仍互斥。
+  const reviewerIds = visibleNavigation(permissions("question:view", "review:do", "review:view_results"))
     .flatMap(group => group.items.map(item => item.id));
-  for (const expected of ["my-dashboard", "personal-settings", "knowledge", "review", "bank"]) {
+  for (const expected of ["my-dashboard", "personal-settings", "knowledge", "review", "review-results", "bank", "stats"]) {
     assert.equal(reviewerIds.includes(expected), true, `missing reviewer navigation item ${expected}`);
   }
-  for (const forbidden of ["generate", "new-questions", "my-revisions", "review-results", "stats"]) {
+  for (const forbidden of ["generate", "new-questions", "my-revisions"]) {
     assert.equal(reviewerIds.includes(forbidden), false, `reviewer should not see ${forbidden}`);
   }
 
