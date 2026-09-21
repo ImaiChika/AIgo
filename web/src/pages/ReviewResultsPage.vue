@@ -151,12 +151,31 @@ function difficultyText(d) {
   return d || "-";
 }
 
-// 专家评语（审核记录按轮次分组，跨提交批次合并展示并标注批次）
+// 决断记录（轮外把关/撤回修改）按 ID 前缀识别：不参与轮内分组，单独成区。
+function isDecisionRecord(r) {
+  const id = r?.id || "";
+  return id.startsWith("rec-final-") || id.startsWith("rec-unpublish-");
+}
+
+// 专家评语（审核记录按轮次分组，跨提交批次合并展示并标注批次；决断记录除外）
 function recordsByRound(item) {
   const map = new Map();
   for (const r of item.records || []) {
+    if (isDecisionRecord(r)) continue;
     if (!map.has(r.round_number)) map.set(r.round_number, []);
     map.get(r.round_number).push(r);
+  }
+  return Array.from(map.entries()).sort((a, b) => a[0] - b[0]);
+}
+
+// 决断区：在全部轮次之后按“第 N 次送审”分组展示，把关流程是轮外的最后一道。
+function decisionsByAttempt(item) {
+  const map = new Map();
+  for (const r of item.records || []) {
+    if (!isDecisionRecord(r)) continue;
+    const attempt = r.attempt || 1;
+    if (!map.has(attempt)) map.set(attempt, []);
+    map.get(attempt).push(r);
   }
   return Array.from(map.entries()).sort((a, b) => a[0] - b[0]);
 }
@@ -302,7 +321,7 @@ onMounted(() => {
 
             <div v-if="item.task" class="task-line">
               审核任务：第 {{ item.task.current_round }} 轮 / 共
-              {{ item.task.round_results?.length || 1 }} 轮 ｜ 流程：{{ item.task.flow_id }} ｜
+              {{ item.task.round_results?.length || 1 }} 轮 ｜ 流程：{{ item.task.flow_name || item.task.flow_id }} ｜
               审核人：{{ (item.task.assigned_to || []).map(expertName).join("、") || "自动匹配" }}
               <span v-if="item.task.final_decision" class="final-decision">
                 ｜ 最终决断：{{ reviewDisplayName(item.task.final_decision.expert_id, item.task.final_decision.expert_name) }} → {{ conclusionText("final_" + item.task.final_decision.conclusion) }}
@@ -314,6 +333,18 @@ onMounted(() => {
             <div v-if="(item.records || []).length" class="rounds">
               <div v-for="[round, recs] in recordsByRound(item)" :key="round" class="round-block">
                 <div class="round-title">第 {{ round }} 轮（{{ recs.length }} 条评语）</div>
+                <div class="record-grid">
+                  <ReviewCommentCard
+                    v-for="rec in recs"
+                    :key="rec.id"
+                    :record="rec"
+                    :fallback-name="reviewDisplayName(rec.expert_id, rec.expert_name)"
+                    compact
+                  />
+                </div>
+              </div>
+              <div v-for="[attempt, recs] in decisionsByAttempt(item)" :key="`d-${attempt}`" class="round-block decision-block">
+                <div class="round-title decision-title">最终决断（{{ recs.length }} 条）</div>
                 <div class="record-grid">
                   <ReviewCommentCard
                     v-for="rec in recs"
@@ -656,6 +687,10 @@ onMounted(() => {
   font-weight: 700;
   color: #1385f8;
   margin-bottom: 6px;
+}
+
+.round-title.decision-title {
+  color: #8a5ae0;
 }
 
 .record-grid {

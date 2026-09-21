@@ -694,6 +694,41 @@ func (s *Service) reviewerQuestionIDs(ctx context.Context, reviewerID string) (m
 	return set, nil
 }
 
+// attachFlowNames 为任务批量回填流程显示名，避免界面显示 flow-xxx 原始 ID。
+// 流程配置数量很小，一次 ListFlowConfigs 全量载入后内存映射。
+func (s *Service) attachFlowNames(ctx context.Context, tasks ...*domain.ReviewTask) {
+	need := map[string]bool{}
+	for _, t := range tasks {
+		if t != nil && t.FlowName == "" && t.FlowID != "" {
+			need[t.FlowID] = true
+		}
+	}
+	if len(need) == 0 {
+		return
+	}
+	flows, err := s.reviewStore.ListFlowConfigs(ctx)
+	if err != nil {
+		return
+	}
+	names := make(map[string]string, len(flows))
+	for _, f := range flows {
+		names[f.ID] = f.Name
+	}
+	for _, t := range tasks {
+		if t != nil && t.FlowName == "" {
+			t.FlowName = names[t.FlowID]
+		}
+	}
+}
+
+// AttachTaskFlowNames 导出给 HTTP 层：单任务响应（题库详情等）回填流程显示名。
+func (s *Service) AttachTaskFlowNames(ctx context.Context, task *domain.ReviewTask) {
+	if task == nil {
+		return
+	}
+	s.attachFlowNames(ctx, task)
+}
+
 // SearchResultsForViewer 优先使用生产存储的数据库端审核记录查询能力，只加载当前页。
 // 轻量测试存储未实现该能力时回退到内存筛选，保持接口兼容。
 func (s *Service) SearchResultsForViewer(ctx context.Context, query storage.ReviewResultQuery, userID string, fullAccess bool) ([]ReviewResultItem, int, ReviewStats, error) {
@@ -707,13 +742,18 @@ func (s *Service) SearchResultsForViewer(ctx context.Context, query storage.Revi
 			addReviewStat(&stats, status, count)
 		}
 		items := make([]ReviewResultItem, 0, len(page.Rows))
+		tasks := make([]*domain.ReviewTask, 0, len(page.Rows))
 		for _, row := range page.Rows {
 			task := row.Task
 			if !fullAccess && task != nil && taskInFlight(task.Status) {
 				task = sanitizeTaskForReviewer(task)
 			}
+			if task != nil {
+				tasks = append(tasks, task)
+			}
 			items = append(items, ReviewResultItem{Question: row.Question, Task: task, FinalStatus: row.FinalStatus})
 		}
+		s.attachFlowNames(ctx, tasks...)
 		return items, page.Total, stats, nil
 	}
 
@@ -771,6 +811,13 @@ func (s *Service) SearchResultsForViewer(ctx context.Context, query storage.Revi
 	if end > total {
 		end = total
 	}
+	pageTasks := make([]*domain.ReviewTask, 0, end-start)
+	for _, item := range filtered[start:end] {
+		if item.Task != nil {
+			pageTasks = append(pageTasks, item.Task)
+		}
+	}
+	s.attachFlowNames(ctx, pageTasks...)
 	return filtered[start:end], total, stats, nil
 }
 
@@ -1778,6 +1825,11 @@ func (s *Service) MyRevisions(ctx context.Context, createdBy string) ([]Revision
 		return nil, err
 	}
 	items := make([]RevisionItem, 0, 8)
+	taskPtrs := make([]*domain.ReviewTask, 0, len(tasks))
+	for i := range tasks {
+		taskPtrs = append(taskPtrs, &tasks[i])
+	}
+	s.attachFlowNames(ctx, taskPtrs...)
 	for _, task := range tasks {
 		if task.Status != domain.StatusRevisionRequired {
 			continue

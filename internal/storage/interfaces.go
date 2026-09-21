@@ -357,6 +357,15 @@ type KnowledgeStore interface {
 	KPCount(ctx context.Context) (int, error)
 }
 
+// AuditLogFilter 操作日志组合筛选条件；空字符串字段表示不按该维度筛选。
+type AuditLogFilter struct {
+	Action     string
+	Actor      string
+	QuestionID string
+	Limit      int
+	Offset     int
+}
+
 // AuditStore 操作日志存储接口。
 type AuditStore interface {
 	SaveLog(ctx context.Context, log domain.AuditLog) error
@@ -367,6 +376,10 @@ type AuditStore interface {
 	CountLogs(ctx context.Context) (int, error)
 	ListLogsByQuestion(ctx context.Context, questionID string) ([]domain.AuditLog, error)
 	ListLogsByActor(ctx context.Context, actor string) ([]domain.AuditLog, error)
+	// SearchLogs 按组合条件分页查询日志（时间倒序），返回当前页与命中总数。
+	SearchLogs(ctx context.Context, filter AuditLogFilter) ([]domain.AuditLog, int, error)
+	// ListLogActions 返回操作行为出现次数（按次数降序）；actor 非空时只统计该用户。
+	ListLogActions(ctx context.Context, actor string) ([]domain.AuditActionStat, error)
 }
 
 // AIProviderConfigStore 持久化系统级 AI 服务配置。

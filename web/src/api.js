@@ -157,7 +157,15 @@ export const api = {
   stats: (scope = "") => request(`/stats${scope ? `?scope=${encodeURIComponent(scope)}` : ""}`),
 
   // 操作日志
-  auditLogs: (page = 1, limit = 200) => request(`/audit-logs?page=${page}&limit=${limit}`),
+  // filter: { action, actor, question } 均可选，任意组合
+  auditLogs: (page = 1, limit = 200, filter = {}) => {
+    const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+    if (filter.action) params.set("action", filter.action);
+    if (filter.actor) params.set("actor", filter.actor);
+    if (filter.question) params.set("question", filter.question);
+    return request(`/audit-logs?${params.toString()}`);
+  },
+  auditLogActions: () => request(`/audit-logs/actions`),
   auditLogsByQuestion: (id) => request(`/audit-logs/question/${id}`),
   auditLogsByActor: (actor) => request(`/audit-logs/actor/${actor}`),
 

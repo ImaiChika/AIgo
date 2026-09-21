@@ -19,15 +19,25 @@ const attitudeMap = {
   revision_required: { text: "需修改", cls: "at-rev" },
 };
 
-const attitude = attitudeMap[props.record.review_status] || { text: props.record.review_status, cls: "" };
-
 const storedName = (props.record.expert_name || "").trim();
 const displayName = storedName && !storedName.startsWith("user-")
   ? storedName
   : props.fallbackName || storedName || props.record.expert_id;
 
 const attemptTag = props.record.attempt > 1 ? `第${props.record.attempt}批` : "";
-const isFinal = (props.record.id || "").startsWith("rec-final-");
+const recordId = props.record.id || "";
+const isFinal = recordId.startsWith("rec-final-");
+const isUnpublish = recordId.startsWith("rec-unpublish-");
+// 决断卡：按 ID 前缀给出决断语义标签，而不是沿用轮内投票的“通过/驳回/需修改”。
+const attitude = isUnpublish
+  ? { text: "决断：撤回修改", cls: "at-rev" }
+  : isFinal
+    ? {
+        approved: { text: "决断：通过", cls: "at-ok" },
+        rejected: { text: "决断：驳回", cls: "at-no" },
+        revision_required: { text: "决断：退回修改", cls: "at-rev" },
+      }[props.record.review_status] || { text: "决断", cls: "" }
+    : attitudeMap[props.record.review_status] || { text: props.record.review_status, cls: "" };
 
 function sectionValue(key) {
   return (props.record.comment && props.record.comment[key] || "").trim();
@@ -46,7 +56,7 @@ function formatTime(ts) {
   <div class="rc-card" :class="[compact ? 'compact' : '', record.review_status]">
     <div class="rc-head">
       <span class="rc-name">{{ displayName }}</span>
-      <span v-if="isFinal" class="rc-final">最终决断</span>
+      <span v-if="isFinal || isUnpublish" class="rc-final">{{ isUnpublish ? "管理员决断" : "最终决断" }}</span>
       <span class="rc-attitude" :class="attitude.cls">{{ attitude.text }}</span>
       <span v-if="attemptTag" class="rc-attempt">{{ attemptTag }}</span>
       <span class="rc-time">{{ formatTime(record.created_at) }}</span>

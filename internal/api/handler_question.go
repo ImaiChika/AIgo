@@ -143,6 +143,10 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		s.respondGenerationRun(w, r.Context(), existing)
 		return
 	}
+	if s.auditSvc != nil {
+		_ = s.auditSvc.Log(r.Context(), "", "generate", actor,
+			fmt.Sprintf("提交单题生成：知识点「%s」（大纲 %s），数量 %d，运行 %s", kp.Topic, kp.OutlineCode, req.Count, req.RunID))
+	}
 	// 提交成功：立即返回 pending 运行（无题目），前端进入轮询恢复流程
 	run := &domain.GenerationRun{
 		ID: req.RunID, OwnerID: userID, Status: domain.GenerationRunPending,
@@ -486,7 +490,11 @@ func (s *Server) handleRestoreQuestionVersion(w http.ResponseWriter, r *http.Req
 		writeError(w, 500, "恢复版本失败: "+err.Error())
 		return
 	}
-	s.auditSvc.LogUpdate(r.Context(), id, actor, reason)
+	restoreDetail := fmt.Sprintf("恢复历史版本 v%d → 生成新版本 v%d", req.Version, restored.Version)
+	if custom := strings.TrimSpace(req.Reason); custom != "" {
+		restoreDetail += "；原因：" + custom
+	}
+	s.auditSvc.Log(r.Context(), id, "restore", actor, restoreDetail)
 	writeJSON(w, 200, restored)
 }
 

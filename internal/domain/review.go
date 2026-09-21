@@ -92,6 +92,7 @@ type ReviewTask struct {
 	ID                 string         `json:"id"`                       // 任务唯一标识
 	QuestionID         string         `json:"question_id"`              // 关联的题目 ID
 	FlowID             string         `json:"flow_id"`                  // 使用的审核流程 ID
+	FlowName           string         `json:"flow_name,omitempty"`      // 流程显示名（读取时由服务层回填，不落库）
 	SubmissionBankID   string         `json:"submission_bank_id"`       // 历史兼容快照；新任务为空
 	CurrentRound       int            `json:"current_round"`            // 当前轮次
 	Status             QuestionStatus `json:"status"`                   // 任务状态
@@ -211,6 +212,12 @@ type AuditLog struct {
 	Actor      string    `json:"actor"`       // 操作人（用户名或 "ai"）
 	Detail     string    `json:"detail"`      // 操作详情（JSON 或文字描述）
 	CreatedAt  time.Time `json:"created_at"`  // 操作时间
+}
+
+// AuditActionStat 操作行为的出现次数统计，供日志页的行为筛选下拉使用。
+type AuditActionStat struct {
+	Action string `json:"action"`
+	Count  int    `json:"count"`
 }
 
 // ===== AI 检查相关类型 =====

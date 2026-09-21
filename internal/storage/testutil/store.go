@@ -1404,3 +1404,62 @@ func (s *MemoryAuditStore) ListLogsByActor(_ context.Context, actor string) ([]d
 	}
 	return result, nil
 }
+
+func (s *MemoryAuditStore) SearchLogs(_ context.Context, filter storage.AuditLogFilter) ([]domain.AuditLog, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	matched := make([]domain.AuditLog, 0)
+	for i := len(s.logs) - 1; i >= 0; i-- {
+		l := s.logs[i]
+		if filter.Action != "" && l.Action != filter.Action {
+			continue
+		}
+		if filter.Actor != "" && l.Actor != filter.Actor {
+			continue
+		}
+		if filter.QuestionID != "" && l.QuestionID != filter.QuestionID {
+			continue
+		}
+		matched = append(matched, l)
+	}
+	total := len(matched)
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= total {
+		return []domain.AuditLog{}, total, nil
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return matched[offset:end], total, nil
+}
+
+func (s *MemoryAuditStore) ListLogActions(_ context.Context, actor string) ([]domain.AuditActionStat, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	counts := map[string]int{}
+	for _, l := range s.logs {
+		if actor != "" && l.Actor != actor {
+			continue
+		}
+		counts[l.Action]++
+	}
+	result := make([]domain.AuditActionStat, 0, len(counts))
+	for action, count := range counts {
+		result = append(result, domain.AuditActionStat{Action: action, Count: count})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Count != result[j].Count {
+			return result[i].Count > result[j].Count
+		}
+		return result[i].Action < result[j].Action
+	})
+	return result, nil
+}

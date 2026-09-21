@@ -161,6 +161,10 @@ func (s *Server) handleSwitchRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
+	if s.auditSvc != nil {
+		_ = s.auditSvc.Log(r.Context(), "", "auth_switch_role", auth.GetUsername(r.Context()),
+			fmt.Sprintf("切换工作身份 → %s", role))
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "user": user})
 }
 
@@ -183,6 +187,10 @@ func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 	if err := s.authSvc.UpdateDisplayName(userID, req.DisplayName); err != nil {
 		writeError(w, 500, "更新失败")
 		return
+	}
+	if s.auditSvc != nil {
+		_ = s.auditSvc.Log(r.Context(), "", "auth_update_profile", auth.GetUsername(r.Context()),
+			fmt.Sprintf("更新个人资料：昵称「%s」", req.DisplayName))
 	}
 	// 返回更新后的完整用户信息
 	user, _ := s.authSvc.GetUserByIDForRole(r.Context(), userID, auth.GetRole(r.Context()))
@@ -208,6 +216,9 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	if err := s.authSvc.ChangePassword(userID, req.OldPassword, req.NewPassword); err != nil {
 		writeError(w, 400, err.Error())
 		return
+	}
+	if s.auditSvc != nil {
+		_ = s.auditSvc.Log(r.Context(), "", "auth_change_password", auth.GetUsername(r.Context()), "修改了自己的登录密码")
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
@@ -822,6 +833,10 @@ func (s *Server) handleCollectBank(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
+	}
+	if s.auditSvc != nil {
+		_ = s.auditSvc.Log(r.Context(), "", "bank_collect", auth.GetUsername(r.Context()),
+			fmt.Sprintf("题库「%s」重新归纳，归入 %d 道题", bank.Name, count))
 	}
 	writeJSON(w, 200, map[string]any{"status": "ok", "collected": count})
 }

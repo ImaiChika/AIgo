@@ -419,3 +419,78 @@ func TestReviewResultsSeparateArchivedFromPending(t *testing.T) {
 		t.Fatalf("mine stats wrong: %+v（参审题归档后应计入 archived）", minePayload.Stats)
 	}
 }
+
+// 任务响应携带流程显示名（flow_name），题库详情与审核记录页不再显示 flow-xxx 原始 ID。
+func TestReviewTaskCarriesFlowName(t *testing.T) {
+	server, store, cleanup := authHandlerTestServer(t)
+	defer cleanup()
+	seedStatsFixtures(t, store)
+	handler := server.Handler()
+	adminToken := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.1")
+	adminUser, err := server.authSvc.GetUserByUsername("admin")
+	if err != nil || adminUser == nil {
+		t.Fatalf("load admin: %v", err)
+	}
+	ctx := t.Context()
+	if err := store.SaveFlowConfig(ctx, domain.ReviewFlowConfig{
+		ID: "named-flow-1", Name: "标准两轮专家审核", CreatedAt: time.Now(),
+		Rounds: []domain.RoundConfig{{RoundNumber: 1}, {RoundNumber: 2}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 题目归属本人，处于审核中；任务外键要求题目先存在。
+	if err := store.SaveQuestion(ctx, domain.A2Question{
+		ID: "fn-q1", Status: domain.StatusReviewing, Difficulty: "0.65", Profession: "内科",
+		ClinicalStem: "流程名-过程题", Answer: "A", OwnerID: adminUser.ID, CreatedBy: "admin", Version: 1,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveTask(ctx, domain.ReviewTask{
+		ID: "fn-rt-1", QuestionID: "fn-q1", FlowID: "named-flow-1", CurrentRound: 1,
+		Status: domain.StatusReviewing, AssignedTo: []string{adminUser.ID}, QuestionVersion: 1,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	taskResp := serveAuthJSON(t, handler, http.MethodGet, "/api/review/task-by-question/fn-q1", adminToken, "198.51.100.1", nil)
+	if taskResp.Code != http.StatusOK {
+		t.Fatalf("task-by-question status=%d body=%s", taskResp.Code, taskResp.Body.String())
+	}
+	if !strings.Contains(taskResp.Body.String(), `"flow_name":"标准两轮专家审核"`) {
+		t.Fatalf("task-by-question missing flow_name: %s", taskResp.Body.String())
+	}
+
+	// 审核记录：列表任务同样携带流程名。
+	results := serveAuthJSON(t, handler, http.MethodGet, "/api/review/results?scope=personal&page_size=50", adminToken, "198.51.100.1", nil)
+	if results.Code != http.StatusOK {
+		t.Fatalf("results status=%d body=%s", results.Code, results.Body.String())
+	}
+	if !strings.Contains(results.Body.String(), `"flow_name":"标准两轮专家审核"`) {
+		t.Fatalf("review results missing task flow_name: %s", results.Body.String())
+	}
+
+	// 待我修改（退回任务）：RevisionItem.task 也应携带流程名。
+	revTask := domain.ReviewTask{
+		ID: "fn-rt-2", QuestionID: "fn-q2", FlowID: "named-flow-1", CurrentRound: 1,
+		Status: domain.StatusRevisionRequired, AssignedTo: []string{adminUser.ID}, QuestionVersion: 1,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	if err := store.SaveQuestion(ctx, domain.A2Question{
+		ID: "fn-q2", Status: domain.StatusRevisionRequired, Difficulty: "0.70", Profession: "内科",
+		ClinicalStem: "流程名-退修题", Answer: "B", OwnerID: adminUser.ID, CreatedBy: "admin", Version: 1,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveTask(ctx, revTask); err != nil {
+		t.Fatal(err)
+	}
+	revResp := serveAuthJSON(t, handler, http.MethodGet, "/api/review/my-revisions", adminToken, "198.51.100.1", nil)
+	if revResp.Code != http.StatusOK {
+		t.Fatalf("my-revisions status=%d body=%s", revResp.Code, revResp.Body.String())
+	}
+	if !strings.Contains(revResp.Body.String(), `"flow_name":"标准两轮专家审核"`) {
+		t.Fatalf("my-revisions missing task flow_name: %s", revResp.Body.String())
+	}
+}

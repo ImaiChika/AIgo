@@ -185,6 +185,10 @@ func (s *Server) handleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "提交失败: "+err.Error())
 		return
 	}
+	if s.auditSvc != nil {
+		_ = s.auditSvc.Log(r.Context(), "", "generate_batch", auth.GetUsername(r.Context()),
+			fmt.Sprintf("提交批量生成任务「%s」：%d 个知识点 × 每点 %d 题，共 %d 题（任务 %s）", jobName, len(points), req.Count, count, jobID))
+	}
 
 	writeJSON(w, 200, map[string]any{
 		"job_id":  jobID,
@@ -309,6 +313,10 @@ func (s *Server) handleBatchDownload(w http.ResponseWriter, r *http.Request) {
 	if s.aiCheckSvc != nil && len(result.QuestionIDs) > 0 {
 		s.aiCheckSvc.CheckAsync(result.QuestionIDs...)
 	}
+	if s.auditSvc != nil {
+		_ = s.auditSvc.Log(r.Context(), "", "batch_import", auth.GetUsername(r.Context()),
+			fmt.Sprintf("导入批量任务结果「%s」：%d 道题（任务 %s，归属 %s）", job.JobName, len(result.QuestionIDs), jobID, owner.Username))
+	}
 
 	writeJSON(w, 200, result)
 }
@@ -346,6 +354,10 @@ func (s *Server) handleBatchRetryFailed(w http.ResponseWriter, r *http.Request) 
 		}
 		writeError(w, status, "重跑失败: "+err.Error())
 		return
+	}
+	if s.auditSvc != nil {
+		_ = s.auditSvc.Log(r.Context(), "", "batch_retry", auth.GetUsername(r.Context()),
+			fmt.Sprintf("重跑批量任务「%s」的失败生成单元（任务 %s，失败 %d 题）", job.JobName, jobID, job.Failed))
 	}
 	writeJSON(w, 200, s.withBatchOwnerName(retried))
 }

@@ -711,7 +711,7 @@ onMounted(async () => {
         <div v-if="reviewInfoLoading" class="detail-field review-loading">审核意见加载中</div>
         <!-- 终态任务向有权查看题目的用户开放全部审核记录；进行中仍由服务端保持评语隔离。 -->
         <div v-else-if="reviewInfo" class="detail-field review-info-field">
-          <label>审核意见（第 {{ reviewInfo.task.attempt || 1 }} 次送审 · {{ reviewConclusionText(reviewInfo.task.status) }}）</label>
+          <label>审核意见（第 {{ reviewInfo.task.attempt || 1 }} 次送审 · {{ reviewConclusionText(reviewInfo.task.status) }}<template v-if="reviewInfo.task.flow_name || reviewInfo.task.flow_id"> · 流程：{{ reviewInfo.task.flow_name || reviewInfo.task.flow_id }}</template>）</label>
           <ReviewHistoryPanel :records="reviewInfo.records" compact />
         </div>
 

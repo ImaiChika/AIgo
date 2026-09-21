@@ -1647,6 +1647,75 @@ func (s *Store) ListLogsByActor(ctx context.Context, actor string) ([]domain.Aud
 	return scanAuditLogs(rows)
 }
 
+func (s *Store) SearchLogs(ctx context.Context, filter storage.AuditLogFilter) ([]domain.AuditLog, int, error) {
+	where := []string{}
+	args := []interface{}{}
+	if filter.Action != "" {
+		args = append(args, filter.Action)
+		where = append(where, fmt.Sprintf("action=$%d", len(args)))
+	}
+	if filter.Actor != "" {
+		args = append(args, filter.Actor)
+		where = append(where, fmt.Sprintf("actor=$%d", len(args)))
+	}
+	if filter.QuestionID != "" {
+		args = append(args, filter.QuestionID)
+		where = append(where, fmt.Sprintf("question_id=$%d", len(args)))
+	}
+	clause := ""
+	if len(where) > 0 {
+		clause = " WHERE " + strings.Join(where, " AND ")
+	}
+	var total int
+	if err := s.queryRowContext(ctx, "SELECT COUNT(*) FROM audit_logs"+clause, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	args = append(args, limit, offset)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, question_id, action, actor, detail, created_at FROM audit_logs`+clause+fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, len(args)-1, len(args)), args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	logs, err := scanAuditLogs(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return logs, total, nil
+}
+
+func (s *Store) ListLogActions(ctx context.Context, actor string) ([]domain.AuditActionStat, error) {
+	query := `SELECT action, COUNT(*) FROM audit_logs`
+	args := []interface{}{}
+	if actor != "" {
+		query += ` WHERE actor=$1`
+		args = append(args, actor)
+	}
+	query += ` GROUP BY action ORDER BY COUNT(*) DESC, action ASC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []domain.AuditActionStat{}
+	for rows.Next() {
+		var stat domain.AuditActionStat
+		if err := rows.Scan(&stat.Action, &stat.Count); err != nil {
+			return nil, err
+		}
+		result = append(result, stat)
+	}
+	return result, rows.Err()
+}
+
 func scanAuditLogs(rows *sql.Rows) ([]domain.AuditLog, error) {
 	var result []domain.AuditLog
 	for rows.Next() {

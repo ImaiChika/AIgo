@@ -115,6 +115,16 @@ func (s *Service) ListLogsPaged(ctx context.Context, limit, offset int) ([]domai
 	return logs, total, nil
 }
 
+// Search 按组合条件（行为/操作人/题目）分页查询日志，返回当前页与命中总数。
+func (s *Service) Search(ctx context.Context, filter storage.AuditLogFilter) ([]domain.AuditLog, int, error) {
+	return s.store.SearchLogs(ctx, filter)
+}
+
+// ListActions 返回操作行为统计（行为筛选下拉用）；actor 非空时仅统计该用户。
+func (s *Service) ListActions(ctx context.Context, actor string) ([]domain.AuditActionStat, error) {
+	return s.store.ListLogActions(ctx, actor)
+}
+
 // ListByQuestion 列出某题目的操作日志。
 func (s *Service) ListByQuestion(ctx context.Context, questionID string) ([]domain.AuditLog, error) {
 	return s.store.ListLogsByQuestion(ctx, questionID)

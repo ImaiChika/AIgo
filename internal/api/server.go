@@ -146,6 +146,7 @@ func (s *Server) Handler() http.Handler {
 
 	// === 操作日志 ===
 	mux.HandleFunc("GET /api/audit-logs", s.requireAuth(domain.PermAuditView, s.handleListAuditLogs))
+	mux.HandleFunc("GET /api/audit-logs/actions", s.requireAuth(domain.PermAuditView, s.handleListAuditActions))
 	mux.HandleFunc("GET /api/audit-logs/question/{id}", s.requireAuth(domain.PermAuditView, s.handleAuditLogsByQuestion))
 	mux.HandleFunc("GET /api/audit-logs/actor/{actor}", s.requireAuth(domain.PermAuditView, s.handleAuditLogsByActor))
 

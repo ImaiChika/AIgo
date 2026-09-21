@@ -682,6 +682,7 @@ func (s *Server) handleGetReviewTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.enrichReviewTaskDisplayName(r.Context(), task)
+	s.reviewSvc.AttachTaskFlowNames(r.Context(), task)
 	detail := reviewTaskDetail{ReviewTask: *task}
 	if s.aiCheckSvc != nil {
 		if result, err := s.aiCheckSvc.GetResult(r.Context(), task.QuestionID); err == nil && result != nil {
@@ -721,9 +722,10 @@ func (s *Server) handleGetTaskByQuestion(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.enrichReviewTaskDisplayName(r.Context(), task)
+	s.reviewSvc.AttachTaskFlowNames(r.Context(), task)
 	detail := reviewTaskDetail{ReviewTask: *task}
 	if s.aiCheckSvc != nil {
-		if result, err := s.aiCheckSvc.GetResult(r.Context(), questionID); err == nil && result != nil {
+		if result, err := s.aiCheckSvc.GetResult(r.Context(), task.QuestionID); err == nil && result != nil {
 			detail.AIReview = result
 		}
 	}

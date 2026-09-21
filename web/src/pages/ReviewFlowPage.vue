@@ -189,11 +189,18 @@ function expertName(id) {
 }
 
 function matchedReviewers(flow) {
-  const firstRound = (flow.rounds || [])[0];
-  if (firstRound && (firstRound.expert_ids || []).length) {
-    return firstRound.expert_ids.map(expertName).join("、");
+  // 汇总全部轮次的审核人（按出现顺序去重）；此前只取第 1 轮，多轮不同
+  // 审核人的流程会被误显示为单人。
+  const seen = new Set();
+  const names = [];
+  for (const round of flow.rounds || []) {
+    for (const id of round.expert_ids || []) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      names.push(expertName(id));
+    }
   }
-	  return "未配置（不可用）";
+  return names.length ? names.join("、") : "未配置（不可用）";
 }
 
 function userName(id) {

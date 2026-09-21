@@ -208,7 +208,7 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", warnBeforeUnloa
 	        >
 	          <input class="revision-checkbox" type="checkbox" :checked="selectedIds.has(item.question.id)" :disabled="!item.modified || submitting" title="保存修改后才可选择重送审" @click.stop @change="toggleSelected(item)" />
           <div class="rc-head">
-            <span class="rc-flow">{{ item.task.flow_id }}</span>
+            <span class="rc-flow">{{ item.task.flow_name || item.task.flow_id }}</span>
             <span class="rc-round">第 {{ item.task.current_round }} 轮</span>
             <span class="rc-version">送审 v{{ item.task.question_version }} · 当前 v{{ item.question.version }}</span>
             <span class="rc-state" :class="item.modified ? 'done' : 'pending'">
