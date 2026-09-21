@@ -26,10 +26,30 @@ const form = ref({
   ],
 });
 
+const toastError = ref(false);
+
+// 占用冲突等长提示按"；"分条换行，时长随内容长度自适应，可点击立即关闭。
+function formatToastMessage(msg) {
+  const idx = msg.indexOf("：");
+  if (idx === -1 || !msg.includes("；")) return msg;
+  const head = msg.slice(0, idx + 1);
+  const items = msg.slice(idx + 1).split("；").map(s => s.trim()).filter(Boolean);
+  if (items.length < 2) return msg;
+  return head + "\n" + items.map(s => "• " + s).join("\n");
+}
+
 function showToast(msg) {
-  toast.value = msg;
+  const text = formatToastMessage(String(msg || ""));
+  toastError.value = /失败|无法|不能|已被|请先|无权/.test(text);
+  toast.value = toastError.value ? text + "\n（点击关闭）" : text;
   window.clearTimeout(showToast.timer);
-  showToast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
+  const duration = Math.min(4000 + toast.value.length * 70, 16000);
+  showToast.timer = window.setTimeout(() => { toast.value = ""; }, duration);
+}
+
+function dismissToast() {
+  window.clearTimeout(showToast.timer);
+  toast.value = "";
 }
 
 async function loadFlows() {
@@ -371,7 +391,7 @@ onMounted(() => {
     </section>
   </div>
 
-  <div class="toast" :class="{ show: toast }" role="status" aria-live="polite">{{ toast }}</div>
+  <div class="toast" :class="{ show: toast, error: toastError }" role="status" aria-live="polite" @click="dismissToast">{{ toast }}</div>
 </template>
 
 <style scoped>
