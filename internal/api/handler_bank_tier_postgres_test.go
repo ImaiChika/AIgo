@@ -19,7 +19,7 @@ import (
 	"aigo/internal/storage/postgres"
 )
 
-func seedBankTierFixtures(t *testing.T, store *postgres.Store) {
+func seedBankTierFixtures(t *testing.T, store *postgres.Store, ownerID string) {
 	t.Helper()
 	ctx := context.Background()
 	for _, bank := range []domain.QuestionBank{
@@ -32,7 +32,8 @@ func seedBankTierFixtures(t *testing.T, store *postgres.Store) {
 	}
 	seed := []domain.A2Question{
 		{ID: "tier-work", Status: domain.StatusAIReviewed, Difficulty: "0.65", Profession: "内科", ClinicalStem: "过程题库：患者胸痛待查", Answer: "A", BankIDs: []string{"bank-a"}},
-		{ID: "tier-formal", Status: domain.StatusPublished, Difficulty: "0.75", Profession: "外科", ClinicalStem: "正式题库：胃溃疡穿孔的处理", Answer: "B", BankIDs: []string{"bank-a"}},
+		// 撤回守卫要求 published 题有真实可编辑的属主，撤回后回流其「待我修改」。
+		{ID: "tier-formal", OwnerID: ownerID, CreatedBy: "admin", Status: domain.StatusPublished, Difficulty: "0.75", Profession: "外科", ClinicalStem: "正式题库：胃溃疡穿孔的处理", Answer: "B", BankIDs: []string{"bank-a"}},
 		{ID: "tier-formal-2", Status: domain.StatusPublished, Difficulty: "0.75", Profession: "外科", ClinicalStem: "正式题库：阑尾炎术后补液", Answer: "C", BankIDs: []string{"bank-b"}},
 		{ID: "tier-rejected", Status: domain.StatusRejected, Difficulty: "0.85", Profession: "儿科", ClinicalStem: "淘汰题库：小儿补液方案错误", Answer: "D", BankIDs: []string{"bank-b"}},
 	}
@@ -111,11 +112,15 @@ func questionIDs(payload questionPagePayload) []string {
 func TestBankTierPermissionsAndExport(t *testing.T) {
 	server, store, cleanup := authHandlerTestServer(t)
 	defer cleanup()
-	seedBankTierFixtures(t, store)
 	server.bankSvc = bank.NewService(store, store)
 	server.reviewSvc = review.NewService(store, store, store, server.authSvc)
 	handler := server.Handler()
 	adminToken := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.1")
+	adminOwner, err := server.authSvc.GetUserByUsername("admin")
+	if err != nil || adminOwner == nil {
+		t.Fatalf("load admin: %v", err)
+	}
+	seedBankTierFixtures(t, store, adminOwner.ID)
 	adminUser, err := server.authSvc.GetUserByUsername("admin")
 	if err != nil || adminUser == nil {
 		t.Fatal("load admin")

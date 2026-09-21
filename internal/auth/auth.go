@@ -768,6 +768,59 @@ func (s *Service) DeleteUserAs(ctx context.Context, actorID, userID string) (*Us
 	return target, nil
 }
 
+// InflightAutonomousWork 返回账号名下仍在执行的自主任务占用（含具体名称/ID）。
+// 停用账号前必须先清空：批量任务结果导入和分享申请处理都依赖账号启用，
+// 停用后这些事项将无法完成，只能重新启用账号恢复。
+func (s *Service) InflightAutonomousWork(ctx context.Context, userID string) ([]string, error) {
+	var refs []string
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM generation_runs WHERE owner_id=$1 AND status IN ('pending','running')`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID string
+		if err := rows.Scan(&runID); err != nil {
+			return nil, err
+		}
+		refs = append(refs, "命题任务 "+runID+" 正在执行（出题/AI 检查未完成）")
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	batchRows, err := s.db.QueryContext(ctx, `SELECT id, job_name FROM batch_jobs WHERE owner_id=$1 AND (status NOT IN ('completed','complete','failed','cancelled','expired') OR imported_at IS NULL)`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer batchRows.Close()
+	for batchRows.Next() {
+		var jobID, jobName string
+		if err := batchRows.Scan(&jobID, &jobName); err != nil {
+			return nil, err
+		}
+		refs = append(refs, fmt.Sprintf("批量任务「%s」(%s) 未完成或结果未导入，停用后结果将无法导入", jobName, jobID))
+	}
+	if err := batchRows.Err(); err != nil {
+		return nil, err
+	}
+	shareRows, err := s.db.QueryContext(ctx, `SELECT question_id FROM question_share_requests WHERE owner_id=$1 AND status='pending'`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer shareRows.Close()
+	for shareRows.Next() {
+		var questionID string
+		if err := shareRows.Scan(&questionID); err != nil {
+			return nil, err
+		}
+		refs = append(refs, "题目 "+questionID+" 的分享申请待审批")
+	}
+	if err := shareRows.Err(); err != nil {
+		return nil, err
+	}
+	return refs, nil
+}
+
 // validateUserMutation 校验“谁可以给谁授予什么”。权限管理不能只依赖前端
 // 隐藏选项，否则普通管理员可构造请求把最高权限授予新账号。
 

@@ -311,7 +311,7 @@ func TestReferencedReviewerCannotBeDisabledOrDeleted(t *testing.T) {
 		"display_name": reviewer.DisplayName, "role": reviewer.Role, "roles": reviewer.Roles,
 		"permissions": reviewer.DirectPermissions, "bank_ids": reviewer.BankIDs, "enabled": false,
 	})
-	if disable.Code != http.StatusConflict || !strings.Contains(disable.Body.String(), "仍被审核流程") {
+	if disable.Code != http.StatusConflict || !strings.Contains(disable.Body.String(), "引用审题人流程") {
 		t.Fatalf("referenced reviewer disable should be blocked: %d %s", disable.Code, disable.Body)
 	}
 	deleted := serveAuthJSON(t, handler, http.MethodDelete, "/api/users/"+reviewer.ID, adminToken, "198.51.100.80", nil)

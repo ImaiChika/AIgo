@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -514,6 +515,21 @@ func (s *Server) handleUnpublishQuestion(w http.ResponseWriter, r *http.Request)
 	}
 	if share := s.questionShare(r, id); share != nil {
 		writeError(w, http.StatusConflict, "题目已经提交全局题库分享，不能撤回；请先完成或结束分享申请")
+		return
+	}
+	// 撤回会把题目送回出题人「待我修改」窗口，而退修题仅出题人本人可改；
+	// 属主账号已停用或无编辑权限时撤回会让题目永久无人可改，必须先恢复账号。
+	if owner, ownerErr := s.authSvc.GetUserByID(q.OwnerID); ownerErr != nil || owner == nil {
+		writeError(w, http.StatusConflict, "题目归属账号不存在，撤回后题目将无人可修改；请改用删除归档")
+		return
+	} else if !owner.Enabled {
+		writeError(w, http.StatusConflict, fmt.Sprintf("题目归属账号 %s 已停用，撤回后题目将无人可修改；请先恢复该账号或改用删除归档", owner.Username))
+		return
+	} else if ownerPerms, permErr := s.authSvc.PermissionsForAssignments(r.Context(), owner.Roles, owner.Permissions); permErr != nil {
+		writeError(w, 500, "校验归属账号权限失败: "+permErr.Error())
+		return
+	} else if !slices.Contains(ownerPerms, domain.PermQuestionEdit) {
+		writeError(w, http.StatusConflict, fmt.Sprintf("题目归属账号 %s 已无编辑权限，撤回后题目将无人可修改；请先恢复其权限或改用删除归档", owner.Username))
 		return
 	}
 	var req struct {

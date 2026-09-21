@@ -354,6 +354,9 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "请求格式错误")
 		return
 	}
+	// cleanupExpertAfterUpdate 为 true 时（本次更新确实移除了审题权限或停用了账号），
+	// 在更新成功后同步清理专家库镜像条目；重新授权/启用时 syncUserToExperts 会自动补回。
+	cleanupExpertAfterUpdate := false
 	if s.reviewSvc != nil {
 		current, currentErr := s.authSvc.GetUserByID(userID)
 		roles := append([]string(nil), req.Roles...)
@@ -365,33 +368,48 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		if req.Enabled != nil {
 			futureEnabled = *req.Enabled
 		}
+		// 多身份模板口径：有效权限 = 全部已挂模板权限 ∪ 直接授权权限。
+		// 只有所有身份都不再提供某权限时才算"失去"，移除其中一个模板
+		// 但其他模板仍覆盖该权限时不触发守卫（下方 losesXxx 均按并集判断）。
 		losesReviewRole := current != nil && slices.Contains(current.Permissions, domain.PermReviewDo) && !slices.Contains(futurePermissions, domain.PermReviewDo)
 		losesFinalRole := current != nil && slices.Contains(current.Permissions, domain.PermReviewFinal) && !slices.Contains(futurePermissions, domain.PermReviewFinal)
-		// 编辑权限对称守卫：教师名下有退回修改中的题目时，收走 question:edit
-		// 会让题目滞留退修态无人可改（与审题侧的收权守卫同口径）。
+		// 编辑权限对称守卫：教师名下审核流程占用中的题目（退修/审核/待决断）
+		// 后续都可能要求本人修改，收走 question:edit 或停用会让题目无人可改。
 		losesEditRole := current != nil && slices.Contains(current.Permissions, domain.PermQuestionEdit) && !slices.Contains(futurePermissions, domain.PermQuestionEdit)
 		if currentErr == nil && permissionErr == nil && current != nil && (!futureEnabled || losesReviewRole || losesFinalRole || losesEditRole) {
+			var blockers []string
 			references, referenceErr := s.reviewSvc.UserAssignmentReferences(r.Context(), userID)
 			if referenceErr != nil {
 				writeError(w, http.StatusInternalServerError, "检查审核任务引用失败")
 				return
 			}
-			if len(references) > 0 {
-				writeError(w, http.StatusConflict, "该用户仍被审核流程或进行中任务引用，请先调整："+strings.Join(references, "；"))
+			blockers = append(blockers, references...)
+			if losesEditRole || !futureEnabled {
+				// 属主侧互斥占用：退回修改中 / 审核中 / 待最终决断的题目。
+				pendings, pendErr := s.reviewSvc.OwnerInFlightQuestions(r.Context(), userID)
+				if pendErr != nil {
+					writeError(w, http.StatusInternalServerError, "检查审核流程占用题目失败")
+					return
+				}
+				blockers = append(blockers, pendings...)
+			}
+			if !futureEnabled {
+				// 停用账号专属占用：自主任务（命题/批量/分享）在停用后无法导入或处理。
+				autonomous, autoErr := s.authSvc.InflightAutonomousWork(r.Context(), userID)
+				if autoErr != nil {
+					writeError(w, http.StatusInternalServerError, "检查进行中任务失败")
+					return
+				}
+				blockers = append(blockers, autonomous...)
+			}
+			if len(blockers) > 0 {
+				writeError(w, http.StatusConflict, "该账号仍有进行中的事务占用，停用或收回权限后将无法处理，请先完成或移交："+strings.Join(blockers, "；"))
 				return
 			}
-			if losesEditRole || !futureEnabled {
-				pendings, pendErr := s.reviewSvc.RevisionPendingQuestions(r.Context(), userID)
-				if pendErr != nil {
-					writeError(w, http.StatusInternalServerError, "检查退回修改题目失败")
-					return
-				}
-				if len(pendings) > 0 {
-					writeError(w, http.StatusConflict, fmt.Sprintf("该用户仍有 %d 道退回修改中的题目，收回编辑权限或停用后题目将无人可改；请先让本人完成修改重送，或由管理员处理后再操作：%s",
-						len(pendings), strings.Join(pendings, "；")))
-					return
-				}
-			}
+		}
+		if current != nil && permissionErr == nil {
+			cleanupExpertAfterUpdate = (slices.Contains(current.Permissions, domain.PermReviewDo) && !slices.Contains(futurePermissions, domain.PermReviewDo)) ||
+				(current.Enabled && !futureEnabled)
 		}
 	}
 	user, err := s.authSvc.UpdateUserAsWithRoles(r.Context(), auth.GetUserID(r.Context()), userID, req.DisplayName, req.Role, req.Roles, req.Permissions, req.BankIDs, req.Enabled)
@@ -404,6 +422,12 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.auditSvc.LogUser(r.Context(), user.Username, auth.GetUsername(r.Context()), "update_permissions")
+	if cleanupExpertAfterUpdate && s.reviewSvc != nil {
+		// 专家库镜像同步清理：失去审题权限或停用后条目不再有效（重新授权/启用自动补回）。
+		if err := s.reviewSvc.DeleteExpert(r.Context(), user.ID); err == nil {
+			s.auditSvc.LogExpert(r.Context(), user.ID, auth.GetUsername(r.Context()), "delete", "账号失去审题权限或被停用，自动移出专家库")
+		}
+	}
 	s.syncUserToExperts(r, user)
 	writeJSON(w, 200, user)
 }
@@ -421,14 +445,14 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "该用户仍被审核流程或进行中任务引用，请先调整："+strings.Join(references, "；"))
 			return
 		}
-		// 删除账号同样会使其名下退修中的题目永久无人可改，按同一守卫拦截。
-		pendings, pendErr := s.reviewSvc.RevisionPendingQuestions(r.Context(), userID)
+		// 删除账号同样会使其名下审核流程占用中的题目永久无人可改，按同一守卫拦截。
+		pendings, pendErr := s.reviewSvc.OwnerInFlightQuestions(r.Context(), userID)
 		if pendErr != nil {
-			writeError(w, http.StatusInternalServerError, "检查退回修改题目失败")
+			writeError(w, http.StatusInternalServerError, "检查审核流程占用题目失败")
 			return
 		}
 		if len(pendings) > 0 {
-			writeError(w, http.StatusConflict, fmt.Sprintf("该用户仍有 %d 道退回修改中的题目，删除后题目将永久无人可改；请先处理：%s",
+			writeError(w, http.StatusConflict, fmt.Sprintf("该用户名下仍有 %d 道审核流程占用中的题目（退修/审核/待决断），删除后题目将永久无人可改；请先处理：%s",
 				len(pendings), strings.Join(pendings, "；")))
 			return
 		}
@@ -444,13 +468,20 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
+	if s.reviewSvc != nil {
+		// 专家库镜像随账号删除同步清理，避免留下孤儿条目。
+		if err := s.reviewSvc.DeleteExpert(r.Context(), deleted.ID); err == nil {
+			s.auditSvc.LogExpert(r.Context(), deleted.ID, auth.GetUsername(r.Context()), "delete", "账号已删除，自动移出专家库")
+		}
+	}
 	s.auditSvc.LogUser(r.Context(), deleted.Username, auth.GetUsername(r.Context()), "delete")
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": deleted.ID})
 }
 
-// syncUserToExperts 有审题权限的用户自动在专家库建立记录（ID 一致）。
+// syncUserToExperts 有审题权限的启用用户自动在专家库建立记录（ID 一致）。
+// 停用账号不再补建条目：专家库只镜像"当前可参与审题"的账号。
 func (s *Server) syncUserToExperts(r *http.Request, user *auth.User) {
-	if s.reviewSvc == nil {
+	if s.reviewSvc == nil || !user.Enabled {
 		return
 	}
 	hasReview := false

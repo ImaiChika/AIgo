@@ -335,6 +335,38 @@ func (s *Service) RevisionPendingQuestions(ctx context.Context, ownerID string) 
 	return refs, nil
 }
 
+// OwnerInFlightQuestions 返回归属人名下所有"审核流程占用中"的题目及具体状态。
+// 覆盖三类互斥占用（退回修改中 / 审核中 / 待最终决断）：这些状态的后续走向
+// （退修、决断退改）都要求出题人本人可登录并可编辑，否则题目会永久卡死。
+// 停用账号、收回编辑权限前必须先清空这些占用。
+func (s *Service) OwnerInFlightQuestions(ctx context.Context, ownerID string) ([]string, error) {
+	tasks, err := s.reviewStore.ListAllTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var refs []string
+	for _, task := range tasks {
+		switch task.Status {
+		case domain.StatusRevisionRequired, domain.StatusReviewing, domain.StatusConflict:
+		default:
+			continue
+		}
+		q, err := s.questionStore.GetQuestion(ctx, task.QuestionID)
+		if err != nil || q == nil || q.OwnerID != ownerID {
+			continue
+		}
+		switch task.Status {
+		case domain.StatusRevisionRequired:
+			refs = append(refs, fmt.Sprintf("题目 %s 退回修改中（仅出题人本人可改）", task.QuestionID))
+		case domain.StatusReviewing:
+			refs = append(refs, fmt.Sprintf("题目 %s 审核中（第 %d 轮，若被退回修改将需本人处理）", task.QuestionID, task.CurrentRound))
+		case domain.StatusConflict:
+			refs = append(refs, fmt.Sprintf("题目 %s 待最终决断（若决断退回修改将需本人处理）", task.QuestionID))
+		}
+	}
+	return refs, nil
+}
+
 func containsID(ids []string, target string) bool {
 	for _, id := range ids {
 		if id == target {
