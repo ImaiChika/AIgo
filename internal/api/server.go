@@ -7,6 +7,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"aigo/internal/aicheck"
@@ -40,6 +41,8 @@ type Server struct {
 	trustProxyHeaders  bool                          // 是否信任反向代理写入的客户端 IP 头
 	readinessChecker   storage.ReadinessChecker
 	readinessTimeout   time.Duration
+	observabilityOnce  sync.Once
+	httpMetrics        *httpMetrics
 }
 
 // NewServer 创建 API 服务实例，注入所有依赖。
@@ -85,6 +88,7 @@ func NewServer(
 // Handler 返回配置好所有路由的 http.Handler。
 // 权限动作与权限点一一对应（见 internal/domain/permission.go）。
 func (s *Server) Handler() http.Handler {
+	s.ensureObservability()
 	mux := http.NewServeMux()
 
 	// === 进程健康检查（公开、无业务数据和配置泄露） ===
@@ -119,6 +123,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/system/ai-providers/{id}", s.requireSuperAdmin(s.handleUpdateAIProvider))
 	mux.HandleFunc("POST /api/system/ai-providers/{id}/activate", s.requireSuperAdmin(s.handleActivateAIProvider))
 	mux.HandleFunc("DELETE /api/system/ai-providers/{id}", s.requireSuperAdmin(s.handleDeleteAIProvider))
+	// 运行指标只向唯一超级管理员开放，不包含用户内容、DSN 或模型凭证。
+	mux.HandleFunc("GET /api/system/runtime-metrics", s.requireSuperAdmin(s.handleRuntimeMetrics))
 
 	// === 题库管理 ===
 	mux.HandleFunc("GET /api/banks", s.requireAuth("", s.handleListBanks))
@@ -246,7 +252,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/review/flows/{id}", s.requireAuth(domain.PermFlowManage, s.handleDeleteFlow))
 
 	// 包装中间件：请求体大小限制 + CORS 跨域 + JSON Content-Type
-	return withBodyLimit(withCORS(s.corsOrigins, withJSON(mux)))
+	return s.withRequestObservability(withBodyLimit(withCORS(s.corsOrigins, withJSON(mux))))
 }
 
 // maxRequestBody 请求体大小上限（10MB，覆盖 JSON 请求与文件上传）。

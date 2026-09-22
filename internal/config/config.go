@@ -46,6 +46,7 @@ type Config struct {
 	TrustProxyHeaders bool           // 是否信任受控反向代理写入的 X-AIgo-Client-IP
 	HTTPAddr          string         // HTTP 监听地址（生产可配置，默认仅监听本机）
 	WebDistDir        string         // Vite 生产构建目录；空表示仅提供 API
+	LogFormat         string         // 应用日志格式：text（本地默认）或 json（生产推荐）
 }
 
 // IsDefaultJWTSecret 判断 JWT 密钥是否为内置默认值（未显式配置）。
@@ -205,6 +206,7 @@ func Load() (Config, error) {
 		TrustProxyHeaders: boolWithDefault(os.Getenv("AIGO_TRUST_PROXY_HEADERS"), false),
 		HTTPAddr:          firstNonEmpty(strings.TrimSpace(os.Getenv("AIGO_HTTP_ADDR")), "127.0.0.1:8080"),
 		WebDistDir:        strings.TrimSpace(os.Getenv("AIGO_WEB_DIST_DIR")),
+		LogFormat:         logFormatWithDefault(os.Getenv("AIGO_LOG_FORMAT")),
 	}, nil
 }
 
@@ -234,6 +236,13 @@ func boolWithDefault(value string, fallback bool) bool {
 		return fallback
 	}
 	return *parsed
+}
+
+func logFormatWithDefault(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "json") {
+		return "json"
+	}
+	return "text"
 }
 
 // intWithDefault 解析整数配置；非法或超出 [min, max] 时使用默认值。

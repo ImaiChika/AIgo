@@ -52,6 +52,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	configureLogging(cfg.LogFormat)
 	if len(args) > 1 && args[1] == "serve" && !cfg.AICheck.AutoEnabled {
 		return fmt.Errorf("拒绝启动：AI 质量检查必须开启；题目仅允许在首次生成后自动检查一次")
 	}
@@ -669,6 +670,15 @@ func run(ctx context.Context, args []string) error {
 		printUsage()
 		return fmt.Errorf("unknown command %q", args[1])
 	}
+}
+
+func configureLogging(format string) {
+	options := &slog.HandlerOptions{Level: slog.LevelInfo}
+	if strings.EqualFold(strings.TrimSpace(format), "json") {
+		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, options)))
+		return
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, options)))
 }
 
 func commandRequiresInferenceConfig(command string) bool {

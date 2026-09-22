@@ -37,11 +37,27 @@ func clearInferenceEnv(t *testing.T) {
 		"AIGO_ADMIN_PASSWORD",
 		"AIGO_REGISTER_ENABLED",
 		"AIGO_TRUST_PROXY_HEADERS",
+		"AIGO_LOG_FORMAT",
 	} {
 		t.Setenv(key, "")
 	}
 	for _, name := range secretEnvironmentNames {
 		t.Setenv(name+"_FILE", "")
+	}
+}
+
+func TestLogFormatDefaultsToTextAndAcceptsJSON(t *testing.T) {
+	clearInferenceEnv(t)
+	if got := FromEnv().LogFormat; got != "text" {
+		t.Fatalf("default log format=%q", got)
+	}
+	t.Setenv("AIGO_LOG_FORMAT", "JSON")
+	if got := FromEnv().LogFormat; got != "json" {
+		t.Fatalf("configured log format=%q", got)
+	}
+	t.Setenv("AIGO_LOG_FORMAT", "unsupported")
+	if got := FromEnv().LogFormat; got != "text" {
+		t.Fatalf("invalid log format must fail safe to text, got %q", got)
 	}
 }
 

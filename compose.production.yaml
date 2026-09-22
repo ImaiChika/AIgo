@@ -6,6 +6,7 @@ x-aigo-environment: &aigo-environment
   AIGO_WEB_DIST_DIR: /app/web
   AIGO_REGISTER_ENABLED: ${AIGO_REGISTER_ENABLED:-1}
   AIGO_TRUST_PROXY_HEADERS: "true"
+  AIGO_LOG_FORMAT: ${AIGO_LOG_FORMAT:-json}
   AIGO_DB_HOST: postgres
   AIGO_DB_PORT: "5432"
   AIGO_DB_USER: ${AIGO_DB_USER:-aigo}
