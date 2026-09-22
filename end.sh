@@ -30,13 +30,13 @@ fi
 #    KeepAlive=true，若直接 pg_ctl stop 会被 launchd 立即重启，且 pg_ctl -w
 #    会永久等待卡死；brew services stop 在部分 Homebrew 版本存在 bug 会报
 #    undefined method 'stop_timeout'）
-# 2) 再 pg_ctl stop（不加 -w 避免任何等待卡死）
+# 2) 再 pg_ctl stop -W（显式不等待；pg_ctl 默认会等待，不能只靠省略 -w）
 # 3) 兜底 pkill（快速模式无响应时）
 echo ""
 echo "[3/3] 停止 PostgreSQL..."
 if pg_isready -q 2>/dev/null; then
   launchctl bootout gui/$(id -u)/homebrew.mxcl.postgresql@16 2>/dev/null
-  pg_ctl stop -D /opt/homebrew/var/postgresql@16 -m fast > /dev/null 2>&1
+  pg_ctl stop -D /opt/homebrew/var/postgresql@16 -m fast -W > /dev/null 2>&1 || true
   # 等待最多 5 秒确认
   for i in 1 2 3 4 5; do
     pg_isready -q 2>/dev/null || break
