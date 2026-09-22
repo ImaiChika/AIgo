@@ -24,12 +24,14 @@ python3 export_e2e.py            # Excel/Word 导出：字段完整、无命题�
 python3 personal_center_e2e.py    # 个人工作台、零权限新用户、昵称/密码、移动端与清理
 python3 review_pagination_e2e.py  # 待审/决断分页，终态题全部评论与分享页按需展开
 python3 current_workflow_e2e.py   # 当前主链路：无分类送审→双轮审核→最终决断；身份切换状态回归
+python3 observability_smoke.py     # 只读冒烟：登录、题库、请求ID、超管运行指标（可用于服务器）
 ```
 
 环境变量（均可选）：
 
 - `AIGO_E2E_BASE_URL`：前端地址，默认 `http://127.0.0.1:5173`
 - `AIGO_E2E_DB_DSN`：本地库 DSN，默认 `postgres://localhost:5432/aigo`
+- `AIGO_E2E_ADMIN_USERNAME` / `AIGO_E2E_ADMIN_PASSWORD`：只读冒烟登录账号；`observability_smoke.py` 要求显式提供密码，不在脚本保存凭据
 
 ## 副作用与数据说明
 
