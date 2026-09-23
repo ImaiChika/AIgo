@@ -317,10 +317,12 @@ func databasePoolMetrics(db *sql.DB) databasePoolSnapshot {
 // 路由由 requireSuperAdmin 保护，不暴露请求参数、用户数据、DSN 或模型凭证。
 func (s *Server) handleRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 	s.ensureObservability()
+	s.ensureRequestLimiter()
 	response := map[string]any{
 		"generated_at": time.Now().UTC(),
 		"http":         s.httpMetrics.snapshot(),
 		"process":      readProcessMetrics(),
+		"overload":     s.requestLimiter.snapshot(),
 	}
 	if provider, ok := s.questionStore.(interface{ DB() *sql.DB }); ok && provider.DB() != nil {
 		response["database_pool"] = databasePoolMetrics(provider.DB())

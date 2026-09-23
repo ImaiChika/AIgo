@@ -38,11 +38,39 @@ func clearInferenceEnv(t *testing.T) {
 		"AIGO_REGISTER_ENABLED",
 		"AIGO_TRUST_PROXY_HEADERS",
 		"AIGO_LOG_FORMAT",
+		"AIGO_HTTP_MAX_INFLIGHT",
+		"AIGO_HTTP_EXPENSIVE_MAX_INFLIGHT",
+		"AIGO_HTTP_HEAVY_MAX_INFLIGHT",
+		"AIGO_HTTP_RETRY_AFTER_SECONDS",
 	} {
 		t.Setenv(key, "")
 	}
 	for _, name := range secretEnvironmentNames {
 		t.Setenv(name+"_FILE", "")
+	}
+}
+
+func TestHTTPConcurrencyLimitsUseSafeDefaultsAndBounds(t *testing.T) {
+	clearInferenceEnv(t)
+	cfg := FromEnv()
+	if cfg.HTTPMaxInFlight != 64 || cfg.HTTPExpensiveMax != 8 || cfg.HTTPHeavyMax != 2 || cfg.HTTPRetryAfterSec != 1 {
+		t.Fatalf("defaults=%+v", cfg)
+	}
+
+	t.Setenv("AIGO_HTTP_MAX_INFLIGHT", "32")
+	t.Setenv("AIGO_HTTP_EXPENSIVE_MAX_INFLIGHT", "4")
+	t.Setenv("AIGO_HTTP_HEAVY_MAX_INFLIGHT", "1")
+	t.Setenv("AIGO_HTTP_RETRY_AFTER_SECONDS", "3")
+	cfg = FromEnv()
+	if cfg.HTTPMaxInFlight != 32 || cfg.HTTPExpensiveMax != 4 || cfg.HTTPHeavyMax != 1 || cfg.HTTPRetryAfterSec != 3 {
+		t.Fatalf("configured limits=%+v", cfg)
+	}
+
+	t.Setenv("AIGO_HTTP_MAX_INFLIGHT", "0")
+	t.Setenv("AIGO_HTTP_HEAVY_MAX_INFLIGHT", "999")
+	cfg = FromEnv()
+	if cfg.HTTPMaxInFlight != 64 || cfg.HTTPHeavyMax != 2 {
+		t.Fatalf("invalid limits must use defaults: %+v", cfg)
 	}
 }
 

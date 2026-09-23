@@ -46,7 +46,7 @@ func TestRuntimeMetricsContainsNoConfigurationSecrets(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"generated_at", "http", "process", "queues"} {
+	for _, key := range []string{"generated_at", "http", "process", "overload", "queues"} {
 		if _, ok := body[key]; !ok {
 			t.Fatalf("missing %s in %#v", key, body)
 		}

@@ -43,6 +43,9 @@ type Server struct {
 	readinessTimeout   time.Duration
 	observabilityOnce  sync.Once
 	httpMetrics        *httpMetrics
+	requestLimiterOnce sync.Once
+	requestLimitConfig RequestLimitConfig
+	requestLimiter     *requestLimiter
 }
 
 // NewServer 创建 API 服务实例，注入所有依赖。
@@ -89,6 +92,7 @@ func NewServer(
 // 权限动作与权限点一一对应（见 internal/domain/permission.go）。
 func (s *Server) Handler() http.Handler {
 	s.ensureObservability()
+	s.ensureRequestLimiter()
 	mux := http.NewServeMux()
 
 	// === 进程健康检查（公开、无业务数据和配置泄露） ===
@@ -252,7 +256,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/review/flows/{id}", s.requireAuth(domain.PermFlowManage, s.handleDeleteFlow))
 
 	// 包装中间件：请求体大小限制 + CORS 跨域 + JSON Content-Type
-	return s.withRequestObservability(withBodyLimit(withCORS(s.corsOrigins, withJSON(mux))))
+	return s.withRequestObservability(s.requestLimiter.middleware(withBodyLimit(withCORS(s.corsOrigins, withJSON(mux)))))
 }
 
 // maxRequestBody 请求体大小上限（10MB，覆盖 JSON 请求与文件上传）。

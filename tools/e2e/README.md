@@ -30,6 +30,7 @@ python3 observability_smoke.py     # 只读冒烟：登录、题库、请求ID�
 环境变量（均可选）：
 
 - `AIGO_E2E_BASE_URL`：前端地址，默认 `http://127.0.0.1:5173`
+- `AIGO_E2E_API_BASE_URL`：后端健康检查地址；开发模式可设为 `http://127.0.0.1:8080`，生产同源时留空
 - `AIGO_E2E_DB_DSN`：本地库 DSN，默认 `postgres://localhost:5432/aigo`
 - `AIGO_E2E_ADMIN_USERNAME` / `AIGO_E2E_ADMIN_PASSWORD`：只读冒烟登录账号；`observability_smoke.py` 要求显式提供密码，不在脚本保存凭据
 

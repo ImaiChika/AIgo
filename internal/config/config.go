@@ -47,6 +47,10 @@ type Config struct {
 	HTTPAddr          string         // HTTP 监听地址（生产可配置，默认仅监听本机）
 	WebDistDir        string         // Vite 生产构建目录；空表示仅提供 API
 	LogFormat         string         // 应用日志格式：text（本地默认）或 json（生产推荐）
+	HTTPMaxInFlight   int            // 普通 API 全局最大在途请求数
+	HTTPExpensiveMax  int            // 统计/复杂搜索等高成本读取最大在途数
+	HTTPHeavyMax      int            // 导入/导出/批量提交等重请求最大在途数
+	HTTPRetryAfterSec int            // 过载响应建议客户端等待秒数
 }
 
 // IsDefaultJWTSecret 判断 JWT 密钥是否为内置默认值（未显式配置）。
@@ -207,6 +211,10 @@ func Load() (Config, error) {
 		HTTPAddr:          firstNonEmpty(strings.TrimSpace(os.Getenv("AIGO_HTTP_ADDR")), "127.0.0.1:8080"),
 		WebDistDir:        strings.TrimSpace(os.Getenv("AIGO_WEB_DIST_DIR")),
 		LogFormat:         logFormatWithDefault(os.Getenv("AIGO_LOG_FORMAT")),
+		HTTPMaxInFlight:   intWithDefault(os.Getenv("AIGO_HTTP_MAX_INFLIGHT"), 64, 8, 1024),
+		HTTPExpensiveMax:  intWithDefault(os.Getenv("AIGO_HTTP_EXPENSIVE_MAX_INFLIGHT"), 8, 1, 128),
+		HTTPHeavyMax:      intWithDefault(os.Getenv("AIGO_HTTP_HEAVY_MAX_INFLIGHT"), 2, 1, 64),
+		HTTPRetryAfterSec: intWithDefault(os.Getenv("AIGO_HTTP_RETRY_AFTER_SECONDS"), 1, 1, 60),
 	}, nil
 }
 

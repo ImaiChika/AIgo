@@ -226,6 +226,14 @@ func run(ctx context.Context, args []string) error {
 			addr = "127.0.0.1:" + args[2]
 		}
 		server := api.NewServer(pipe, kpSvc, reviewSvc, auditSvc, pgStore, authSvc, batchSvc, aiCheckSvc, bankSvc, cfg.CORSOrigins, cfg.RegisterEnabled, cfg.TrustProxyHeaders)
+		server.SetRequestLimits(api.RequestLimitConfig{
+			MaxInFlight:          cfg.HTTPMaxInFlight,
+			ExpensiveMaxInFlight: cfg.HTTPExpensiveMax,
+			HeavyMaxInFlight:     cfg.HTTPHeavyMax,
+			RetryAfterSeconds:    cfg.HTTPRetryAfterSec,
+		})
+		fmt.Printf("HTTP 过载保护: 全局=%d 高成本读取=%d 重请求=%d Retry-After=%ds\n",
+			cfg.HTTPMaxInFlight, cfg.HTTPExpensiveMax, cfg.HTTPHeavyMax, cfg.HTTPRetryAfterSec)
 		handler := server.Handler()
 		if cfg.WebDistDir != "" {
 			handler, err = api.WithStaticFrontend(handler, cfg.WebDistDir)

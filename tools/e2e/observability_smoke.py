@@ -7,6 +7,7 @@ from playwright.sync_api import sync_playwright
 
 
 BASE = os.environ.get("AIGO_E2E_BASE_URL", "http://127.0.0.1:5173").rstrip("/")
+API_BASE = os.environ.get("AIGO_E2E_API_BASE_URL", BASE).rstrip("/")
 USERNAME = os.environ.get("AIGO_E2E_ADMIN_USERNAME", "admin")
 PASSWORD = os.environ.get("AIGO_E2E_ADMIN_PASSWORD", "")
 
@@ -56,10 +57,19 @@ with sync_playwright() as playwright:
         metrics_body = metrics.json()
         check(
             "运行指标字段完整",
-            all(key in metrics_body for key in ("http", "process", "database_pool", "queues")),
+            all(key in metrics_body for key in ("http", "process", "database_pool", "overload", "queues")),
+        )
+        overload = metrics_body.get("overload", {})
+        global_limit = overload.get("global", {}).get("limit", 0)
+        check(
+            "过载保护参数有效",
+            global_limit > 0
+            and 0 < overload.get("expensive_read", {}).get("limit", 0) <= global_limit
+            and 0 < overload.get("heavy", {}).get("limit", 0) <= global_limit,
+            str(overload),
         )
 
-        health = page.request.get(BASE + "/health/live")
+        health = page.request.get(API_BASE + "/health/live")
         request_id = health.headers.get("x-request-id", "")
         check("响应包含请求关联 ID", health.status == 200 and len(request_id) == 32, request_id[:4] + "...")
 

@@ -42,6 +42,7 @@ cp deploy/production.env.example deploy/production.env
 - `AIGO_SITE_ADDRESS` 填写正式域名，例如 `exam.example.com`，不要保留 `http://localhost`。
 - 如需用环境变量首次预置本地端点，再填写 `QWEN_BASE_URL` 和 `QWEN_MODEL`；也可以先启动服务，再由超级管理员进入“AI 服务配置”填写实时地址、API Key、生成模型和检查模型。
 - 根据服务器容量调整应用 CPU、内存和进程数限制。
+- 根据压测和 `/api/system/runtime-metrics` 调整 `AIGO_HTTP_*_MAX_INFLIGHT`；不要仅为消除 503 盲目调高。健康检查不受该闸门限制，过载请求会返回 503 与 `Retry-After`。
 - `AIGO_REGISTER_ENABLED=1` 是当前产品口径；遇到注册滥用或维护窗口时可临时设为 `0` 关闭。
 
 检查并启动：

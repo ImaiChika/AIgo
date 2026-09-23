@@ -88,6 +88,10 @@ cd web && npm install && npm run dev
 | `AIGO_REGISTER_ENABLED` | 是否开放自助注册；设为 `0/false` 可紧急关闭 | 默认 `1` |
 | `AIGO_TRUST_PROXY_HEADERS` | 是否信任 Caddy 写入的客户端IP头；直连部署不得开启 | 默认 `false`，Compose 内为 `true` |
 | `AIGO_LOG_FORMAT` | 应用日志格式：`text` / `json` | 本地默认 `text`，Compose 默认 `json` |
+| `AIGO_HTTP_MAX_INFLIGHT` | 单实例 API 最大在途请求数；健康检查豁免 | `64` |
+| `AIGO_HTTP_EXPENSIVE_MAX_INFLIGHT` | 统计、复杂搜索、批量进度等高成本读取并发数 | `8` |
+| `AIGO_HTTP_HEAVY_MAX_INFLIGHT` | 导入、导出、批量提交等重请求并发数 | `2` |
+| `AIGO_HTTP_RETRY_AFTER_SECONDS` | 过载 503 的 `Retry-After` 秒数 | `1` |
 
 运行观测：所有 HTTP 响应都会带 `X-Request-ID`；生产容器默认输出 JSON 应用日志。唯一超级管理员可通过 `GET /api/system/runtime-metrics` 查看脱敏的 HTTP 聚合、Go 进程、数据库连接池及生成/AI 检查队列快照。该接口不返回请求参数、题目内容、DSN 或模型凭证，不能替代后续集中监控与告警。
 
