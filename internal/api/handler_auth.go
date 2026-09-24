@@ -213,11 +213,13 @@ func (s *Server) switchBlockers(ctx context.Context, targetRole string, targetPe
 	if err != nil {
 		return nil, err
 	}
+	// 切换是临时行为：只拦「现在就需要本人处理」的在途任务；
+	// 流程配置引用（轮审人/把关人）只在永久收权时拦截。
 	if lost[domain.PermReviewDo] {
-		blockers = append(blockers, refs.ReviewDo...)
+		blockers = append(blockers, refs.ActiveReviewDo...)
 	}
 	if lost[domain.PermReviewFinal] {
-		blockers = append(blockers, refs.ReviewFinal...)
+		blockers = append(blockers, refs.ActiveFinal...)
 	}
 	if lost[domain.PermQuestionEdit] {
 		pendings, err := s.reviewSvc.RevisionPendingQuestions(ctx, userID)
@@ -449,10 +451,12 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if losesReviewRole || !futureEnabled {
-				blockers = append(blockers, references.ReviewDo...)
+				blockers = append(blockers, references.FlowReviewDo...)
+				blockers = append(blockers, references.ActiveReviewDo...)
 			}
 			if losesFinalRole || !futureEnabled {
-				blockers = append(blockers, references.ReviewFinal...)
+				blockers = append(blockers, references.FlowReviewFinal...)
+				blockers = append(blockers, references.ActiveFinal...)
 			}
 			if losesEditRole || !futureEnabled {
 				// 属主侧互斥占用：退回修改中 / 审核中 / 待最终决断的题目。

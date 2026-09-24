@@ -271,15 +271,18 @@ func (s *Service) ListFlows(ctx context.Context) ([]domain.ReviewFlowConfig, err
 }
 
 // AssignmentReferences 按处理所需权限分组返回仍依赖指定账号的审核侧占用。
-// 身份切换与收权守卫按「实际失去的权限」取对应分组，避免丢 A 权限被 B 占用误拦；
-// 删除/停用等永久性操作仍取两组并集（UserAssignmentReferences）。
+// 再分「配置引用」（未来可能派生任务）与「在途任务」（现在就需要本人处理）：
+// 身份切换是临时行为，只看在途任务；收权/停用/删除是永久行为，两者都拦。
+// 各分组按「实际失去的权限」取用，避免丢 A 权限被 B 占用误拦。
 type AssignmentReferences struct {
-	// ReviewDo 需要审题权限（review:do）才能处理的占用：
-	// 流程轮审人引用、分配给自己的进行中审核任务。
-	ReviewDo []string
-	// ReviewFinal 需要决断权限（review:final）才能处理的占用：
-	// 流程把关人引用、待本人决断的任务。
-	ReviewFinal []string
+	// FlowReviewDo 流程轮审人引用（配置级，需要 review:do）。
+	FlowReviewDo []string
+	// FlowReviewFinal 流程把关人引用（配置级，需要 review:final）。
+	FlowReviewFinal []string
+	// ActiveReviewDo 分配给本人的进行中审核任务（在途，需要 review:do）。
+	ActiveReviewDo []string
+	// ActiveFinal 待本人决断的任务（在途，需要 review:final）。
+	ActiveFinal []string
 }
 
 // AssignmentReferencesByPermission 返回按权限分组的审核侧占用。
@@ -299,11 +302,11 @@ func (s *Service) AssignmentReferencesByPermission(ctx context.Context, userID s
 	}
 	for _, flow := range flows {
 		if containsID(flow.FinalReviewerIDs, userID) {
-			refs.ReviewFinal = add(refs.ReviewFinal, "流程「"+flow.Name+"」的最终把关人")
+			refs.FlowReviewFinal = add(refs.FlowReviewFinal, "流程「"+flow.Name+"」的最终把关人")
 		}
 		for _, round := range flow.Rounds {
 			if containsID(round.ExpertIDs, userID) {
-				refs.ReviewDo = add(refs.ReviewDo, fmt.Sprintf("流程「%s」第%d轮审核人", flow.Name, round.RoundNumber))
+				refs.FlowReviewDo = add(refs.FlowReviewDo, fmt.Sprintf("流程「%s」第%d轮审核人", flow.Name, round.RoundNumber))
 			}
 		}
 	}
@@ -316,10 +319,10 @@ func (s *Service) AssignmentReferencesByPermission(ctx context.Context, userID s
 			continue
 		}
 		if containsID(task.AssignedTo, userID) {
-			refs.ReviewDo = add(refs.ReviewDo, "进行中的审核任务 "+task.ID)
+			refs.ActiveReviewDo = add(refs.ActiveReviewDo, "进行中的审核任务 "+task.ID)
 		}
 		if containsID(task.FinalReviewerIDs, userID) {
-			refs.ReviewFinal = add(refs.ReviewFinal, "待决断任务 "+task.ID)
+			refs.ActiveFinal = add(refs.ActiveFinal, "待决断任务 "+task.ID)
 		}
 	}
 	return refs, nil
@@ -332,7 +335,8 @@ func (s *Service) UserAssignmentReferences(ctx context.Context, userID string) (
 	if err != nil {
 		return nil, err
 	}
-	return append(append([]string(nil), refs.ReviewDo...), refs.ReviewFinal...), nil
+	return append(append(append(append([]string(nil),
+		refs.FlowReviewDo...), refs.FlowReviewFinal...), refs.ActiveReviewDo...), refs.ActiveFinal...), nil
 }
 
 // RevisionPendingQuestions 返回指定归属人名下处于"退回修改中"的题目。

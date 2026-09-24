@@ -110,6 +110,38 @@ func TestSwitchRoleAdmissionFollowsPermissionSubset(t *testing.T) {
 		t.Fatalf("conflict should name the pending task: %s", blocked.Body.String())
 	}
 
+	// 4b. 仅有流程配置引用（轮审人）、无在途任务的用户可自由切换：
+	// 切换是临时行为，未来才可能派生的任务不构成阻断。
+	refOnly := serveAuthJSON(t, handler, http.MethodPost, "/api/users", adminToken, "198.51.100.1", map[string]any{
+		"username": "ref-only", "password": "ref-password", "display_name": "仅配置引用",
+		"role": "teacher", "roles": []string{"teacher", "expert"},
+	})
+	if refOnly.Code != http.StatusOK && refOnly.Code != http.StatusCreated {
+		t.Fatalf("create ref-only user: status=%d body=%s", refOnly.Code, refOnly.Body.String())
+	}
+	refID := decodeUserID(t, refOnly.Body.String())
+	flow2 := serveAuthJSON(t, handler, http.MethodPost, "/api/review/flows", adminToken, "198.51.100.1", map[string]any{
+		"id":   "flow-ref-only",
+		"name": "仅配置引用流程",
+		"rounds": []map[string]any{{
+			"round_number": 2, "name": "复审", "expert_ids": []string{refID}, "required_count": 1,
+		}},
+	})
+	if flow2.Code != http.StatusCreated {
+		t.Fatalf("create ref-only flow: status=%d body=%s", flow2.Code, flow2.Body.String())
+	}
+	refToken := loginForAuthTest(t, handler, "ref-only", "ref-password", "203.0.113.9")
+	up := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/switch-role", refToken, "203.0.113.9", map[string]any{"role": "expert"})
+	if up.Code != http.StatusOK {
+		t.Fatalf("ref-only upgrade: status=%d body=%s", up.Code, up.Body.String())
+	}
+	refToken = switchToken(t, up)
+	down := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/switch-role", refToken, "203.0.113.9", map[string]any{"role": "teacher"})
+	if down.Code != http.StatusOK {
+		t.Fatalf("ref-only downgrade should pass (reference is not an in-flight task): status=%d body=%s",
+			down.Code, down.Body.String())
+	}
+
 	// 5. 自定义角色证明：删除内置模板也不影响判定。
 	customRole := serveAuthJSON(t, handler, http.MethodPost, "/api/roles", adminToken, "198.51.100.1", map[string]any{
 		"id": "desk-reviewer", "name": "桌面审题", "permissions": []string{"question:view", "review:do"},
