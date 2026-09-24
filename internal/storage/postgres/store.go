@@ -324,7 +324,22 @@ func (s *Store) CreateGenerationRun(ctx context.Context, run domain.GenerationRu
 	if len(run.RequestJSON) > 0 {
 		requestJSON = run.RequestJSON
 	}
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := beginGenerationQuotaTx(ctx, s.db)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM generation_runs WHERE id=$1)`, run.ID).Scan(&exists); err != nil {
+		return false, err
+	}
+	if exists {
+		return false, nil
+	}
+	if err := checkGenerationQuota(ctx, tx, run.OwnerID, "single", run.RequestedCount); err != nil {
+		return false, err
+	}
+	res, err := tx.ExecContext(ctx, `
 		INSERT INTO generation_runs (id, owner_id, status, requested_count, question_ids, error, started_at, updated_at, max_attempts, request_json)
 		VALUES ($1,$2,$3,$4,$5,'',$6,$6,$7,$8)
 		ON CONFLICT (id) DO NOTHING
@@ -333,7 +348,13 @@ func (s *Store) CreateGenerationRun(ctx context.Context, run domain.GenerationRu
 		return false, err
 	}
 	affected, err := res.RowsAffected()
-	return affected > 0, err
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return affected > 0, nil
 }
 
 // ClaimNextGenerationRun 抢占下一个可执行运行：pending 且到达可重试时间，或
@@ -383,6 +404,14 @@ func (s *Store) RetryGenerationRun(ctx context.Context, id, errMsg string, backo
 
 func (s *Store) GetGenerationRun(ctx context.Context, id string) (*domain.GenerationRun, error) {
 	return scanGenerationRun(s.db.QueryRowContext(ctx, `SELECT `+generationRunColumns+` FROM generation_runs WHERE id=$1`, id))
+}
+
+func (s *Store) RecordGenerationRunQuestionIDs(ctx context.Context, id string, questionIDs []string) error {
+	if questionIDs == nil {
+		questionIDs = []string{}
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE generation_runs SET question_ids=$2, updated_at=NOW() WHERE id=$1 AND status='running'`, id, pq.Array(questionIDs))
+	return err
 }
 
 func (s *Store) CompleteGenerationRun(ctx context.Context, id string, questionIDs []string) error {
@@ -1954,7 +1983,22 @@ func jsonOrEmptyArray(value string) string {
 }
 
 func (s *Store) SaveBatchJob(ctx context.Context, job storage.BatchJobRecord) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := beginGenerationQuotaTx(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var oldStatus string
+	err = tx.QueryRowContext(ctx, `SELECT status FROM batch_jobs WHERE id=$1`, job.ID).Scan(&oldStatus)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if job.Status == "in_progress" && (err == sql.ErrNoRows || oldStatus != "in_progress") {
+		if err := checkGenerationQuota(ctx, tx, job.OwnerID, "batch", job.TotalCount-job.Completed-job.Failed); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO batch_jobs (id, backend, backend_profile, model, job_name, status, total_count, completed, failed, output_file_id, points_json, owner_id, output_json, finished_at, created_at, updated_at)
 		VALUES ($1,COALESCE(NULLIF($2,''),'local_single_api'),COALESCE(NULLIF($3,''),'local-default'),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NULLIF($14,'')::timestamptz,NOW(),NOW())
 		ON CONFLICT (id) DO UPDATE SET
@@ -1966,11 +2010,40 @@ func (s *Store) SaveBatchJob(ctx context.Context, job storage.BatchJobRecord) er
 			output_file_id=EXCLUDED.output_file_id, output_json=EXCLUDED.output_json,
 			owner_id=COALESCE(NULLIF(EXCLUDED.owner_id,''), batch_jobs.owner_id), updated_at=NOW()
 	`, job.ID, job.Backend, job.BackendProfile, job.Model, job.JobName, job.Status, job.TotalCount, job.Completed, job.Failed, job.OutputFileID, job.PointsJSON, job.OwnerID, jsonOrEmptyArray(job.OutputJSON), job.FinishedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) UpdateBatchJob(ctx context.Context, job storage.BatchJobRecord) error {
-	_, err := s.db.ExecContext(ctx, `
+	if job.Status == "in_progress" {
+		tx, err := beginGenerationQuotaTx(ctx, s.db)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		var oldStatus, ownerID string
+		if err := tx.QueryRowContext(ctx, `SELECT status, owner_id FROM batch_jobs WHERE id=$1`, job.ID).Scan(&oldStatus, &ownerID); err != nil {
+			return err
+		}
+		if oldStatus != "in_progress" && oldStatus != "pending" && oldStatus != "submitted" && oldStatus != "validating" && oldStatus != "running" {
+			if err := checkGenerationQuota(ctx, tx, ownerID, "batch", job.TotalCount-job.Completed-job.Failed); err != nil {
+				return err
+			}
+		}
+		if err := updateBatchJob(ctx, tx, job); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	return updateBatchJob(ctx, s.db, job)
+}
+
+func updateBatchJob(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, job storage.BatchJobRecord) error {
+	_, err := db.ExecContext(ctx, `
 		UPDATE batch_jobs SET
 			backend=COALESCE(NULLIF($1,''),backend),
 			backend_profile=COALESCE(NULLIF($2,''),backend_profile),
@@ -2051,32 +2124,135 @@ func (s *Store) SearchBatchJobs(ctx context.Context, name string, limit int) ([]
 	return result, rows.Err()
 }
 
-// ClaimBatchJobImport 抢占式标记任务为已导入。依赖数据库行级更新原子性：
-// 并发触发导入时只有一个调用能把 imported_at 从 NULL 更新为当前时间。
+// ListBatchJobsPage 在数据库中先按归属和条件过滤，再分页；老师不会因其他人的任务挤占前几页而漏看自己的历史。
+func (s *Store) ListBatchJobsPage(ctx context.Context, ownerID, name, status string, limit, offset int) ([]storage.BatchJobRecord, int, error) {
+	clauses := []string{"backend='local_single_api'"}
+	args := []any{}
+	if ownerID != "" {
+		args = append(args, ownerID)
+		clauses = append(clauses, fmt.Sprintf("owner_id=$%d", len(args)))
+	}
+	if status != "" {
+		args = append(args, status)
+		clauses = append(clauses, fmt.Sprintf("status=$%d", len(args)))
+	}
+	for _, token := range storage.SearchTokens(name) {
+		args = append(args, "%"+escapeLike(token)+"%")
+		clauses = append(clauses, fmt.Sprintf("LOWER(job_name) LIKE $%d", len(args)))
+	}
+	where := " WHERE " + strings.Join(clauses, " AND ")
+	var total int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM batch_jobs"+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	args = append(args, limit, offset)
+	query := `SELECT id, backend, backend_profile, model, job_name, status, total_count, completed, failed, output_file_id, points_json, owner_id, COALESCE(output_json::text, '[]'), COALESCE(imported_at::text, ''), COALESCE(import_result::text, ''), created_at, updated_at, COALESCE(finished_at::text, '') FROM batch_jobs` + where + fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	result := []storage.BatchJobRecord{}
+	for rows.Next() {
+		var job storage.BatchJobRecord
+		if err := rows.Scan(&job.ID, &job.Backend, &job.BackendProfile, &job.Model, &job.JobName, &job.Status, &job.TotalCount, &job.Completed, &job.Failed, &job.OutputFileID, &job.PointsJSON, &job.OwnerID, &job.OutputJSON, &job.ImportedAt, &job.ImportResult, &job.CreatedAt, &job.UpdatedAt, &job.FinishedAt); err != nil {
+			return nil, 0, err
+		}
+		result = append(result, job)
+	}
+	return result, total, rows.Err()
+}
+
+// ClaimBatchJobImport 在统一配额锁内检查首检队列余量并抢占导入。
+// 成功后 import_reserved_ids 持续占用额度，直到对应检查任务入队或被淘汰；
+// 因此多个已完成批量任务不能绕过生成任务的全站积压上限同时导入。
 func (s *Store) ClaimBatchJobImport(ctx context.Context, id string) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE batch_jobs SET imported_at=NOW(), updated_at=NOW() WHERE id=$1 AND imported_at IS NULL`, id)
+	tx, err := beginGenerationQuotaTx(ctx, s.db)
 	if err != nil {
 		return false, err
 	}
-	affected, err := res.RowsAffected()
+	defer tx.Rollback()
+	var status, outputJSON string
+	var importedAt sql.NullTime
+	if err := tx.QueryRowContext(ctx, `SELECT status, output_json::text, imported_at FROM batch_jobs WHERE id=$1 FOR UPDATE`, id).Scan(&status, &outputJSON, &importedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	if importedAt.Valid || (status != "completed" && status != "complete") {
+		return false, nil
+	}
+	var output struct {
+		Questions []struct {
+			ID string `json:"id"`
+		} `json:"questions"`
+	}
+	if err := json.Unmarshal([]byte(outputJSON), &output); err != nil {
+		return false, fmt.Errorf("解析批量生成结果失败: %w", err)
+	}
+	ids := make([]string, 0, len(output.Questions))
+	seen := make(map[string]bool, len(output.Questions))
+	for _, q := range output.Questions {
+		if q.ID == "" {
+			return false, fmt.Errorf("批量结果包含缺少 ID 的题目")
+		}
+		if !seen[q.ID] {
+			ids = append(ids, q.ID)
+			seen[q.ID] = true
+		}
+	}
+	var needChecks int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM unnest($1::text[]) AS item(id)
+		WHERE NOT EXISTS (SELECT 1 FROM ai_check_tasks t WHERE t.question_id=item.id)
+		  AND NOT EXISTS (SELECT 1 FROM ai_check_discards d WHERE d.question_id=item.id)
+		  AND NOT EXISTS (SELECT 1 FROM ai_review_results r WHERE r.question_id=item.id)`, pq.Array(ids)).Scan(&needChecks); err != nil {
+		return false, err
+	}
+	quota, err := readGenerationQuota(ctx, tx)
 	if err != nil {
 		return false, err
 	}
-	return affected > 0, nil
+	usage, err := readGenerationQuotaUsage(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	if needChecks > quota.GlobalPendingQuestions {
+		return false, &storage.GenerationQuotaError{Message: fmt.Sprintf("本批量结果需为 %d 道题安排首次 AI 检查，超过当前全站上限 %d 道；请联系管理员调整上限后重试", needChecks, quota.GlobalPendingQuestions)}
+	}
+	if usage.PendingQuestionUnits+needChecks > quota.GlobalPendingQuestions {
+		return false, &storage.GenerationQuotaError{Message: fmt.Sprintf("批量结果需为 %d 道题安排首次 AI 检查；全站当前占用 %d/%d 道，请等待队列释放后再导入", needChecks, usage.PendingQuestionUnits, quota.GlobalPendingQuestions)}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE batch_jobs SET imported_at=NOW(), import_reserved_ids=$2, updated_at=NOW() WHERE id=$1`, id, pq.Array(ids)); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // SaveBatchJobImportResult 在导入完成后覆盖写入导入结果 JSON，供重复触发时重放。
 func (s *Store) SaveBatchJobImportResult(ctx context.Context, id string, resultJSON string) error {
+	var result struct {
+		QuestionIDs []string `json:"question_ids"`
+	}
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE batch_jobs SET import_result=$2::jsonb, imported_at=NOW(), updated_at=NOW() WHERE id=$1
-	`, id, resultJSON)
+		UPDATE batch_jobs SET import_result=$2::jsonb, imported_at=NOW(),
+			import_reserved_ids=ARRAY(
+				SELECT item.id FROM unnest($3::text[]) AS item(id)
+				WHERE NOT EXISTS (SELECT 1 FROM ai_check_tasks t WHERE t.question_id=item.id)
+				  AND NOT EXISTS (SELECT 1 FROM ai_check_discards d WHERE d.question_id=item.id)
+				  AND NOT EXISTS (SELECT 1 FROM ai_review_results r WHERE r.question_id=item.id)
+			), updated_at=NOW() WHERE id=$1
+	`, id, resultJSON, pq.Array(result.QuestionIDs))
 	return err
 }
 
 // ReleaseBatchJobImport 释放导入标记，仅在尚未写入任何题目的前置失败后调用，
 // 允许后续重试；已保存过导入结果的任务不会被释放。
 func (s *Store) ReleaseBatchJobImport(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE batch_jobs SET imported_at=NULL WHERE id=$1 AND import_result IS NULL`, id)
+	_, err := s.db.ExecContext(ctx, `UPDATE batch_jobs SET imported_at=NULL, import_reserved_ids='{}' WHERE id=$1 AND import_result IS NULL`, id)
 	return err
 }
 

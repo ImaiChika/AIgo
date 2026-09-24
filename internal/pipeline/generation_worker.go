@@ -160,6 +160,17 @@ func (p *Pipeline) executeGenerationRun(ctx context.Context, run *domain.Generat
 			return
 		}
 	}
+	// 先登记已落库题目的 ID，再进入首次 AI 检查。准入统计据此识别短暂
+	// 同时处于「单题运行收尾」和「AI 首检」的同一道题，避免重复占用额度。
+	if len(drafts) > 0 {
+		ids := make([]string, 0, len(drafts))
+		for _, q := range drafts {
+			ids = append(ids, q.ID)
+		}
+		if err := p.runs.RecordGenerationRunQuestionIDs(statusCtx, run.ID, ids); err != nil {
+			slog.Warn("登记生成题目 ID 失败，配额过渡期可能短暂保守计数", "run_id", run.ID, "error", err)
+		}
+	}
 	if p.checker != nil && len(drafts) > 0 {
 		ids := make([]string, 0, len(drafts))
 		for _, q := range drafts {

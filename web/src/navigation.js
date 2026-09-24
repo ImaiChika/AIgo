@@ -33,6 +33,7 @@ export const navigationGroups = [
   { id: "authoring", label: "命题工作", icon: "M14 4l6 6M4 20l4-1L20 7l-3-3L5 16Z M13 20h7", items: [
     { id: "knowledge", label: "考试大纲", path: "/knowledge" },
     { id: "generate", label: "AI 出题", path: "/generate", activePaths: ["/generate", "/generate/batch", "/batch"], permission: ["question:generate", "batch:run"] },
+    { id: "batch-history", label: "历史出题记录", path: "/batch-history", permission: ["batch:run", "question:view_global"] },
     { id: "new-questions", label: "新题修改与送审", path: "/new-questions", permission: "review:submit", badgeKey: "newQuestions" },
     { id: "my-revisions", label: "待我修改", path: "/my-revisions", permission: "question:edit", badgeKey: "revisions" },
   ] },
@@ -53,6 +54,7 @@ export const navigationGroups = [
     { id: "users", label: "用户管理", path: "/users", permission: "user:manage" },
     { id: "roles", label: "角色模板", path: "/roles", permission: "role:manage" },
     { id: "ai-providers", label: "AI 服务配置", path: "/system/ai-providers", permission: "role:manage" },
+    { id: "generation-quota", label: "生成任务配额", path: "/system/generation-quota", permission: "generation_quota:manage" },
     { id: "audit", label: "操作日志", path: "/audit", permission: "audit:view" },
   ] },
 ];

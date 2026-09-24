@@ -217,6 +217,7 @@ button {
 .config-column {
   display: grid;
   gap: 14px;
+  min-width: 0;
 }
 
 .panel {
@@ -232,6 +233,7 @@ button {
   top: 18px;
   display: grid;
   gap: 14px;
+  min-width: 0;
 }
 
 .panel h2,

@@ -19,7 +19,7 @@ var baselineSchemaSQL string
 
 const (
 	// LatestSchemaVersion 是当前程序能够使用的最新数据库版本。
-	LatestSchemaVersion int64 = 32
+	LatestSchemaVersion int64 = 35
 	// migrationLockKey 在同一 PostgreSQL 数据库内串行化所有 AIgo Schema 迁移。
 	migrationLockKey int64 = 0x4149474f5f4d4947 // "AIGO_MIG"
 )
@@ -421,6 +421,32 @@ func configuredMigrations(schemaSQL string) []migration {
 			// 继续以题干摘要 + 评分 + 原因展示。
 			`ALTER TABLE ai_check_discards ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL DEFAULT ''`,
 			`ALTER TABLE ai_check_discards ADD COLUMN IF NOT EXISTS question_json JSONB`,
+		}},
+		{Version: 33, Name: "generation_admission_quota", Statements: []string{
+			`CREATE TABLE IF NOT EXISTS generation_quota (
+				id INT PRIMARY KEY CHECK (id = 1),
+				single_max_questions INT NOT NULL,
+				batch_max_questions INT NOT NULL,
+				single_active_per_user INT NOT NULL,
+				batch_active_per_user INT NOT NULL,
+				global_pending_questions INT NOT NULL,
+				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			)`,
+			`INSERT INTO generation_quota (id, single_max_questions, batch_max_questions, single_active_per_user, batch_active_per_user, global_pending_questions)
+			 VALUES (1, 20, 100, 2, 1, 500) ON CONFLICT (id) DO NOTHING`,
+			`CREATE INDEX IF NOT EXISTS idx_generation_runs_active_owner ON generation_runs(owner_id, status) WHERE status IN ('pending','running')`,
+			`CREATE INDEX IF NOT EXISTS idx_batch_jobs_active_owner ON batch_jobs(owner_id, status) WHERE status IN ('pending','submitted','validating','in_progress','running')`,
+		}},
+		{Version: 34, Name: "quota_permission_builtin_admin_only", Statements: []string{
+			`UPDATE roles SET permissions=array_remove(permissions,'generation_quota:manage'), updated_at=NOW()
+			 WHERE id NOT IN ('super_admin','admin') AND 'generation_quota:manage'=ANY(permissions)`,
+			`UPDATE users SET permissions=array_remove(permissions,'generation_quota:manage'), updated_at=NOW()
+			 WHERE 'generation_quota:manage'=ANY(permissions)`,
+		}},
+		{Version: 35, Name: "batch_import_quota_reservation", Statements: []string{
+			`ALTER TABLE batch_jobs ADD COLUMN IF NOT EXISTS import_reserved_ids TEXT[] NOT NULL DEFAULT '{}'`,
+			`CREATE INDEX IF NOT EXISTS idx_batch_jobs_import_reservation ON batch_jobs(id)
+			 WHERE cardinality(import_reserved_ids)>0`,
 		}},
 	}
 }

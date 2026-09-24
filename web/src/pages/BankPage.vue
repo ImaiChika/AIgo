@@ -543,7 +543,7 @@ onMounted(async () => {
         <div v-else class="empty">暂无题库访问权限，请联系管理员分配相应权限</div>
 
         <div class="filter-row">
-          <input v-model="searchQuery" placeholder="搜索题干、选项、解析、专业、系统、大纲要点或ID..." @keyup.enter="doSearch" class="search-input" />
+          <input v-model="searchQuery" placeholder="搜索题干、选项、解析、专业、系统或大纲要点..." @keyup.enter="doSearch" class="search-input" />
           <select v-model="filterProfession" @change="doSearch" title="按专业筛选">
             <option value="">全部专业</option>
             <option v-for="p in professions" :key="p" :value="p">{{ p }}</option>
@@ -735,12 +735,6 @@ onMounted(async () => {
           <ReviewHistoryPanel :records="reviewInfo.records" compact />
         </div>
 
-        <div class="detail-field">
-          <label>元信息</label>
-          <p class="meta-text">ID: {{ selectedQuestion.id }}</p>
-          <p class="meta-text">版本: {{ selectedQuestion.version }}</p>
-          <p class="meta-text">创建: {{ selectedQuestion.created_at }}</p>
-        </div>
     </section>
 
     <section v-else class="panel empty-panel">
@@ -1277,12 +1271,6 @@ onMounted(async () => {
   font-size: 12px;
   font-weight: 600;
   margin: 2px 4px 2px 0;
-}
-
-.meta-text {
-  font-size: 12px !important;
-  color: #6e7b8f !important;
-  font-family: monospace;
 }
 
 .review-loading {

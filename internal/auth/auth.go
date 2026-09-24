@@ -40,6 +40,7 @@ var (
 	ErrSuperAdminExists            = errors.New("系统只能有一个超级管理员")
 	ErrSuperAdminRoleNotAssignable = errors.New("超级管理员角色不能通过用户管理分配")
 	ErrProtectedRole               = errors.New("内置角色模板受保护，不能修改或删除；请创建自定义角色")
+	ErrAdminOnlyPermission         = errors.New("生成任务配额权限仅属于内置超级管理员和管理员，不能直接分配或加入自定义角色")
 	ErrUserHasWork                 = errors.New("用户仍有未处理业务数据，不能删除")
 )
 
@@ -615,6 +616,9 @@ func (s *Service) CreateUserWithRoles(username, password, displayName, role stri
 		if !domain.IsValidPermission(p) {
 			return nil, fmt.Errorf("无效的权限点: %s", p)
 		}
+		if p == domain.PermGenerationQuotaManage {
+			return nil, ErrAdminOnlyPermission
+		}
 	}
 	if displayName == "" {
 		displayName = username
@@ -660,6 +664,9 @@ func (s *Service) UpdateUserWithRoles(userID, displayName, role string, roles, p
 	for _, p := range permissions {
 		if !domain.IsValidPermission(p) {
 			return nil, fmt.Errorf("无效的权限点: %s", p)
+		}
+		if p == domain.PermGenerationQuotaManage {
+			return nil, ErrAdminOnlyPermission
 		}
 	}
 	for _, b := range bankIDs {
@@ -1039,6 +1046,9 @@ func (s *Service) effectivePermissionsForRole(ctx context.Context, userID, activ
 	if !containsString(roleIDs, domain.RoleSuperAdmin) {
 		delete(permSet, domain.PermRoleManage)
 	}
+	if !containsString(roleIDs, domain.RoleSuperAdmin) && !containsString(roleIDs, domain.RoleAdmin) {
+		delete(permSet, domain.PermGenerationQuotaManage)
+	}
 	perms = make([]string, 0, len(permSet))
 	for p := range permSet {
 		perms = append(perms, p)
@@ -1321,6 +1331,9 @@ func (s *Service) SaveRole(ctx context.Context, r domain.Role) error {
 	}
 	if r.ID != domain.RoleSuperAdmin && containsPermission(r.Permissions, domain.PermRoleManage) {
 		return ErrSuperAdminOnly
+	}
+	if r.ID != domain.RoleSuperAdmin && r.ID != domain.RoleAdmin && containsPermission(r.Permissions, domain.PermGenerationQuotaManage) {
+		return ErrAdminOnlyPermission
 	}
 	now := time.Now()
 	if r.CreatedAt.IsZero() {

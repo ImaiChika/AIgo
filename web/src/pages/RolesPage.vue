@@ -11,7 +11,7 @@ const loading = ref(false);
 const showCreate = ref(false);
 const editingId = ref("");
 // 分类子题库管理已从当前产品流程撤下；保留后端权限仅用于兼容历史角色数据。
-const hiddenPermissionCodes = new Set(["bank:manage", "question:create"]);
+const hiddenPermissionCodes = new Set(["bank:manage", "question:create", "generation_quota:manage"]);
 
 const form = ref({
   name: "",
@@ -37,7 +37,7 @@ async function loadAll() {
     const groups = {};
     const nameMap = {};
     for (const p of permData.permissions || []) {
-      if (hiddenPermissionCodes.has(p.code)) continue;
+      if (hiddenPermissionCodes.has(p.code) || p.admin_only) continue;
       nameMap[p.code] = permissionName(p);
       if (!groups[p.group]) groups[p.group] = [];
       groups[p.group].push(p);
@@ -151,7 +151,7 @@ onMounted(loadAll);
 
         <div class="perm-picker">
           <h3>角色权限</h3>
-        <p class="perm-picker-hint">命题教师模板默认同时拥有“单题出题”和“批量推理”；自定义命题角色勾选单题出题时会自动补齐批量推理，管理员型角色仍按需配置。</p>
+        <p class="perm-picker-hint">命题教师模板默认同时拥有“单题出题”和“批量推理”；自定义命题角色勾选单题出题时会自动补齐批量推理。生成任务配额仅内置超级管理员和管理员可管理，不在自定义角色中分配。</p>
           <div v-for="g in permGroups" :key="g.group" class="perm-group">
             <div class="perm-group-title">{{ g.group }}权限</div>
             <div class="perm-checks">

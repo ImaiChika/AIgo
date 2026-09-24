@@ -149,7 +149,6 @@ onMounted(load);
           <div class="request-meta">
             <span v-if="item.question.outline_code">大纲 {{ item.question.outline_code }}</span>
             <span v-if="item.question.profession">专业 {{ item.question.profession }}</span>
-            <span>题目 ID {{ item.request.question_id }}</span>
             <AICheckScoreButton class="share-ai-score" :question-id="item.question.id" />
           </div>
           <div class="request-review-history">

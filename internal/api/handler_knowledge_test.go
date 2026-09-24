@@ -5,12 +5,50 @@ import (
 	"aigo/internal/knowledge"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
 
 	"aigo/internal/storage/postgres"
 )
+
+func TestPickerSearchMatchesPointContentWithoutDirectoryExpansion(t *testing.T) {
+	server, store, cleanup := authHandlerTestServer(t)
+	defer cleanup()
+	server.kpSvc = knowledge.NewService(store)
+	handler := server.Handler()
+	admin := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.11")
+	created := serveAuthJSON(t, handler, "POST", "/api/knowledge-versions", admin, "198.51.100.11", map[string]any{"name": "检索测试", "year": 2026})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create version: %d %s", created.Code, created.Body)
+	}
+	var version domain.KnowledgeVersion
+	if err := json.Unmarshal(created.Body.Bytes(), &version); err != nil {
+		t.Fatal(err)
+	}
+	for _, point := range []struct{ topic, code string }{{"骨折治疗", "001"}, {"肌肉功能", "002"}} {
+		response := serveAuthJSON(t, handler, "POST", "/api/knowledge-points", admin, "198.51.100.11", map[string]any{
+			"version_id": version.ID, "category": "临床综合", "subject": "外科", "unit": "骨科", "topic": point.topic, "outline_code": point.code,
+		})
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create point: %d %s", response.Code, response.Body)
+		}
+	}
+	query := "/api/knowledge-points/search?version_id=" + url.QueryEscape(version.ID) + "&q=" + url.QueryEscape("骨")
+	for _, tc := range []struct {
+		suffix string
+		want   int
+	}{{"", 2}, {"&match=topic", 1}} {
+		response := serveAuthJSON(t, handler, "GET", query+tc.suffix, admin, "198.51.100.11", nil)
+		var body struct {
+			Total int `json:"total"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &body) != nil || body.Total != tc.want {
+			t.Fatalf("search %s: status=%d total=%d want=%d body=%s", tc.suffix, response.Code, body.Total, tc.want, response.Body)
+		}
+	}
+}
 
 func TestKnowledgeVersionAPIAndPermissions(t *testing.T) {
 	server, store, cleanup := authHandlerTestServer(t)

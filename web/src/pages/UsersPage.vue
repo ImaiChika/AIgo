@@ -9,7 +9,7 @@ const users = ref([]);
 const roles = ref([]);
 const permGroups = ref([]);
 // 分类子题库管理已从当前产品流程撤下；历史权限只在后端保留兼容。
-const hiddenPermissionCodes = new Set(["bank:manage", "question:create"]);
+const hiddenPermissionCodes = new Set(["bank:manage", "question:create", "generation_quota:manage"]);
 const loading = ref(false);
 const showCreate = ref(false);
 const expandedRow = ref(""); // 展开权限矩阵的用户ID
@@ -63,7 +63,7 @@ async function loadAll() {
     // 按分组整理权限点
     const groups = {};
     for (const p of permData.permissions || []) {
-      if (hiddenPermissionCodes.has(p.code)) continue;
+      if (hiddenPermissionCodes.has(p.code) || p.admin_only) continue;
       if (!groups[p.group]) groups[p.group] = [];
       groups[p.group].push(p);
     }

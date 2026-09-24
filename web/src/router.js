@@ -12,12 +12,14 @@ import ReviewFlowPage from "./pages/ReviewFlowPage.vue";
 import AuditPage from "./pages/AuditPage.vue";
 import UsersPage from "./pages/UsersPage.vue";
 import BatchPage from "./pages/BatchPage.vue";
+import BatchHistoryPage from "./pages/BatchHistoryPage.vue";
 import StatsPage from "./pages/StatsPage.vue";
 import RolesPage from "./pages/RolesPage.vue";
 import ReviewResultsPage from "./pages/ReviewResultsPage.vue";
 import ReviewDecisionsPage from "./pages/ReviewDecisionsPage.vue";
 import ShareRequestsPage from "./pages/ShareRequestsPage.vue";
 import AIProviderPage from "./pages/AIProviderPage.vue";
+import GenerationQuotaPage from "./pages/GenerationQuotaPage.vue";
 import MyDashboardPage from "./pages/MyDashboardPage.vue";
 import PersonalSettingsPage from "./pages/PersonalSettingsPage.vue";
 import NewQuestionsPage from "./pages/NewQuestionsPage.vue";
@@ -32,6 +34,7 @@ const routes = [
     { path: "batch", name: "generation-batch", component: BatchPage, meta: { title: "批量推理", perm: "batch:run" } },
   ] },
   { path: "/new-questions", component: NewQuestionsPage, meta: { title: "新题修改与提交审核", perm: "review:submit" } },
+  { path: "/batch-history", component: BatchHistoryPage, meta: { title: "历史出题记录", perm: ["batch:run", "question:view_global"] } },
   { path: "/knowledge", component: KnowledgePage, meta: { title: "考试大纲" } },
   { path: "/review", component: ReviewPage, meta: { title: "待我审核", perm: "review:do" } },
   { path: "/my-revisions", component: MyRevisionsPage, meta: { title: "待我修改", perm: "question:edit" } },
@@ -48,6 +51,7 @@ const routes = [
   { path: "/users", component: UsersPage, meta: { title: "用户管理", perm: "user:manage" } },
   { path: "/roles", component: RolesPage, meta: { title: "角色管理", perm: "role:manage" } },
   { path: "/system/ai-providers", component: AIProviderPage, meta: { title: "AI 服务配置", perm: "role:manage" } },
+  { path: "/system/generation-quota", component: GenerationQuotaPage, meta: { title: "生成任务配额", perm: "generation_quota:manage" } },
 ];
 
 const router = createRouter({

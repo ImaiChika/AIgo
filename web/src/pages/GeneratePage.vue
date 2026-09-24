@@ -533,7 +533,7 @@ onBeforeUnmount(() => {
     <span>{{ accessNotice }}</span>
     <button type="button" aria-label="关闭提示" @click="accessNotice = ''">×</button>
   </div>
-  <div class="main-grid">
+  <div class="main-grid single-generation-grid">
     <div class="editor-column">
       <!-- 多题切换（检查落定后才出现；检查中被淘汰的题自动移出） -->
       <section v-if="checksSettled && displayQuestions.length" class="panel question-nav">
@@ -670,7 +670,7 @@ onBeforeUnmount(() => {
         <!-- 知识点选择器（精确+模糊搜索，单选） -->
         <div class="kp-selector">
           <label class="field-label">选择大纲要点</label>
-          <KnowledgePointPicker v-model="selectedKPs" :multiple="false" placeholder="搜索大纲要点、大纲代码、专业...（支持精确筛选与模糊搜索）" @version-change="handleKnowledgeVersionChange" />
+          <KnowledgePointPicker v-model="selectedKPs" :multiple="false" placeholder="搜索考点内容或大纲代码..." @version-change="handleKnowledgeVersionChange" />
         </div>
 
         <label class="field">
@@ -745,6 +745,9 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.single-generation-grid { grid-template-columns: minmax(0, 1fr) minmax(470px, 540px); }
+@media (max-width: 1450px) { .single-generation-grid .workflow-rail { grid-template-columns: minmax(0, 1fr); } .single-generation-grid .workflow-step { min-height: 0; } }
+@media (max-width: 1320px) { .single-generation-grid { grid-template-columns: minmax(0, 1fr); } .single-generation-grid .sticky-panel { position: static; } }
 .permission-notice {
   display: flex;
   align-items: flex-start;

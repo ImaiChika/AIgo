@@ -70,10 +70,6 @@ function closeModal() {
 
           <p v-if="result.suggestion" class="asm-suggestion">{{ result.suggestion }}</p>
 
-          <p class="asm-meta">
-            检查时间：{{ result.created_at ? new Date(result.created_at).toLocaleString() : "-" }}
-            <template v-if="result.model"> · 模型：{{ result.model }}</template>
-          </p>
         </div>
       </div>
     </div>
@@ -228,11 +224,4 @@ function closeModal() {
   font-weight: 600;
 }
 
-.asm-meta {
-  margin: 0;
-  padding-top: 8px;
-  font-size: 11px;
-  color: #777;
-  border-top: 1px solid #eee;
-}
 </style>

@@ -431,6 +431,19 @@ func (s *MemoryStore) GetGenerationRun(_ context.Context, id string) (*domain.Ge
 	return &run, nil
 }
 
+func (s *MemoryStore) RecordGenerationRunQuestionIDs(_ context.Context, id string, questionIDs []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, ok := s.generationRuns[id]
+	if !ok || run.Status != domain.GenerationRunRunning {
+		return nil
+	}
+	run.QuestionIDs = append([]string(nil), questionIDs...)
+	run.UpdatedAt = time.Now()
+	s.generationRuns[id] = run
+	return nil
+}
+
 // ClaimNextGenerationRun 抢占 pending 或租约过期的 running 运行，语义与 PostgreSQL 实现一致。
 func (s *MemoryStore) ClaimNextGenerationRun(_ context.Context, lease time.Duration) (*domain.GenerationRun, []byte, error) {
 	s.mu.Lock()

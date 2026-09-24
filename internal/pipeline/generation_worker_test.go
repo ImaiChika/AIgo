@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"aigo/internal/domain"
 	"aigo/internal/generator"
 	"aigo/internal/llm"
+	"aigo/internal/storage"
 	"aigo/internal/storage/testutil"
 )
 
@@ -47,6 +49,46 @@ type recordingAudit struct{ created []string }
 func (r *recordingAudit) LogCreate(_ context.Context, questionID, _ string) error {
 	r.created = append(r.created, questionID)
 	return nil
+}
+
+type quotaTransitionChecker struct {
+	runs     storage.GenerationRunStore
+	runID    string
+	observed chan error
+}
+
+func (c *quotaTransitionChecker) CheckAsync(ids ...string) {
+	run, err := c.runs.GetGenerationRun(context.Background(), c.runID)
+	if err == nil && (run == nil || run.Status != domain.GenerationRunRunning || len(run.QuestionIDs) != len(ids)) {
+		err = fmt.Errorf("check queued before running question IDs were recorded: run=%+v ids=%v", run, ids)
+	}
+	if err == nil {
+		for i := range ids {
+			if run.QuestionIDs[i] != ids[i] {
+				err = fmt.Errorf("recorded IDs mismatch: %v vs %v", run.QuestionIDs, ids)
+				break
+			}
+		}
+	}
+	c.observed <- err
+}
+
+func TestGenerationWorkerRecordsIDsBeforeFirstCheck(t *testing.T) {
+	p := newWorkerPipeline(&fakeLLM{}, &recordingBanks{}, &recordingAudit{})
+	checker := &quotaTransitionChecker{runs: p.runs, runID: "quota-transition", observed: make(chan error, 1)}
+	p.SetDraftChecker(checker)
+	submitTestRun(t, p, checker.runID)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.StartGenerationWorkers(ctx, 1)
+	select {
+	case err := <-checker.observed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not queue first check")
+	}
 }
 
 func submitTestRun(t *testing.T, p *Pipeline, runID string) {

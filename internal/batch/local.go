@@ -384,12 +384,19 @@ func (s *LocalExecutor) RetryFailed(ctx context.Context, jobID string) (*BatchJo
 	}
 	units := flattenUnits(points, countPerPoint)
 	// 标记回执行中；前端据此恢复轮询，完成后再走导入流程。
-	if err := s.batchJobStore.UpdateBatchJob(ctx, func() storage.BatchJobRecord {
+	reactivation := func() storage.BatchJobRecord {
 		record := *stored
 		record.Status = "in_progress"
+		record.Failed = 0 // 失败项重新成为未完成单元，供准入与进度计数使用。
 		record.FinishedAt = ""
 		return record
-	}()); err != nil {
+	}()
+	if admitter, ok := s.batchJobStore.(storage.BatchJobRetryAdmitter); ok {
+		err = admitter.ReactivateBatchJob(ctx, reactivation)
+	} else {
+		err = s.batchJobStore.UpdateBatchJob(ctx, reactivation)
+	}
+	if err != nil {
 		return nil, err
 	}
 	go s.runQueue(jobID, units, pending, output)
@@ -475,6 +482,22 @@ func (s *LocalExecutor) ListJobs(ctx context.Context, name, status string, limit
 	return result, nil
 }
 
+func (s *LocalExecutor) ListJobsPage(ctx context.Context, ownerID, name, status string, limit, offset int) ([]BatchJob, int, error) {
+	pager, ok := s.batchJobStore.(storage.BatchJobHistoryStore)
+	if !ok {
+		return nil, 0, ErrUnavailable
+	}
+	records, total, err := pager.ListBatchJobsPage(ctx, ownerID, name, status, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	jobs := make([]BatchJob, 0, len(records))
+	for _, record := range records {
+		jobs = append(jobs, localBatchJob(record))
+	}
+	return jobs, total, nil
+}
+
 func (s *LocalExecutor) ImportResults(ctx context.Context, jobID string, _ []domain.KnowledgePoint) (*ImportResult, error) {
 	stored, err := s.batchJobStore.GetBatchJob(ctx, jobID)
 	if err != nil {
@@ -520,14 +543,14 @@ func (s *LocalExecutor) ImportResults(ctx context.Context, jobID string, _ []dom
 		result.Saved++
 		result.QuestionIDs = append(result.QuestionIDs, question.ID)
 	}
-	payload, _ := json.Marshal(result)
-	if err := s.batchJobStore.SaveBatchJobImportResult(ctx, jobID, string(payload)); err != nil {
-		return nil, err
-	}
 	// 导入即检查：落库成功的题目立刻排队首次 AI 质量检查（幂等，重复导入重放不重复入队）。
 	// 触发点在执行器内部而非调用方 handler，保证 Web 与 CLI 两条链路行为一致。
 	if s.checker != nil && len(result.QuestionIDs) > 0 {
 		s.checker.CheckAsync(result.QuestionIDs...)
+	}
+	payload, _ := json.Marshal(result)
+	if err := s.batchJobStore.SaveBatchJobImportResult(ctx, jobID, string(payload)); err != nil {
+		return nil, err
 	}
 	return result, nil
 }

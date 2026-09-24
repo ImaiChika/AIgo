@@ -148,7 +148,6 @@ function difficultyText(d) {
         <span v-if="question.difficulty" class="q-param"><label>难度</label>{{ difficultyText(question.difficulty) }}</span>
         <span v-if="question.cognitive_level" class="q-param"><label>认知层次</label>{{ question.cognitive_level }}</span>
 	      <span class="q-param"><label>状态</label><b :class="statusClass(question.status)">{{ statusText(question.status) }}</b></span>
-        <span class="q-param"><label>版本</label>v{{ question.version }}</span>
       </div>
 
       <div v-if="question.exam_points" class="q-block">
@@ -216,15 +215,7 @@ function difficultyText(d) {
             </li>
           </ul>
           <p v-if="aiResult.suggestion" class="q-ai-suggestion">建议：{{ aiResult.suggestion }}</p>
-          <p class="q-ai-time">检查时间：{{ aiResult.created_at ? new Date(aiResult.created_at).toLocaleString() : "-" }}<span v-if="aiResult.model"> · 模型：{{ aiResult.model }}</span></p>
         </template>
-      </div>
-
-      <div class="q-block q-meta">
-        <label>元信息</label>
-        <p>ID：{{ question.id }}</p>
-        <p>创建：{{ question.created_at ? new Date(question.created_at).toLocaleString() : "-" }}</p>
-        <p>更新：{{ question.updated_at ? new Date(question.updated_at).toLocaleString() : "-" }}</p>
       </div>
     </div>
   </div>
@@ -387,12 +378,6 @@ function difficultyText(d) {
   padding: 2px 0;
 }
 
-.q-meta p {
-  margin: 2px 0;
-  font-size: 12px;
-  color: #6e7b8f;
-}
-
 .q-ai {
   border: 1px solid #dce8f7;
   background: #f8fbff;
@@ -486,9 +471,4 @@ function difficultyText(d) {
   color: #3a4658;
 }
 
-.q-ai-time {
-  margin: 0;
-  font-size: 11px;
-  color: #9aa5b4;
-}
 </style>

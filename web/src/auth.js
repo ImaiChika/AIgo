@@ -29,6 +29,7 @@ const permissionNames = {
   "batch:run": "批量推理",
   "stats:view": "数据统计",
   "flow:manage": "审核流程",
+  "generation_quota:manage": "生成任务配额",
   "review:view_results": "审核记录",
   "question:view_formal": "查看正式题库",
   "question:delete_formal": "删除正式题库题目",
@@ -42,6 +43,7 @@ export function permissionName(permission) {
 
 // 当前用户是否拥有某权限（user.permissions 为后端计算的有效权限并集）
 export function hasPerm(p) {
+  if (p === "generation_quota:manage" && !["super_admin", "admin"].includes(user.value?.role)) return false;
   return (user.value?.permissions || []).includes(p);
 }
 

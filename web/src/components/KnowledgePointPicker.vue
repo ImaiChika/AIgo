@@ -1,8 +1,11 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount, nextTick, useId, computed } from "vue";
+import { ref, onMounted, onBeforeUnmount, nextTick, useId, computed, watch } from "vue";
 import { api } from "../api.js";
 import KnowledgeVersionDialog from "./KnowledgeVersionDialog.vue";
+import KnowledgePickerTreeNode from "./KnowledgePickerTreeNode.vue";
+import SelectedKnowledgeTreeNode from "./SelectedKnowledgeTreeNode.vue";
 import { subscribeKnowledgeVersions } from "../knowledgeVersions.js";
+import { buildSelectedTree, isWithinPath, pathKey, selectedCountsByPath } from "../knowledgePickerTree.js";
 
 // 大纲要点选择器：模糊搜索（关键词）+ 精确筛选（分类/专业/大纲代码前缀）+ 分页 + 多选勾选
 // 支持单选（multiple=false）与多选（multiple=true），已选项以标签展示可移除，
@@ -10,7 +13,7 @@ import { subscribeKnowledgeVersions } from "../knowledgeVersions.js";
 const props = defineProps({
   modelValue: { type: Array, default: () => [] }, // 已选知识点数组
   multiple: { type: Boolean, default: true },      // 是否多选
-  placeholder: { type: String, default: "搜索大纲要点、大纲代码、专业..." },
+  placeholder: { type: String, default: "搜索考点内容或大纲代码..." },
 });
 const emit = defineEmits(["update:modelValue", "version-change"]);
 
@@ -24,10 +27,22 @@ const addingCodes = ref(false);
 const pickerId = useId();
 let searchTicket = 0, metaTicket = 0;
 const keyword = ref("");
-const subject = ref("");
-const category = ref("");
 const outlineCode = ref("");
-const meta = ref({ categories: [], subjects: [] });
+const tree = ref([]);
+const treeLoading = ref(false);
+const treeError = ref("");
+const expanded = ref(new Set());
+const activePath = ref([]);
+const busyGroupId = ref("");
+let groupTicket = 0;
+const selectedIdSet = computed(() => new Set(props.modelValue.map(point => point.id)));
+const selectedCounts = computed(() => selectedCountsByPath(props.modelValue));
+const selectedTree = computed(() => buildSelectedTree(props.modelValue));
+const selectedRootPage = ref(1);
+const selectedRootPages = computed(() => Math.max(1, Math.ceil(selectedTree.value.length / 20)));
+const visibleSelectedRoots = computed(() => selectedTree.value.slice((selectedRootPage.value - 1) * 20, selectedRootPage.value * 20));
+const activeDirectory = computed(() => activePath.value.length ? activePath.value.join(" / ") : "全部大纲要点");
+watch(selectedRootPages, pages => { if (selectedRootPage.value > pages) selectedRootPage.value = pages; });
 
 const results = ref([]);
 const total = ref(0);
@@ -51,21 +66,66 @@ function showToast(msg) {
 }
 
 function isSelected(kp) {
-  return props.modelValue.some((x) => x.id === kp.id);
+  return selectedIdSet.value.has(kp.id);
 }
 
-function selectedIds() {
-  return props.modelValue.map((x) => x.id);
+function toggleDirectory(id) {
+  const next = new Set(expanded.value);
+  if (next.has(id)) next.delete(id); else next.add(id);
+  expanded.value = next;
+}
+
+function openDirectory(node) {
+  activePath.value = [...node.path];
+  search(1);
+}
+
+async function toggleGroup(node) {
+  if (busyGroupId.value) return;
+  const count = selectedCounts.value.get(pathKey(node.path)) || 0;
+  if (node.count > 0 && count >= node.count) {
+    emit("update:modelValue", props.modelValue.filter(point => !isWithinPath(point, node.path)));
+    return;
+  }
+  const ticket = ++groupTicket;
+  const selectedVersion = versionId.value;
+  const params = { version_id: selectedVersion, path: JSON.stringify(node.path), page_size: 200 };
+  busyGroupId.value = node.id;
+  try {
+    const first = await api.searchKPFiltered({ ...params, page: 1 });
+    const pages = Math.ceil(first.total / 200);
+    const points = [...(first.points || [])];
+    for (let next = 2; next <= pages; next += 4) {
+      const batch = await Promise.all(Array.from({ length: Math.min(4, pages - next + 1) }, (_, index) =>
+        api.searchKPFiltered({ ...params, page: next + index })));
+      for (const response of batch) points.push(...(response.points || []));
+      if (ticket !== groupTicket || selectedVersion !== versionId.value) return;
+    }
+    if (ticket !== groupTicket || selectedVersion !== versionId.value) return;
+    const unique = new Map(points.map(point => [point.id, point]));
+    if (first.total !== node.count || unique.size !== first.total) {
+      treeError.value = "大纲目录已更新，请刷新页面后重新选择。";
+      showToast(treeError.value);
+      return;
+    }
+    const merged = new Map(props.modelValue.map(point => [point.id, point]));
+    for (const point of unique.values()) merged.set(point.id, point);
+    emit("update:modelValue", [...merged.values()]);
+  } catch (error) {
+    if (ticket === groupTicket) showToast("整组选择失败：" + error.message);
+  } finally {
+    if (ticket === groupTicket) busyGroupId.value = "";
+  }
+}
+
+function removeSelectedGroup(path) {
+  emit("update:modelValue", props.modelValue.filter(point => !isWithinPath(point, path)));
 }
 
 // 搜索（防抖 300ms，避免卡顿）
 function onKeywordInput() {
   window.clearTimeout(debounceTimer);
   debounceTimer = window.setTimeout(() => search(1), 300);
-}
-
-function onFilterChange() {
-  search(1);
 }
 
 async function search(p = 1) {
@@ -76,9 +136,9 @@ async function search(p = 1) {
     const data = await api.searchKPFiltered({
       version_id: versionId.value,
       q: keyword.value.trim(),
-      subject: subject.value,
-      category: category.value,
+      match: "topic",
       outline_code: outlineCode.value.trim(),
+      ...(activePath.value.length ? { path: JSON.stringify(activePath.value) } : {}),
       page: p,
       page_size: 50,
     });
@@ -169,24 +229,39 @@ async function addByCodes() {
 
 async function changeVersion() {
   const ticket = ++metaTicket;
-  ++searchTicket;
+  ++searchTicket; ++groupTicket;
   results.value = []; total.value = 0; page.value = 1;
-  keyword.value = ""; subject.value = ""; category.value = ""; outlineCode.value = ""; codeInput.value = "";
+  keyword.value = ""; outlineCode.value = ""; codeInput.value = "";
+  tree.value = []; treeError.value = ""; treeLoading.value = false; expanded.value = new Set(); activePath.value = []; busyGroupId.value = ""; selectedRootPage.value = 1;
   emit("update:modelValue", []);
-  meta.value = { categories: [], subjects: [] };
   pageCount.value = 1; showResults.value = true; loading.value = false;
   notifyVersionChange();
   if (!versionId.value) return;
-  try { const data = await api.kpMeta(versionId.value); if (ticket !== metaTicket) return; meta.value = data; }
-  catch (e) { if (ticket === metaTicket) { if (e.status === 404) { await loadVersions(); return; } showToast(e.message); } }
+  if (ticket === metaTicket) {
+    treeLoading.value = true;
+    try {
+      const data = await api.kpTree(versionId.value);
+      if (ticket !== metaTicket) return;
+      tree.value = data.tree || [];
+    } catch (e) {
+      if (ticket !== metaTicket) return;
+      if (e.status === 404) { await loadVersions(); return; }
+      treeError.value = "大纲目录加载失败：" + e.message;
+    } finally { if (ticket === metaTicket) treeLoading.value = false; }
+  }
   if (ticket === metaTicket) search(1);
 }
 
 function reset() {
+  ++groupTicket;
+  busyGroupId.value = "";
+  emit("update:modelValue", []);
   keyword.value = "";
-  subject.value = "";
-  category.value = "";
   outlineCode.value = "";
+  codeInput.value = "";
+  activePath.value = [];
+  expanded.value = new Set();
+  selectedRootPage.value = 1;
   search(1);
 }
 
@@ -208,7 +283,7 @@ async function chooseVersion(id) {
   versionId.value = id; await changeVersion();
 }
 onMounted(async () => { await loadVersions(); if (!disposed) unsubscribeVersions = subscribeKnowledgeVersions(loadVersions); });
-onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTicket++; metaTicket++; versionsTicket++; unsubscribeVersions?.(); });
+onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTicket++; metaTicket++; versionsTicket++; groupTicket++; unsubscribeVersions?.(); });
 </script>
 
 <template>
@@ -219,23 +294,28 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTick
     <!-- 搜索区：模糊 + 精确 -->
     <div class="kp-search-row">
       <input v-model="keyword" :placeholder="props.placeholder" @input="onKeywordInput" class="kp-input" />
-      <select v-model="category" @change="onFilterChange" class="kp-select" title="按分类精确筛选">
-        <option value="">全部分类</option>
-        <option v-for="c in meta.categories" :key="c" :value="c">{{ c }}</option>
-      </select>
-      <select v-model="subject" @change="onFilterChange" class="kp-select" title="按专业精确筛选">
-        <option value="">全部专业</option>
-        <option v-for="s in meta.subjects" :key="s" :value="s">{{ s }}</option>
-      </select>
       <input v-model="outlineCode" placeholder="大纲代码前缀" @input="onKeywordInput" class="kp-input kp-code-input" />
       <button class="kp-btn" type="button" @click="search(1)" :disabled="loading || !versionId">{{ loading ? "搜索中..." : "搜索" }}</button>
       <button class="kp-btn ghost" type="button" @click="reset">重置</button>
     </div>
 
-    <!-- 结果区（分页 + 勾选） -->
-    <div v-if="showResults" class="kp-results">
+    <!-- 两种出题模式共用目录树；批量页可勾选目录，单题页只从右侧选一道考点。 -->
+    <div class="kp-browser" :class="{ multiple, single: !multiple }">
+      <aside class="kp-directory" aria-label="大纲目录">
+        <div class="kp-directory-head"><strong>大纲目录</strong><button type="button" @click="activePath = []; search(1)">全部考点</button></div>
+        <p class="kp-directory-hint">{{ multiple ? '展开目录查看子项；勾选目录可选择该目录下全部考点。' : '展开目录，点击分类或科室查看下级考点。' }}</p>
+        <p v-if="treeLoading" class="kp-loading">目录加载中...</p>
+        <p v-else-if="treeError" class="kp-empty" role="alert">{{ treeError }}</p>
+        <p v-else-if="!tree.length" class="kp-empty">当前版本暂无目录</p>
+        <ul v-else class="kp-directory-list">
+          <KnowledgePickerTreeNode v-for="node in tree" :key="node.id" :node="node" :expanded="expanded" :selected-counts="selectedCounts" :active-key="pathKey(activePath)" :busy-id="busyGroupId" :show-checkbox="multiple" @toggle="toggleDirectory" @open="openDirectory" @select-group="toggleGroup" />
+        </ul>
+        <p v-if="busyGroupId" class="kp-group-progress" role="status">正在读取本组全部考点，完成后统一加入...</p>
+      </aside>
+    <div v-if="showResults" class="kp-results" :class="{ 'kp-results-multiple': multiple }">
       <div class="kp-results-head">
-        <span>共 {{ total }} 个大纲要点</span>
+        <strong>{{ activeDirectory }}</strong>
+        <span>共 {{ total }} 个大纲要点 · 每页 50 个</span>
       </div>
       <div ref="resultsScroll" class="kp-results-scroll">
         <div v-if="loading" class="kp-loading">搜索中...</div>
@@ -244,7 +324,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTick
           <label v-for="kp in results" :key="kp.id" class="kp-item" :class="{ checked: isSelected(kp) }">
             <input :type="multiple ? 'checkbox' : 'radio'" :name="`${pickerId}-point`" :checked="isSelected(kp)" @change="toggleSelect(kp)" class="kp-checkbox" />
             <span class="kp-item-main">
-              <span class="kp-topic">{{ kp.topic }}</span>
+              <span class="kp-topic" :title="kp.topic">{{ kp.topic }}</span>
               <span class="kp-sub">{{ kp.subject }}</span>
               <code class="kp-code">{{ kp.outline_code }}</code>
             </span>
@@ -267,11 +347,18 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTick
         <span class="kp-page-info">第 {{ page }} / {{ pageCount }} 页</span>
       </div>
     </div>
+    </div>
 
     <!-- 已选区 -->
     <div v-if="modelValue.length" class="kp-selected">
-      <div class="kp-selected-title">已选 {{ modelValue.length }} 个大纲要点：</div>
-      <div class="kp-tags">
+      <div class="kp-selected-title"><strong>已选 {{ modelValue.length }} 个大纲要点</strong><span v-if="multiple">按大类汇总，展开后可逐级查看与移除</span></div>
+      <template v-if="multiple">
+        <ul class="kp-selected-tree">
+          <SelectedKnowledgeTreeNode v-for="node in visibleSelectedRoots" :key="node.key" :node="node" @remove="removeSelected" @remove-group="removeSelectedGroup" />
+        </ul>
+        <div v-if="selectedRootPages > 1" class="kp-pagination"><button class="kp-page-btn" type="button" :disabled="selectedRootPage <= 1" @click="selectedRootPage--">‹</button><span class="kp-page-info">分类 {{ selectedRootPage }} / {{ selectedRootPages }}</span><button class="kp-page-btn" type="button" :disabled="selectedRootPage >= selectedRootPages" @click="selectedRootPage++">›</button></div>
+      </template>
+      <div v-else class="kp-tags">
         <span v-for="kp in modelValue" :key="kp.id" class="kp-tag">
           {{ kp.topic }}
           <code>{{ kp.outline_code }}</code>
@@ -299,7 +386,21 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTick
 .kp-picker {
   display: grid;
   gap: 8px;
+  min-width: 0;
 }
+
+.kp-browser { min-width: 0; }
+.kp-browser.multiple { display: grid; grid-template-columns: minmax(245px, 31%) minmax(0, 1fr); gap: 10px; align-items: stretch; }
+.kp-browser.single { display: grid; grid-template-columns: minmax(190px, 42%) minmax(0, 1fr); gap: 8px; align-items: stretch; }
+.kp-browser.single .kp-results { max-height: 365px; }
+.kp-browser.single .kp-directory-list { max-height: 300px; }
+.kp-directory { min-width: 0; border: 1px solid #dce8f7; border-radius: 8px; background: #fbfdff; padding: 9px; display: flex; flex-direction: column; }
+.kp-directory-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 4px 6px; }
+.kp-directory-head strong { font-size: 13px; color: #264866; }
+.kp-directory-head button { border: 0; background: transparent; color: #167bd6; cursor: pointer; font-size: 12px; }
+.kp-directory-hint { margin: 0 4px 7px; color: #7b8da1; font-size: 11px; line-height: 1.5; }
+.kp-directory-list { list-style: none; margin: 0; padding: 0 3px 0 0; overflow-y: auto; max-height: 322px; scrollbar-gutter: stable; }
+.kp-group-progress { margin: 6px 4px 0; color: #0871be; font-size: 11px; }
 
 .kp-search-row {
   display: flex;
@@ -363,7 +464,11 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTick
   max-height: 320px;
   overflow: hidden;
   background: #fff;
+  min-width: 0;
 }
+
+.kp-results-multiple { max-height: 420px; }
+.kp-results-multiple .kp-results-scroll { min-height: 300px; }
 
 .kp-results-head {
   flex: 0 0 auto;
@@ -371,6 +476,8 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTick
   color: #6e7b8f;
   padding: 0 4px 6px;
 }
+.kp-results-multiple .kp-results-head { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.kp-results-head strong { color: #294c6f; font-weight: 600; }
 
 .kp-results-scroll {
   flex: 1 1 auto;
@@ -384,7 +491,9 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTick
 
 .kp-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 4px;
+  min-width: 0;
 }
 
 .kp-item {
@@ -395,6 +504,8 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTick
   border-radius: 6px;
   cursor: pointer;
   border: 1px solid transparent;
+  min-width: 0;
+  width: 100%;
 }
 
 .kp-item:hover {
@@ -432,6 +543,10 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTick
   min-width: 0;
 }
 
+.kp-browser:not(.multiple) .kp-item { align-items: flex-start; }
+.kp-browser:not(.multiple) .kp-item-main { flex-wrap: wrap; gap: 2px 6px; }
+.kp-browser:not(.multiple) .kp-topic { flex: 1 0 100%; white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+
 .kp-topic {
   font-size: 13px;
   color: #172033;
@@ -453,6 +568,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTick
   padding: 1px 5px;
   border-radius: 3px;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .kp-loading, .kp-empty {
@@ -506,12 +622,18 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTick
   border-radius: 8px;
   padding: 8px;
 }
+.kp-selected-tree { list-style: none; margin: 0; padding: 0; max-height: 400px; overflow-y: auto; scrollbar-gutter: stable; background: #fff; border: 1px solid #e4edf7; border-radius: 6px; }
 
 .kp-selected-title {
   font-size: 12px;
   color: #6e7b8f;
   margin-bottom: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  align-items: baseline;
 }
+.kp-selected-title strong { color: #2a4e71; font-size: 13px; }
 
 .kp-tags {
   display: flex;
@@ -545,6 +667,13 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(debounceTimer); searchTick
   line-height: 1;
   padding: 0 2px;
 }
+
+@media (max-width: 800px) {
+  .kp-browser.multiple { grid-template-columns: minmax(0, 1fr); }
+  .kp-directory-list { max-height: 245px; }
+  .kp-results-multiple .kp-results-scroll { min-height: 0; }
+}
+@media (max-width: 700px) { .kp-browser.single { grid-template-columns: minmax(0, 1fr); } }
 
 .kp-code-add {
   display: flex;

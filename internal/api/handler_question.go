@@ -50,6 +50,21 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	if req.Count <= 0 {
 		req.Count = 1
 	}
+	// 先按当前配置拒绝超大请求，数据库写入时再原子检查全部配额。
+	if s.quotaStore != nil {
+		quota, _, err := s.quotaStore.GetGenerationQuota(r.Context())
+		if err != nil {
+			writeError(w, 503, "读取生成任务配额失败")
+			return
+		}
+		if req.Count > quota.SingleMaxQuestions {
+			writeGenerationQuotaError(w, &storage.GenerationQuotaError{Message: fmt.Sprintf("单次最多生成 %d 道题，请减少题数", quota.SingleMaxQuestions)})
+			return
+		}
+	} else if req.Count > storage.DefaultGenerationQuota().SingleMaxQuestions {
+		writeGenerationQuotaError(w, &storage.GenerationQuotaError{Message: "单次最多生成 20 道题，请减少题数"})
+		return
+	}
 	if req.Subject == "" {
 		req.Subject = "临床医学"
 	}
@@ -127,6 +142,9 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		RequestedCount: req.Count, StartedAt: startedAt, MaxAttempts: 3, RequestJSON: specJSON,
 	})
 	if err != nil {
+		if writeGenerationQuotaError(w, err) {
+			return
+		}
 		writeError(w, 500, "创建命题运行记录失败")
 		return
 	}

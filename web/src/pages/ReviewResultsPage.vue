@@ -294,8 +294,6 @@ onMounted(() => {
                 <span v-if="item.question.system" class="q-param"><label>系统</label>{{ item.question.system }}</span>
                 <span class="q-param"><label>难度</label>{{ difficultyText(item.question.difficulty) }}</span>
                 <span v-if="item.question.cognitive_level" class="q-param"><label>认知层次</label>{{ item.question.cognitive_level }}</span>
-                <span class="q-param"><label>版本</label>v{{ item.question.version }}</span>
-                <span class="q-param"><label>ID</label>{{ item.question.id }}</span>
               </div>
               <div v-if="item.question.exam_points" class="q-sub">
                 <label>考核要点</label>{{ item.question.exam_points }}

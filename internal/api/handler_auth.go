@@ -161,7 +161,7 @@ func (s *Server) handleSwitchRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
-	if s.auditSvc != nil {
+	if s.auditSvc != nil && role != auth.GetRole(r.Context()) {
 		_ = s.auditSvc.Log(r.Context(), "", "auth_switch_role", auth.GetUsername(r.Context()),
 			fmt.Sprintf("切换工作身份 → %s", role))
 	}

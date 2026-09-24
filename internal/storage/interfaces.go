@@ -233,6 +233,9 @@ type QuestionStore interface {
 type GenerationRunStore interface {
 	CreateGenerationRun(ctx context.Context, run domain.GenerationRun) (bool, error)
 	GetGenerationRun(ctx context.Context, id string) (*domain.GenerationRun, error)
+	// RecordGenerationRunQuestionIDs 在首检入队前记录已落库题目，供准入统计在
+	// 单题生成与首检短暂交叠时按同一道题去重；运行状态仍保持 running。
+	RecordGenerationRunQuestionIDs(ctx context.Context, id string, questionIDs []string) error
 	CompleteGenerationRun(ctx context.Context, id string, questionIDs []string) error
 	FailGenerationRun(ctx context.Context, id, message string) error
 	// ClaimNextGenerationRun 抢占下一个可执行运行（pending 且到达可重试时间，
@@ -438,6 +441,11 @@ type BatchJobStore interface {
 	SaveBatchJobImportResult(ctx context.Context, id string, resultJSON string) error
 	// ReleaseBatchJobImport 释放导入标记；仅用于尚未写入任何题目的前置失败（如下载失败），允许重试。
 	ReleaseBatchJobImport(ctx context.Context, id string) error
+}
+
+// BatchJobHistoryStore 为历史页提供按归属人过滤的服务端分页；不改变批量执行器的写入接口。
+type BatchJobHistoryStore interface {
+	ListBatchJobsPage(ctx context.Context, ownerID, name, status string, limit, offset int) ([]BatchJobRecord, int, error)
 }
 
 // AIReviewStore AI 检查结果存储接口。

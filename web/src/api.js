@@ -112,6 +112,8 @@ export const api = {
 
   // 系统级 AI 服务配置（仅超级管理员，API Key 由后端脱敏返回）
   listAIProviders: () => request("/system/ai-providers"),
+  generationQuota: () => request("/system/generation-quota"),
+  saveGenerationQuota: (quota) => request("/system/generation-quota", { method: "PUT", body: JSON.stringify(quota) }),
   createAIProvider: (data) => request("/system/ai-providers", { method: "POST", body: JSON.stringify(data) }),
   updateAIProvider: (id, data) => request(`/system/ai-providers/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(data) }),
   activateAIProvider: (id) => request(`/system/ai-providers/${encodeURIComponent(id)}/activate`, { method: "POST" }),
@@ -342,6 +344,10 @@ export const api = {
   batchList: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/batch/list?${qs}`);
+  },
+  batchHistory: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/batch/history?${qs}`);
   },
   batchStatus: (jobId) =>
     request(`/batch/status/${jobId}`),

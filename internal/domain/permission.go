@@ -25,14 +25,15 @@ func IsSuperAdminRole(role string) bool {
 
 const (
 	// ===== 全局权限 =====
-	PermUserManage   = "user:manage"      // 用户与权限管理
-	PermRoleManage   = "role:manage"      // 角色模板管理
-	PermBankManage   = "bank:manage"      // 分类子题库管理（建库/改库）
-	PermFlowManage   = "flow:manage"      // 审核流程配置
-	PermExpertManage = "expert:manage"    // 专家库管理
-	PermAuditView    = "audit:view"       // 操作日志查看
-	PermBatchRun     = "batch:run"        // 批量推理（独立于单题出题）
-	PermKnowledgeMng = "knowledge:manage" // 知识点导入/增删
+	PermUserManage            = "user:manage"             // 用户与权限管理
+	PermRoleManage            = "role:manage"             // 角色模板管理
+	PermBankManage            = "bank:manage"             // 分类子题库管理（建库/改库）
+	PermFlowManage            = "flow:manage"             // 审核流程配置
+	PermExpertManage          = "expert:manage"           // 专家库管理
+	PermAuditView             = "audit:view"              // 操作日志查看
+	PermBatchRun              = "batch:run"               // 批量推理（独立于单题出题）
+	PermKnowledgeMng          = "knowledge:manage"        // 知识点导入/增删
+	PermGenerationQuotaManage = "generation_quota:manage" // 生成任务配额查看与调整
 
 	// ===== 题库范围权限 =====
 	PermQuestionView        = "question:view"         // 查看题目列表/详情（过程题库）
@@ -99,6 +100,7 @@ func AllPermissions() []PermissionMeta {
 		{PermExpertManage, "专家库管理", "系统", false},
 		{PermAuditView, "操作日志", "系统", false},
 		{PermKnowledgeMng, "知识点管理", "系统", false},
+		{PermGenerationQuotaManage, "生成任务配额（仅内置管理员）", "系统", false},
 	}
 	return all
 }

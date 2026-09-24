@@ -133,6 +133,7 @@ type KPSearchOptions struct {
 	VersionID   string
 	Path        []string // Exact prefix of category / subject / unit / sub_item, including empty values.
 	Keyword     string   // 模糊：topic/unit/sub_item/subject/outline_code 包含
+	TopicOnly   bool     // 出题选择器：关键词只匹配考点内容和大纲代码，不因目录名命中整组。
 	Subject     string   // 精确：专业
 	Category    string   // 精确：分类
 	OutlineCode string   // 精确：大纲代码前缀
@@ -176,9 +177,11 @@ func (s *Service) SearchFiltered(ctx context.Context, opts KPSearchOptions) ([]d
 		if opts.OutlineCode != "" && !strings.HasPrefix(p.OutlineCode, opts.OutlineCode) {
 			continue
 		}
-		searchText := strings.ToLower(strings.Join([]string{
-			strings.Join(p.Keywords, " "), p.Category, p.Topic, p.Unit, p.SubItem, p.Subject, p.OutlineCode,
-		}, " "))
+		searchFields := []string{strings.Join(p.Keywords, " "), p.Category, p.Topic, p.Unit, p.SubItem, p.Subject, p.OutlineCode}
+		if opts.TopicOnly {
+			searchFields = []string{p.Topic, p.OutlineCode}
+		}
+		searchText := strings.ToLower(strings.Join(searchFields, " "))
 		matchesKeywords := true
 		for _, keyword := range keywords {
 			if !strings.Contains(searchText, keyword) {

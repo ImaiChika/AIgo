@@ -414,6 +414,52 @@ func loginForAuthTest(t *testing.T, handler http.Handler, username, password, cl
 	return payload.Token
 }
 
+func TestSwitchRoleAuditOnlyRecordsActualChange(t *testing.T) {
+	server, store, cleanup := authHandlerTestServer(t)
+	defer cleanup()
+	handler := server.Handler()
+	adminToken := loginForAuthTest(t, handler, "admin", "admin-password", "198.51.100.120")
+	created := serveAuthJSON(t, handler, http.MethodPost, "/api/users", adminToken, "198.51.100.120", map[string]any{
+		"username": "switch-audit-user", "password": "switch-audit-password", "display_name": "身份测试",
+		"role": domain.RoleTeacher, "roles": []string{domain.RoleTeacher, domain.RoleExpert},
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create user: %d %s", created.Code, created.Body)
+	}
+	token := loginForAuthTest(t, handler, "switch-audit-user", "switch-audit-password", "198.51.100.121")
+	countSwitches := func() int {
+		t.Helper()
+		var count int
+		if err := store.DB().QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE action='auth_switch_role' AND actor=$1`, "switch-audit-user").Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	for _, step := range []struct {
+		role string
+		want int
+	}{
+		{domain.RoleTeacher, 0},
+		{domain.RoleExpert, 1},
+		{domain.RoleExpert, 1},
+	} {
+		response := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/switch-role", token, "198.51.100.121", map[string]any{"role": step.role})
+		if response.Code != http.StatusOK {
+			t.Fatalf("switch to %s: %d %s", step.role, response.Code, response.Body)
+		}
+		var payload struct {
+			Token string `json:"token"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || payload.Token == "" {
+			t.Fatalf("parse switch response: %v", err)
+		}
+		token = payload.Token
+		if count := countSwitches(); count != step.want {
+			t.Fatalf("switch to %s: audit count=%d, want %d", step.role, count, step.want)
+		}
+	}
+}
+
 func serveAuthJSON(t *testing.T, handler http.Handler, method, path, token, clientIP string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	var encoded []byte

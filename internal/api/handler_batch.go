@@ -162,6 +162,20 @@ func (s *Server) handleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "没有符合条件的知识点")
 		return
 	}
+	if s.quotaStore != nil {
+		quota, _, err := s.quotaStore.GetGenerationQuota(r.Context())
+		if err != nil {
+			writeError(w, 503, "读取生成任务配额失败")
+			return
+		}
+		if len(points)*req.Count > quota.BatchMaxQuestions {
+			writeGenerationQuotaError(w, &storage.GenerationQuotaError{Message: fmt.Sprintf("批量任务最多生成 %d 道题，请减少要点或每点题数", quota.BatchMaxQuestions)})
+			return
+		}
+	} else if len(points)*req.Count > storage.DefaultGenerationQuota().BatchMaxQuestions {
+		writeGenerationQuotaError(w, &storage.GenerationQuotaError{Message: "批量任务最多生成 100 道题，请减少要点或每点题数"})
+		return
+	}
 
 	// 生成任务名称
 	jobName := req.JobName
@@ -178,6 +192,9 @@ func (s *Server) handleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 	})
 	jobID, count, err := s.batchSvc.GenerateAndSubmit(batchCtx, points, req.Count, jobName)
 	if err != nil {
+		if writeGenerationQuotaError(w, err) {
+			return
+		}
 		status := http.StatusInternalServerError
 		if errors.Is(err, batch.ErrUnavailable) {
 			status = http.StatusServiceUnavailable
@@ -199,6 +216,10 @@ func (s *Server) handleBatchSubmit(w http.ResponseWriter, r *http.Request) {
 
 // handleBatchStatus 查询批量任务状态。
 func (s *Server) handleBatchStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.hasPermission(r, domain.PermBatchRun) && !s.hasPermission(r, domain.PermQuestionViewGlobal) {
+		writeError(w, http.StatusForbidden, "无权查看批量任务")
+		return
+	}
 	jobID := r.PathValue("jobId")
 	if jobID == "" {
 		writeError(w, 400, "缺少 job_id")
@@ -220,6 +241,45 @@ func (s *Server) handleBatchStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, 200, s.withBatchOwnerName(job))
+}
+
+// handleBatchHistory 为历史页提供归属过滤和服务端分页。
+func (s *Server) handleBatchHistory(w http.ResponseWriter, r *http.Request) {
+	if !s.hasPermission(r, domain.PermBatchRun) && !s.hasPermission(r, domain.PermQuestionViewGlobal) {
+		writeError(w, http.StatusForbidden, "无权查看批量任务历史")
+		return
+	}
+	global := r.URL.Query().Get("scope") == "global"
+	if global && !s.hasPermission(r, domain.PermQuestionViewGlobal) {
+		writeError(w, http.StatusForbidden, "无权查看其他用户的批量任务")
+		return
+	}
+	ownerID := auth.GetUserID(r.Context())
+	if global {
+		ownerID = ""
+	}
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 || page > 1000000 {
+		page = 1
+	}
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	if pageSize < 1 || pageSize > 50 {
+		pageSize = 12
+	}
+	pager, ok := s.batchSvc.(batch.HistoryPager)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "批量任务历史暂不可用")
+		return
+	}
+	jobs, total, err := pager.ListJobsPage(r.Context(), ownerID, r.URL.Query().Get("name"), r.URL.Query().Get("status"), pageSize, (page-1)*pageSize)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "查询批量任务历史失败: "+err.Error())
+		return
+	}
+	for i := range jobs {
+		s.withBatchOwnerName(&jobs[i])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs, "total": total, "page": page, "page_size": pageSize})
 }
 
 // handleBatchList 查询批量任务列表（支持按名称搜索）。
@@ -261,6 +321,10 @@ func (s *Server) handleBatchList(w http.ResponseWriter, r *http.Request) {
 
 // handleBatchDownload 下载批量任务结果并导入题库。
 func (s *Server) handleBatchDownload(w http.ResponseWriter, r *http.Request) {
+	if !s.hasPermission(r, domain.PermBatchRun) && !s.hasPermission(r, domain.PermQuestionViewGlobal) {
+		writeError(w, http.StatusForbidden, "无权查看批量任务结果")
+		return
+	}
 	jobID := r.PathValue("jobId")
 	if jobID == "" {
 		writeError(w, 400, "缺少 job_id")
@@ -285,24 +349,37 @@ func (s *Server) handleBatchDownload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if job.ImportedAt == "" && !s.hasPermission(r, domain.PermBatchRun) {
+		writeError(w, http.StatusForbidden, "当前身份无权导入批量任务结果")
+		return
+	}
 	owner, ownerErr := s.authSvc.GetUserByID(job.OwnerID)
-	if ownerErr != nil || owner == nil || !owner.Enabled {
+	if job.ImportedAt == "" && (ownerErr != nil || owner == nil || !owner.Enabled) {
 		writeError(w, http.StatusConflict, "批量任务原所有者不存在或已停用，不能导入")
 		return
 	}
+	ownerName := "历史账号"
+	if owner != nil {
+		ownerName = owner.Username
+	}
 	// 导入归属固定使用任务提交时的所有者，不能因管理员查看而改变。
 	importCtx := storage.WithQuestionChange(r.Context(), storage.QuestionChange{
-		Actor:      owner.Username,
-		OwnerID:    owner.ID,
+		Actor:      ownerName,
+		OwnerID:    job.OwnerID,
 		ChangeType: "batch_generate",
 	})
 	result, err := s.batchSvc.ImportResults(importCtx, jobID, nil)
 	if err != nil {
+		if writeGenerationQuotaError(w, err) {
+			return
+		}
 		status := http.StatusInternalServerError
 		switch {
 		case errors.Is(err, batch.ErrUnavailable):
 			status = http.StatusServiceUnavailable
 		case errors.Is(err, batch.ErrNotReady):
+			status = http.StatusConflict
+		case errors.Is(err, storage.ErrBatchJobAlreadyActive):
 			status = http.StatusConflict
 		}
 		writeError(w, status, "导入失败: "+err.Error())
@@ -310,12 +387,13 @@ func (s *Server) handleBatchDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 导入的草稿自动提交 AI 质量检查（后台异步执行）
-	if s.aiCheckSvc != nil && len(result.QuestionIDs) > 0 {
+	if s.aiCheckSvc != nil && job.ImportedAt == "" && len(result.QuestionIDs) > 0 {
 		s.aiCheckSvc.CheckAsync(result.QuestionIDs...)
 	}
-	if s.auditSvc != nil {
+	// 已导入任务的 ImportResults 只重放历史结果，切换任务查看不属于导入操作。
+	if s.auditSvc != nil && job.ImportedAt == "" {
 		_ = s.auditSvc.Log(r.Context(), "", "batch_import", auth.GetUsername(r.Context()),
-			fmt.Sprintf("导入批量任务结果「%s」：%d 道题（任务 %s，归属 %s）", job.JobName, len(result.QuestionIDs), jobID, owner.Username))
+			fmt.Sprintf("导入批量任务结果「%s」：%d 道题（任务 %s，归属 %s）", job.JobName, len(result.QuestionIDs), jobID, ownerName))
 	}
 
 	writeJSON(w, 200, result)
@@ -345,6 +423,9 @@ func (s *Server) handleBatchRetryFailed(w http.ResponseWriter, r *http.Request) 
 	}
 	retried, err := s.batchSvc.RetryFailed(r.Context(), jobID)
 	if err != nil {
+		if writeGenerationQuotaError(w, err) {
+			return
+		}
 		status := http.StatusInternalServerError
 		switch {
 		case errors.Is(err, batch.ErrUnavailable):

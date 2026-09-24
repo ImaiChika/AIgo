@@ -97,7 +97,7 @@ const kpRows = computed(() => {
           </div>
           <div v-else class="ddm-legacy">
             <p class="ddm-section-title">原题摘要</p>
-            <p class="ddm-stem">{{ item.stem_summary || item.question_id }}</p>
+            <p class="ddm-stem">{{ item.stem_summary || "暂无题干摘要" }}</p>
             <p class="ddm-legacy-note">该题淘汰时尚未保留完整题目快照（升级前留档），仅展示题干摘要、评分与淘汰原因。</p>
           </div>
 
@@ -113,10 +113,6 @@ const kpRows = computed(() => {
 
           <p v-if="item.suggestion" class="ddm-suggestion">{{ item.suggestion }}</p>
 
-          <p class="ddm-meta">
-            淘汰时间：{{ item.check_completed_at ? new Date(item.check_completed_at).toLocaleString() : "-" }}
-            <template v-if="item.model"> · 检查模型：{{ item.model }}</template>
-          </p>
         </div>
       </div>
     </div>
@@ -378,11 +374,4 @@ const kpRows = computed(() => {
   font-weight: 600;
 }
 
-.ddm-meta {
-  margin: 0;
-  padding-top: 8px;
-  font-size: 11px;
-  color: #777;
-  border-top: 1px solid #eee;
-}
 </style>

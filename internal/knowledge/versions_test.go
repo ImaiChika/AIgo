@@ -125,6 +125,15 @@ func TestImportFilesAtomicReplacementAndTree(t *testing.T) {
 	if len(multi) != 1 || multi[0].OutlineCode != "003" {
 		t.Fatalf("multi-keyword AND search: %+v", multi)
 	}
+	// 出题选择器按考点正文检索，不应因整个目录名命中而返回全部后代。
+	topicOnly, _ := svc.SearchFiltered(ctx, KPSearchOptions{VersionID: v.ID, Keyword: "呼吸", TopicOnly: true})
+	if len(topicOnly) != 0 {
+		t.Fatalf("topic search matched directory name: %+v", topicOnly)
+	}
+	topicOnly, _ = svc.SearchFiltered(ctx, KPSearchOptions{VersionID: v.ID, Keyword: "考点C", TopicOnly: true})
+	if len(topicOnly) != 1 || topicOnly[0].OutlineCode != "003" {
+		t.Fatalf("topic search missed point content: %+v", topicOnly)
+	}
 	bad := csv("bad.csv", "临床综合,呼吸系统,肺部感染,肺炎,,004,\n")
 	if _, _, _, err := svc.ImportDocuments(ctx, v.ID, []string{second, bad}, true); err == nil {
 		t.Fatal("invalid batch accepted")

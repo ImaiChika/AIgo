@@ -315,15 +315,12 @@ onMounted(() => {
           <span v-if="selected.question.profession" class="q-param"><label>专业</label>{{ selected.question.profession }}</span>
           <span v-if="selected.question.system" class="q-param"><label>系统</label>{{ selected.question.system }}</span>
           <span class="q-param"><label>难度</label>{{ difficultyText(selected.question.difficulty) }}</span>
-          <span class="q-param"><label>版本</label>v{{ selected.question.version }}</span>
         </div>
         <details class="question-extra">
           <summary>查看题目属性</summary>
           <div class="q-params q-technical-params">
             <span v-if="selected.question.outline_code" class="q-param"><label>大纲代码</label>{{ selected.question.outline_code }}</span>
             <span v-if="selected.question.cognitive_level" class="q-param"><label>认知层次</label>{{ selected.question.cognitive_level }}</span>
-            <span class="q-param"><label>审核绑定</label>v{{ selected.task.question_version }}</span>
-            <span class="q-param"><label>题目 ID</label>{{ selected.question.id }}</span>
           </div>
         </details>
         <div class="q-stem-full">

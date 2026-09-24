@@ -9,8 +9,8 @@ test("all existing destinations belong to five distinct groups; batch shares the
   const groups = visibleNavigation(all);
   assert.equal(groups.length, 5);
   const paths = groups.flatMap(g => g.items.map(i => i.path));
-  assert.equal(new Set(paths).size, 17);
-  assert.deepEqual(new Set(paths), new Set(["/my", "/settings", "/knowledge", "/generate", "/new-questions", "/my-revisions", "/share-requests", "/review", "/review-decisions", "/review-results", "/review-flows", "/bank", "/stats", "/users", "/roles", "/system/ai-providers", "/audit"]));
+  assert.equal(new Set(paths).size, 19);
+  assert.deepEqual(new Set(paths), new Set(["/my", "/settings", "/knowledge", "/generate", "/batch-history", "/new-questions", "/my-revisions", "/share-requests", "/review", "/review-decisions", "/review-results", "/review-flows", "/bank", "/stats", "/users", "/roles", "/system/ai-providers", "/system/generation-quota", "/audit"]));
   const generate = groups.flatMap(g => g.items).find(i => i.id === "generate");
   for (const path of ["/generate", "/generate/batch", "/batch"]) assert.equal(navigationItemActive(generate, path), true);
   assert.equal(navigationItemActive(generate, "/bank"), false);
@@ -24,6 +24,8 @@ test("permission filtering removes inaccessible children and empty categories", 
   const finalReviewer = visibleNavigation(permissions("review:final"));
   assert.deepEqual(finalReviewer.find(g => g.id === "review").items.map(i => i.id), ["review-decisions"]);
   assert.equal(permissionAllowed(["review:do", "review:final"], permissions("review:final")), true);
+  assert.equal(visibleNavigation(permissions("generation_quota:manage")).find(g => g.id === "system").items[0].path, "/system/generation-quota");
+  assert.equal(visibleNavigation(permissions("question:generate")).some(g => g.id === "system"), false);
 });
 
 test("teacher and reviewer identities expose mutually exclusive work navigation", () => {
@@ -42,6 +44,7 @@ test("teacher and reviewer identities expose mutually exclusive work navigation"
     "question:view", "question:edit", "question:generate", "batch:run", "question:share", "review:submit",
   )).flatMap(group => group.items.map(item => item.id));
   for (const expected of ["generate", "new-questions", "my-revisions", "bank"]) assert.equal(teacherIds.includes(expected), true);
+  assert.equal(teacherIds.includes("batch-history"), true);
   assert.equal(teacherIds.includes("review"), false);
   assert.equal(visibleNavigation(permissions("question:generate")).flatMap(g => g.items).some(i => i.id === "new-questions"), false);
 });
@@ -67,6 +70,8 @@ test("batch-only accounts retain a valid generation destination without gaining 
   const batchOnly = visibleNavigation(permissions("batch:run"));
   assert.equal(batchOnly.find(g => g.id === "authoring").items.find(i => i.id === "generate").path, "/generate/batch");
   assert.equal(permissionAllowed("question:generate", permissions("batch:run")), false);
+  assert.equal(batchOnly.find(g => g.id === "authoring").items.some(i => i.id === "batch-history"), true);
+  assert.equal(visibleNavigation(permissions("question:view_global")).find(g => g.id === "authoring").items.some(i => i.id === "batch-history"), true);
   assert.equal(visibleNavigation(permissions("question:generate")).find(g => g.id === "authoring").items.find(i => i.id === "generate").path, "/generate");
   assert.equal(navigationGroups.find(g => g.id === "authoring").items.find(i => i.id === "generate").path, "/generate", "filtering must not mutate the shared definition");
 });

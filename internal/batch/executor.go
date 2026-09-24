@@ -38,10 +38,15 @@ type Executor interface {
 	Capabilities() Capabilities
 }
 
+// HistoryPager 是历史页的可选读取能力；提交与执行接口保持不变。
+type HistoryPager interface {
+	ListJobsPage(ctx context.Context, ownerID, name, status string, limit, offset int) ([]BatchJob, int, error)
+}
+
 // BatchJob 批量任务状态。
 type BatchJob struct {
 	JobID        string `json:"job_id"`
-	OwnerID      string `json:"owner_id,omitempty"` // 提交任务的用户；管理员查看他人任务时用于只读标识
+	OwnerID      string `json:"owner_id,omitempty"`   // 提交任务的用户；管理员查看他人任务时用于只读标识
 	OwnerName    string `json:"owner_name,omitempty"` // 归属人用户名，API 层回填，供任务卡片展示"由谁生成"
 	Backend      string `json:"backend,omitempty"`
 	Model        string `json:"model,omitempty"`
@@ -76,11 +81,11 @@ type ImportResult struct {
 
 // ImportItem 单条导入结果。
 type ImportItem struct {
-	OutlineCode string `json:"outline_code"` // 大纲代码
+	OutlineCode string `json:"outline_code"`    // 大纲代码
 	Topic       string `json:"topic,omitempty"` // 大纲要点主题（执行期记录，供前端展示）
-	Count       int    `json:"count"`        // 导入题目数
-	Status      string `json:"status"`       // "ok" / "failed"
-	Error       string `json:"error"`        // 失败原因
+	Count       int    `json:"count"`           // 导入题目数
+	Status      string `json:"status"`          // "ok" / "failed"
+	Error       string `json:"error"`           // 失败原因
 
 	// question 是执行期携带的生成结果（成功项），仅存活于任务执行队列内存，
 	// 不随 OutputJSON 序列化（导入时的入库数据以序列化快照为准）。

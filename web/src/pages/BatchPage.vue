@@ -7,10 +7,14 @@ import { useAICheckProgress } from "../aiCheckProgress.js";
 import KnowledgePointPicker from "../components/KnowledgePointPicker.vue";
 import QuestionDetailModal from "../components/QuestionDetailModal.vue";
 import DiscardDetailModal from "../components/DiscardDetailModal.vue";
+import { initialBatchJob } from "../batchHistory.js";
+import { loadBatchWorkspace, saveBatchWorkspace, clearBatchWorkspace } from "../batchWorkspace.js";
+
+const props = defineProps({ historyOnly: { type: Boolean, default: false } });
 
 // AI 检查分段进度（导入成功后轮询，见 aiCheckProgress.js）
-const { progress: aiProgress, start: startAIProgress } = useAICheckProgress();
-const batchPermission = computed(() => hasPerm("batch:run"));
+const { progress: aiProgress, start: startAIProgress, stop: stopAIProgress } = useAICheckProgress();
+const batchPermission = computed(() => hasPerm("batch:run") || (props.historyOnly && hasPerm("question:view_global")));
 
 const toast = ref("");
 const stats = ref({ question_count: 0, knowledge_count: 0, knowledge_categories: {} });
@@ -62,7 +66,7 @@ function handleKnowledgeVersionChange(payload) {
 // 批量任务配置（大纲要点通过选择器多选；仅保留每要点题数与跳过已有）
 const selectedKPs = ref([]); // 选中的大纲要点（多选）
 const batchConfig = ref({
-  skip_existing: true,
+  skip_existing: false,
   count: 1,
   job_name: "",
 });
@@ -137,18 +141,20 @@ function goUnitPage(p) {
 watch(() => currentJob.value?.job_id, () => { unitPage.value = 1; });
 watch(unitPageCount, (n) => { if (unitPage.value > n) unitPage.value = n; });
 
-// 任务历史分页：任务卡片较高，每页 5 条，页码翻页不必长滚动。
+// 历史任务由服务端先按账号过滤再分页；左侧只渲染当前页。
 const historyPage = ref(1);
-const historyPageSize = 5;
-const historyPageCount = computed(() => Math.max(1, Math.ceil(jobHistory.value.length / historyPageSize)));
-const pagedJobHistory = computed(() => {
-  const start = (historyPage.value - 1) * historyPageSize;
-  return jobHistory.value.slice(start, start + historyPageSize);
-});
+const historyPageSize = 12;
+const historyTotal = ref(0);
+const historyLoading = ref(false);
+const historyQuery = ref("");
+const historyStatus = ref("");
+const historyScope = ref(hasPerm("question:view_global") ? "global" : "mine");
+let historyTicket = 0;
+const historyPageCount = computed(() => Math.max(1, Math.ceil(historyTotal.value / historyPageSize)));
 function goHistoryPage(p) {
   historyPage.value = Math.min(Math.max(1, p), historyPageCount.value);
+  loadHistory();
 }
-watch(historyPageCount, (n) => { if (historyPage.value > n) historyPage.value = n; });
 
 // 尚未出结果的单元数：排队等待或生成中。
 const pendingUnitCount = computed(() => {
@@ -200,33 +206,56 @@ async function loadBatchCapabilities() {
   }
 }
 
-// 保存任务到 localStorage
-function saveJobToStorage(job) {
-  const jobs = JSON.parse(localStorage.getItem("batch_jobs") || "[]");
-  const idx = jobs.findIndex(j => j.job_id === job.job_id);
-  if (idx >= 0) {
-    jobs[idx] = job;
-  } else {
-    jobs.unshift(job);
-  }
-  localStorage.setItem("batch_jobs", JSON.stringify(jobs.slice(0, 20))); // 最多保存20个
+async function loadHistory() {
+  const ticket = ++historyTicket;
+  historyLoading.value = true;
+  try {
+    const data = await api.batchHistory({ scope: historyScope.value, page: historyPage.value, page_size: historyPageSize, name: historyQuery.value.trim(), status: historyStatus.value });
+    if (ticket !== historyTicket) return;
+    jobHistory.value = data.jobs || [];
+    historyTotal.value = data.total || 0;
+  } catch (e) {
+    if (ticket === historyTicket) showToast("加载任务历史失败: " + e.message);
+  } finally { if (ticket === historyTicket) historyLoading.value = false; }
 }
 
-// 从 API 加载任务历史
-async function loadJobsFromDB() {
-  try {
-    const data = await api.batchList({ limit: 50 });
-    jobHistory.value = data.jobs || [];
-    if (jobHistory.value.length > 0 && !currentJob.value) {
-      selectJob(jobHistory.value[0], { silent: true });
+function filterHistory() {
+  historyPage.value = 1;
+  loadHistory();
+}
+
+// 当前任务仅存任务 ID；结果和进度以服务端持久化状态恢复，直到用户主动清空。
+async function restoreCurrentTask() {
+  const userId = currentUser.value?.id;
+  const saved = loadBatchWorkspace(userId);
+  if (saved?.jobId) {
+    try {
+      const job = await api.batchStatus(saved.jobId);
+      if (job.owner_id !== userId) throw new Error("任务归属不符");
+      selectJob(job, { silent: true });
+      return;
+    } catch {
+      clearBatchWorkspace(userId);
     }
-  } catch (e) {
-    console.error("加载任务历史失败:", e);
-    showToast("加载任务历史失败，显示本地缓存");
-    // 回退到 localStorage
-    const jobs = JSON.parse(localStorage.getItem("batch_jobs") || "[]");
-    jobHistory.value = jobs;
   }
+  try {
+    const data = await api.batchHistory({ scope: "mine", page: 1, page_size: 20 });
+    const pending = initialBatchJob(data.jobs || [], userId);
+    if (pending) {
+      saveBatchWorkspace(userId, pending.job_id);
+      selectJob(pending, { silent: true });
+    }
+  } catch (e) { showToast("恢复当前任务失败: " + e.message); }
+}
+
+function clearCurrentTask() {
+  if (!currentJob.value || isRunning(currentJob.value.status)) return;
+  if (!window.confirm("仅清空本页当前任务记录，历史记录和已生成题目都会保留。确定继续吗？")) return;
+  stopPolling(); stopAIProgress();
+  currentJob.value = null; importResult.value = null; importJobId.value = "";
+  aiProgress.value = null; detailQuestion.value = null; discardDetail.value = null;
+  clearBatchWorkspace(currentUser.value?.id);
+  showToast("当前任务已从工作台清空，可在历史出题记录中查看");
 }
 
 // 选中任务：先展示列表摘要，再拉取完整状态补齐逐单元明细（明细只在
@@ -321,7 +350,7 @@ async function submitBatch() {
     };
 
     jobHistory.value.unshift(currentJob.value);
-    saveJobToStorage(currentJob.value);
+    saveBatchWorkspace(currentUser.value?.id, currentJob.value.job_id);
     showToast(`任务已提交: ${data.job_id}`);
 
     // 开始轮询
@@ -357,7 +386,6 @@ function startPolling(jobId) {
       if (currentJob.value?.job_id === jobId) currentJob.value = job;
       const idx = jobHistory.value.findIndex(j => j.job_id === jobId);
       if (idx >= 0) jobHistory.value[idx] = job;
-      saveJobToStorage(job);
       if (isTerminal(job.status)) {
         polling.value = false;
         showToast(isCompleted(job.status) ? `任务完成：成功 ${job.completed}，失败 ${job.failed}` : `任务${statusText(job.status)}`);
@@ -392,6 +420,7 @@ const autoImportJobs = new Set(); // 本会话已触发过自动导入的任务�
 // 一旦导入，失败项视为放弃、不能再重跑。
 // 重复触发由后端导入幂等拦截：已导入的任务只会重放上次的导入结果。
 function maybeAutoImport(job) {
+	if (props.historyOnly) return;
 	if (!job || job.owner_id !== currentUser.value?.id || !isCompleted(job.status) || job.imported_at || !job.tracked) return;
   if ((job.failed || 0) > 0) return;
   if (autoImportJobs.has(job.job_id)) return;
@@ -410,7 +439,6 @@ async function retryFailed(job) {
     currentJob.value = updated;
     const idx = jobHistory.value.findIndex(j => j.job_id === job.job_id);
     if (idx >= 0) jobHistory.value[idx] = updated;
-    saveJobToStorage(updated);
     showToast("失败项重跑已开始，任务回到执行中");
     startPolling(job.job_id);
   } catch (e) {
@@ -439,14 +467,13 @@ async function downloadResult(jobId, { replay = false } = {}) {
     importJobId.value = jobId;
     markJobImported(jobId);
     if (data.simulated) {
-      showToast(data.message || "旧批量任务已完成");
+      if (!replay) showToast(data.message || "旧批量任务已完成");
       return;
     }
-    if (replay) {
-      showToast("已载入该任务的生成与 AI 检查结果");
-    } else if (data.failed > 0) {
+    // 回看只是读取，不打断正在配置新任务的用户。
+    if (!replay && data.failed > 0) {
       showToast(`AI 生成完毕：${data.saved} 题已提交 AI 质量检查，失败 ${data.failed} 项`);
-    } else {
+    } else if (!replay) {
       showToast(`AI 生成完毕：共 ${data.saved} 题，已提交 AI 质量检查`);
     }
     startAIProgress(data.question_ids || []);
@@ -511,6 +538,10 @@ const rowClickable = (row) => !row.discarded && !row.missing && !!row.stem;
 // 主列表只保留未淘汰的题；淘汰题移入下方失败提醒，点击查看原题与淘汰原因
 const passedRows = computed(() => importRows.value.filter(r => !r.discarded));
 const discardedRows = computed(() => importRows.value.filter(r => r.discarded));
+const noticePageSize = 6;
+const discardPage = ref(1);
+const discardPageCount = computed(() => Math.max(1, Math.ceil(discardedRows.value.length / noticePageSize)));
+const visibleDiscardRows = computed(() => discardedRows.value.slice((discardPage.value - 1) * noticePageSize, discardPage.value * noticePageSize));
 // 淘汰明细项（含评分与题目快照），供弹窗展示；行内补充大纲信息后传入
 const discardedItems = computed(() => new Map((aiProgress.value?.items || []).map(i => [i.question_id, i])));
 function openDiscardDetail(row) {
@@ -518,6 +549,12 @@ function openDiscardDetail(row) {
   if (item) discardDetail.value = { ...item, outline_code: item.outline_code || row.outlineCode, topic: row.topic };
 }
 const failedItems = computed(() => (importResult.value?.items || []).filter(i => i.status !== "ok"));
+const failedPage = ref(1);
+const failedPageCount = computed(() => Math.max(1, Math.ceil(failedItems.value.length / noticePageSize)));
+const visibleFailedItems = computed(() => failedItems.value.slice((failedPage.value - 1) * noticePageSize, failedPage.value * noticePageSize));
+watch(() => currentJob.value?.job_id, () => { discardPage.value = 1; failedPage.value = 1; });
+watch(discardPageCount, count => { if (discardPage.value > count) discardPage.value = count; });
+watch(failedPageCount, count => { if (failedPage.value > count) failedPage.value = count; });
 const checkDone = computed(() => !!aiProgress.value && !aiProgress.value.stalled && aiProgress.value.checking === 0);
 // 检查完成后通过数即“新题修改与送审”角标的变化来源，通知侧栏立即重算。
 watch(checkDone, (done) => { if (done) notifyNavigationWorkChanged(); });
@@ -584,13 +621,13 @@ function isRunning(status) {
 
 onMounted(() => {
   if (!batchPermission.value) return;
-  loadStats();
-  loadBatchCapabilities();
-  loadJobsFromDB();
+  if (props.historyOnly) loadHistory();
+  else { loadStats(); loadBatchCapabilities(); restoreCurrentTask(); }
   tickTimer = setInterval(() => { nowTick.value = Date.now(); }, 1000);
 });
 onBeforeUnmount(() => {
   disposed = true;
+  historyTicket++;
   stopPolling();
   clearInterval(tickTimer);
   clearTimeout(showToast.timer);
@@ -601,18 +638,19 @@ onBeforeUnmount(() => {
   <section v-if="!batchPermission" class="panel batch-permission-panel" role="alert">
     <div class="section-heading">
       <span class="dot red"></span>
-      <h2>暂无批量推理权限</h2>
+      <h2>{{ historyOnly ? '暂无历史记录查看权限' : '暂无批量推理权限' }}</h2>
     </div>
-    <p>当前账号不能查看、提交或导入批量推理任务；已分配的单题出题权限不受影响。</p>
+    <p>{{ historyOnly ? '当前身份没有批量推理或全局查看权限，请切换到有权限的身份。' : '当前账号不能查看、提交或导入批量推理任务；已分配的单题出题权限不受影响。' }}</p>
     <p class="permission-help">如需开放批量推理，请联系超级管理员在「用户管理 → 分配权限」中单独勾选“批量推理”。</p>
     <RouterLink class="ghost-button inline-link" :to="hasPerm('question:generate') ? '/generate' : '/knowledge'">
       {{ hasPerm('question:generate') ? '返回单题出题' : '返回知识点' }}
     </RouterLink>
   </section>
 
-  <div v-else class="batch-layout">
+  <div v-else class="batch-layout" :class="{ 'history-layout': historyOnly }">
+   <div class="batch-primary">
     <!-- 统计信息 -->
-    <section class="panel">
+    <section v-if="!historyOnly" class="panel">
       <div class="section-heading">
         <span class="dot blue"></span>
         <h2>批量生成</h2>
@@ -634,7 +672,7 @@ onBeforeUnmount(() => {
     </section>
 
     <!-- 配置 -->
-    <section class="panel">
+    <section v-if="!historyOnly" class="panel">
       <div class="section-heading">
         <span class="dot blue"></span>
         <h2>生成配置</h2>
@@ -651,7 +689,7 @@ onBeforeUnmount(() => {
         <!-- 大纲要点选择（搜索勾选多选，也可按大纲代码逗号分隔加入） -->
         <div class="field">
           <label>选择大纲要点</label>
-          <KnowledgePointPicker v-model="selectedKPs" :multiple="true" placeholder="搜索大纲要点、大纲代码或专业" @version-change="handleKnowledgeVersionChange" />
+          <KnowledgePointPicker v-model="selectedKPs" :multiple="true" placeholder="搜索考点内容或大纲代码" @version-change="handleKnowledgeVersionChange" />
           <span class="field-hint">已选 {{ selectedKPs.length }} 个大纲要点，每个要点将生成 {{ batchConfig.count }} 道题</span>
         </div>
 
@@ -681,7 +719,9 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <!-- 当前任务 -->
+    <section v-if="historyOnly && !currentJob" class="panel history-empty"><h2>选择历史任务</h2><p>从左侧选一条记录，查看生成明细、AI 检查结果与淘汰原因。</p></section>
+
+    <!-- 当前任务 / 历史详情共用同一套进度与结果展示 -->
     <section v-if="currentJob" ref="jobPanel" class="panel job-status-panel">
       <div class="section-heading">
         <span class="dot blue"></span>
@@ -689,12 +729,12 @@ onBeforeUnmount(() => {
         <span class="q-status" :class="statusClass(currentJob.status)">
           {{ statusText(currentJob.status) }}
         </span>
+        <button v-if="!historyOnly && !isRunning(currentJob.status)" class="ghost-button clear-current" type="button" @click="clearCurrentTask">清空本次记录</button>
       </div>
 
       <div class="job-info">
         <div class="job-meta">
           <p><strong>任务名称:</strong> {{ currentJob.job_name || '未命名' }}</p>
-          <p><strong>任务ID:</strong> <code>{{ currentJob.job_id }}</code></p>
           <p><strong>已用时:</strong> <span class="elapsed-time">{{ elapsedText(currentJob) }}</span><span v-if="isRunning(currentJob.status)" class="field-hint">（含排队等待）</span></p>
         </div>
 
@@ -742,7 +782,7 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- 任务完成后的处理：自动触发，无需手动点击 -->
-	    <div v-if="!currentJobOwned" class="job-actions">
+	    <div v-if="!currentJobOwned || !hasPerm('batch:run')" class="job-actions">
 	      <span class="field-hint">该任务由 {{ currentJob.owner_name || "其他用户" }} 提交，为只读：已导入任务可查看生成与 AI 检查结果（含淘汰明细），重跑与导入仅限原提交人。</span>
 	    </div>
 	    <div v-else-if="isCompleted(currentJob.status) && currentJob.imported_at" class="job-actions">
@@ -798,7 +838,7 @@ onBeforeUnmount(() => {
       <div class="result-list">
         <div v-for="row in passedRows" :key="row.id" class="result-row" :class="{ clickable: rowClickable(row) }" @click="rowClickable(row) && openQuestion(row.id)">
           <span class="row-no">{{ row.no }}</span>
-          <span class="row-stem">{{ row.stem || (row.missing ? row.id : "检查通过后展示题目内容") }}</span>
+          <span class="row-stem">{{ row.stem || (row.missing ? "题目已删除" : "检查通过后展示题目内容") }}</span>
           <span class="row-state" :class="rowStateFor(row).cls">{{ rowStateFor(row).label }}</span>
         </div>
       </div>
@@ -807,57 +847,49 @@ onBeforeUnmount(() => {
       <!-- 失败与淘汰提醒：持久显示，不随 toast 消失 -->
       <div v-if="failedItems.length" class="result-notice">
         <p class="notice-title">导入失败（{{ failedItems.length }} 项）</p>
-        <p v-for="(f, i) in failedItems" :key="i" class="notice-line">{{ f.outline_code }}：{{ f.error }}</p>
+        <div class="notice-items">
+          <p v-for="(f, i) in visibleFailedItems" :key="`${failedPage}-${i}`" class="notice-line failed-line" :title="f.error"><span class="discard-code">{{ f.outline_code || '无大纲代码' }}</span><span>{{ f.error }}</span></p>
+        </div>
+        <div v-if="failedPageCount > 1" class="notice-pager"><button type="button" :disabled="failedPage <= 1" @click="failedPage--">上一页</button><span>第 {{ failedPage }} / {{ failedPageCount }} 页</span><button type="button" :disabled="failedPage >= failedPageCount" @click="failedPage++">下一页</button></div>
       </div>
       <div v-if="discardedRows.length" class="result-notice">
         <p class="notice-title">未通过 AI 检查，已自动淘汰（{{ discardedRows.length }} 题）——点击查看原题、AI 评分与淘汰原因</p>
+        <div class="notice-items">
         <button
-          v-for="row in discardedRows"
+          v-for="row in visibleDiscardRows"
           :key="row.id"
           type="button"
           class="notice-line discard-line"
-          :title="(row.outlineCode || '无大纲代码') + (row.topic ? ' ' + row.topic : '')"
+          :title="row.reason || '点击查看淘汰原因'"
           @click="openDiscardDetail(row)"
-        ><span class="discard-code">{{ row.outlineCode || "无大纲代码" }}</span>{{ row.topic ? ` ${row.topic}` : "" }}：{{ row.reason || "质量不达标" }} <span class="discard-line-open">详情 ›</span></button>
+        ><span class="discard-code">{{ row.outlineCode || "无大纲代码" }}</span><span class="discard-summary">{{ row.topic ? `${row.topic}：` : '' }}{{ row.reason || "质量不达标" }}</span><span class="discard-line-open">详情 ›</span></button>
+        </div>
+        <div v-if="discardPageCount > 1" class="notice-pager"><button type="button" :disabled="discardPage <= 1" @click="discardPage--">上一页</button><span>第 {{ discardPage }} / {{ discardPageCount }} 页</span><button type="button" :disabled="discardPage >= discardPageCount" @click="discardPage++">下一页</button></div>
       </div>
     </section>
 
-    <!-- 任务历史（分页，每页 5 条） -->
-    <section v-if="jobHistory.length > 0" class="panel">
+   </div>
+
+    <!-- 历史页：左侧任务列表，右侧是上方复用的详情。 -->
+    <section v-if="historyOnly" class="panel history-sidebar">
       <div class="section-heading">
         <span class="dot blue"></span>
-        <h2>任务历史（{{ jobHistory.length }}）</h2>
+        <h2>历史出题记录</h2>
+        <span class="history-total">{{ historyTotal }} 条</span>
       </div>
-
-      <div class="job-list">
-        <div v-for="job in pagedJobHistory" :key="job.job_id" class="job-item" :class="{ 'job-active': currentJob?.job_id === job.job_id }">
-          <div class="job-header">
-            <div>
-              <strong>{{ job.job_name || '未命名任务' }}</strong>
-              <span class="job-id">{{ job.job_id }}</span>
-            </div>
-            <span class="q-status" :class="statusClass(job.status)">
-              {{ statusText(job.status) }}
-            </span>
-            <!-- 已导入徽标只在任务彻底结束后展示，进行中任务不显示 -->
-            <span v-if="isCompleted(job.status) && job.imported_at" class="q-status status-good">已导入</span>
-          </div>
-	          <div class="job-detail">
-	            <span>生成项：{{ job.total_count }}</span>
-            <span>已完成：{{ job.completed || 0 }}</span>
-            <span>失败：{{ job.failed || 0 }}</span>
-            <span>已用时：{{ elapsedText(job) }}</span>
-            <span v-if="job.owner_id && job.owner_id !== currentUser?.id">{{ job.owner_name || "其他用户" }} 的任务 · 只读</span>
-          </div>
-          <div class="job-actions">
-            <button class="ghost-button" type="button" @click="checkStatus(job.job_id)">刷新状态</button>
-            <button class="ghost-button" type="button" @click="selectJob(job)">查看详情</button>
-            <span v-if="isRunning(job.status)" class="polling-hint">任务进行中，详情实时更新</span>
-          </div>
-        </div>
+      <div v-if="hasPerm('question:view_global')" class="history-scopes"><button type="button" :class="{ active: historyScope === 'global' }" @click="historyScope = 'global'; filterHistory()">全部任务</button><button type="button" :class="{ active: historyScope === 'mine' }" @click="historyScope = 'mine'; filterHistory()">我的任务</button></div>
+      <form class="history-filters" @submit.prevent="filterHistory"><input v-model="historyQuery" type="search" placeholder="搜索任务名称" aria-label="搜索历史任务" /><select v-model="historyStatus" aria-label="筛选任务状态" @change="filterHistory"><option value="">全部状态</option><option value="completed">已完成</option><option value="in_progress">进行中</option><option value="failed">失败</option><option value="cancelled">已取消</option></select><button class="ghost-button" type="submit">搜索</button></form>
+      <p v-if="historyLoading" class="history-hint">加载任务中...</p>
+      <p v-else-if="!jobHistory.length" class="history-hint">当前条件下暂无历史任务</p>
+      <div v-else class="history-list">
+        <button v-for="job in jobHistory" :key="job.job_id" class="history-job" :class="{ active: currentJob?.job_id === job.job_id }" type="button" @click="selectJob(job)">
+          <span class="history-job-top"><strong>{{ job.job_name || '未命名任务' }}</strong><span class="q-status" :class="statusClass(job.status)">{{ statusText(job.status) }}</span></span>
+          <span class="history-job-meta">{{ job.total_count }} 项 · 已完成 {{ job.completed || 0 }} · 失败 {{ job.failed || 0 }}</span>
+          <span v-if="job.owner_name" class="history-job-meta">提交人：{{ job.owner_name }}</span>
+        </button>
       </div>
       <div v-if="historyPageCount > 1" class="pager-row">
-        <span class="page-total">共 {{ jobHistory.length }} 个任务</span>
+        <span class="page-total">共 {{ historyTotal }} 个任务</span>
         <div class="page-pager">
           <button class="page-btn" type="button" :disabled="historyPage <= 1" @click="goHistoryPage(historyPage - 1)">‹ 上一页</button>
           <span class="page-info">第 {{ historyPage }} / {{ historyPageCount }} 页</span>
@@ -881,6 +913,32 @@ onBeforeUnmount(() => {
   max-width: 800px;
   margin: 0 auto;
 }
+.batch-primary { display: grid; gap: 14px; min-width: 0; }
+.batch-primary > .panel { min-width: 0; }
+.history-layout { width: 100%; max-width: 1340px; display: grid; grid-template-columns: minmax(250px, 310px) minmax(0, 1fr); align-items: start; gap: 16px; }
+.history-layout .batch-primary { grid-column: 2; grid-row: 1; }
+.history-sidebar { grid-column: 1; grid-row: 1; min-width: 0; position: sticky; top: 16px; }
+.history-total { margin-left: auto; color: #70839a; font-size: 12px; }
+.history-scopes { display: flex; border: 1px solid #dce8f7; border-radius: 7px; overflow: hidden; margin: 14px 0 10px; }
+.history-scopes button { flex: 1; padding: 7px 4px; border: 0; background: #fff; color: #59718c; font-size: 12px; }
+.history-scopes button.active { background: #e9f3ff; color: #075eac; font-weight: 700; }
+.history-filters { display: grid; grid-template-columns: 1fr auto; gap: 7px; margin: 10px 0; }
+.history-filters input { grid-column: 1 / -1; }
+.history-filters input, .history-filters select { min-width: 0; height: 34px; padding: 0 8px; border: 1px solid #dce8f7; border-radius: 6px; background: #fff; font-size: 12px; }
+.history-filters .ghost-button { height: 34px; }
+.history-list { display: grid; gap: 7px; max-height: calc(100vh - 270px); min-height: 100px; overflow-y: auto; padding-right: 3px; }
+.history-job { display: grid; gap: 6px; width: 100%; padding: 11px 10px; border: 1px solid #e1e9f3; border-radius: 7px; background: #fff; text-align: left; color: #33465e; }
+.history-job:hover { border-color: #9fc8ee; background: #f8fbff; }
+.history-job.active { border-color: #1385f8; background: #eff7ff; box-shadow: inset 3px 0 #1385f8; }
+.history-job-top { display: flex; align-items: start; gap: 7px; }
+.history-job-top strong { flex: 1; min-width: 0; font-size: 13px; line-height: 1.4; }
+.history-job-meta { display: block; color: #78889b; font-size: 11px; }
+.history-hint { padding: 24px 6px; color: #7d8a9b; font-size: 12px; text-align: center; }
+.history-empty { min-height: 260px; display: grid; align-content: center; justify-items: center; text-align: center; color: #6e7b8f; }
+.history-empty h2 { color: #33465e; }
+.history-empty p { max-width: 330px; font-size: 13px; line-height: 1.7; }
+.clear-current { margin-left: auto; font-size: 12px; }
+@media (max-width: 900px) { .history-layout { grid-template-columns: minmax(0, 1fr); } .history-sidebar, .history-layout .batch-primary { grid-column: 1; position: static; } .history-sidebar { grid-row: 1; } .history-layout .batch-primary { grid-row: 2; } .history-list { max-height: 350px; } }
 
 .batch-permission-panel {
   max-width: 700px;
@@ -1029,12 +1087,6 @@ onBeforeUnmount(() => {
   margin-bottom: 8px;
 }
 
-.job-id {
-  font-family: monospace;
-  font-size: 12px;
-  color: #6e7b8f;
-}
-
 .job-detail {
   display: flex;
   gap: 16px;
@@ -1131,6 +1183,7 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   overflow-y: auto;
   max-height: 360px;
+  min-width: 0;
 }
 
 .result-row {
@@ -1198,6 +1251,8 @@ onBeforeUnmount(() => {
   border-radius: 6px;
   background: #fff5f5;
   border: 1px solid #fdd;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .notice-title {
@@ -1215,9 +1270,14 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.notice-items { max-height: 320px; overflow-y: auto; overflow-x: hidden; min-width: 0; }
+.notice-line.failed-line { display: flex; align-items: flex-start; gap: 8px; white-space: normal; min-width: 0; }
+.discard-summary, .failed-line span:last-child { flex: 1; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; white-space: normal; line-height: 1.5; }
 /* 淘汰行可点击：弹出原题快照与 AI 评分 */
 .notice-line.discard-line {
-  display: block;
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
   width: 100%;
   padding: 4px 6px;
   margin: 2px 0;
@@ -1227,6 +1287,8 @@ onBeforeUnmount(() => {
   text-align: left;
   cursor: pointer;
   font: inherit;
+  white-space: normal;
+  min-width: 0;
 }
 .notice-line.discard-line:hover {
   background: #fff0f0;
@@ -1234,15 +1296,20 @@ onBeforeUnmount(() => {
 }
 /* 行首大纲代码：等宽字体突出，老师一眼定位知识点 */
 .discard-code {
+  flex: none;
   font-family: ui-monospace, Menlo, monospace;
   font-weight: 700;
   color: #a23b4b;
   margin-right: 6px;
 }
 .discard-line-open {
+  flex: none;
   color: #0571dc;
   font-weight: 600;
 }
+.notice-pager { display: flex; justify-content: flex-end; align-items: center; gap: 10px; padding-top: 8px; color: #8a3b47; font-size: 11px; }
+.notice-pager button { border: 1px solid #edc9cc; background: #fff; border-radius: 5px; padding: 4px 8px; color: #a23b4b; }
+.notice-pager button:disabled { opacity: .45; cursor: default; }
 .elapsed-time {
   font-variant-numeric: tabular-nums;
   color: #1f5eff;

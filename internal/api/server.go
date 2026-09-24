@@ -36,6 +36,7 @@ type Server struct {
 	aiCheckSvc         *aicheck.Service              // AI 检查服务
 	bankSvc            *bank.Service                 // 题库服务
 	aiProviderStore    storage.AIProviderConfigStore // 系统级 AI 服务配置
+	quotaStore         storage.GenerationQuotaStore  // 生成任务准入配置与当前用量
 	corsOrigins        []string                      // 允许的跨域来源白名单（空=禁止跨域）
 	registerEnabled    bool                          // 是否开放用户自助注册
 	trustProxyHeaders  bool                          // 是否信任反向代理写入的客户端 IP 头
@@ -67,6 +68,7 @@ func NewServer(
 	shareStore, _ := questionStore.(storage.QuestionShareStore)
 	generationRunStore, _ := questionStore.(storage.GenerationRunStore)
 	aiProviderStore, _ := questionStore.(storage.AIProviderConfigStore)
+	quotaStore, _ := questionStore.(storage.GenerationQuotaStore)
 	return &Server{
 		pipe:               pipe,
 		kpSvc:              kpSvc,
@@ -80,6 +82,7 @@ func NewServer(
 		aiCheckSvc:         aiCheckSvc,
 		bankSvc:            bankSvc,
 		aiProviderStore:    aiProviderStore,
+		quotaStore:         quotaStore,
 		corsOrigins:        corsOrigins,
 		registerEnabled:    registerEnabled,
 		trustProxyHeaders:  trustProxyHeaders,
@@ -129,6 +132,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/system/ai-providers/{id}", s.requireSuperAdmin(s.handleDeleteAIProvider))
 	// 运行指标只向唯一超级管理员开放，不包含用户内容、DSN 或模型凭证。
 	mux.HandleFunc("GET /api/system/runtime-metrics", s.requireSuperAdmin(s.handleRuntimeMetrics))
+	mux.HandleFunc("GET /api/system/generation-quota", s.requireAuth(domain.PermGenerationQuotaManage, s.handleGetGenerationQuota))
+	mux.HandleFunc("PUT /api/system/generation-quota", s.requireAuth(domain.PermGenerationQuotaManage, s.handlePutGenerationQuota))
 
 	// === 题库管理 ===
 	mux.HandleFunc("GET /api/banks", s.requireAuth("", s.handleListBanks))
@@ -216,13 +221,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/export/download/{filename}", s.requireAuth(domain.PermQuestionDownload, s.handleDownloadExport))
 
 	// === 批量推理（逐题调用单题生成 API，本地队列落库）===
-	// 列表/状态/结果回放与提交一样要求批量推理权限：没有推理权限的账号
-	// （含多身份未切换到出题身份者）不应看到批量任务面。
+	// 出题操作要求 batch:run；历史读取允许 batch:run 或全局查看权限，
+	// 具体任务归属在 handler 内再次校验。
 	mux.HandleFunc("GET /api/batch/capabilities", s.requireAuth(domain.PermBatchRun, s.handleBatchCapabilities))
 	mux.HandleFunc("POST /api/batch/submit", s.requireAuth(domain.PermBatchRun, s.handleBatchSubmit))
 	mux.HandleFunc("GET /api/batch/list", s.requireAuth(domain.PermBatchRun, s.handleBatchList))
-	mux.HandleFunc("GET /api/batch/status/{jobId}", s.requireAuth(domain.PermBatchRun, s.handleBatchStatus))
-	mux.HandleFunc("POST /api/batch/download/{jobId}", s.requireAuth(domain.PermBatchRun, s.handleBatchDownload))
+	mux.HandleFunc("GET /api/batch/history", s.requireAuth("", s.handleBatchHistory))
+	mux.HandleFunc("GET /api/batch/status/{jobId}", s.requireAuth("", s.handleBatchStatus))
+	mux.HandleFunc("POST /api/batch/download/{jobId}", s.requireAuth("", s.handleBatchDownload))
 	mux.HandleFunc("POST /api/batch/retry-failed/{jobId}", s.requireAuth(domain.PermBatchRun, s.handleBatchRetryFailed))
 
 	// === AI 检查（题目首次生成后唯一一次自动执行）===
@@ -275,7 +281,15 @@ func withBodyLimit(next http.Handler) http.Handler {
 
 // handleListPermissions 返回全部可分配权限点元数据。
 func (s *Server) handleListPermissions(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"permissions": domain.AllPermissions()})
+	type permissionItem struct {
+		domain.PermissionMeta
+		AdminOnly bool `json:"admin_only,omitempty"`
+	}
+	permissions := make([]permissionItem, 0, len(domain.AllPermissions()))
+	for _, p := range domain.AllPermissions() {
+		permissions = append(permissions, permissionItem{PermissionMeta: p, AdminOnly: p.Code == domain.PermGenerationQuotaManage})
+	}
+	writeJSON(w, 200, map[string]any{"permissions": permissions})
 }
 
 // handleStats 返回系统统计信息：题目数、知识点数、各分类分布。

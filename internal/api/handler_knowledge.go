@@ -55,7 +55,7 @@ func (s *Server) handleSearchKP(w http.ResponseWriter, r *http.Request) {
 		kpError(w, err)
 		return
 	}
-	points, err := s.kpSvc.SearchFiltered(r.Context(), knowledge.KPSearchOptions{VersionID: v.ID, Keyword: q.Get("q"), Subject: q.Get("subject"), Category: q.Get("category"), OutlineCode: q.Get("outline_code"), Path: path})
+	points, err := s.kpSvc.SearchFiltered(r.Context(), knowledge.KPSearchOptions{VersionID: v.ID, Keyword: q.Get("q"), TopicOnly: q.Get("match") == "topic", Subject: q.Get("subject"), Category: q.Get("category"), OutlineCode: q.Get("outline_code"), Path: path})
 	if err != nil {
 		kpError(w, err)
 		return

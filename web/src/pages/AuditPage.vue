@@ -21,7 +21,7 @@ const selectedLog = ref(null); // 点击行后弹窗展示的完整日志
 // 全量行为目录：覆盖存量与新增的所有操作行为；未知行为回退显示原始代码。
 const ACTION_LABELS = {
   // 题目生命周期
-  create: "生成入库",
+  create: "生成草稿",
   update: "保存修改",
   delete: "删除题目",
   restore: "恢复历史版本",

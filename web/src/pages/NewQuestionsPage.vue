@@ -260,7 +260,7 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", warnBeforeUnloa
             <input type="checkbox" :checked="selectedIds.has(question.id)" :disabled="saving || submitting" @click.stop @change="toggleQuestion(question)" />
             <div class="new-question-card-body">
               <strong>{{ question.clinical_stem || "（题干为空）" }}</strong>
-              <span>{{ question.profession || "未填写专业" }} · {{ difficultyText(question.difficulty) }} · v{{ question.version }}<b v-if="selected?.id === question.id && selectedDirty" class="unsaved-tag">未保存</b></span>
+              <span>{{ question.profession || "未填写专业" }} · {{ difficultyText(question.difficulty) }}<b v-if="selected?.id === question.id && selectedDirty" class="unsaved-tag">未保存</b></span>
             </div>
           </article>
         </div>
