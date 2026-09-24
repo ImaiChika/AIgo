@@ -874,9 +874,9 @@ func (s *Service) validateUserMutation(ctx context.Context, actorID, targetID, r
 	if containsString(roles, domain.RoleAdmin) && !isSuper {
 		return ErrSuperAdminOnly
 	}
-	if (containsString(roles, domain.RoleAdmin) || containsString(roles, domain.RoleSuperAdmin)) && len(roles) > 1 {
-		return fmt.Errorf("管理员身份不能与命题老师或审题老师同时挂载")
-	}
+	// 管理员可与命题教师/审题老师共存为多身份（如审题老师被升级管理员后仍可
+	// 切回原岗位）：每个身份的有效权限按所选模板单独计算，切换即隔离。
+	// 超级管理员仍是唯一最高身份，不可与任何模板组合（上方直接拒绝）。
 	for _, p := range permissions {
 		if !domain.IsValidPermission(p) {
 			return fmt.Errorf("无效的权限点: %s", p)
