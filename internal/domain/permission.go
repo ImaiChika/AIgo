@@ -33,7 +33,7 @@ const (
 	PermAuditView             = "audit:view"              // 操作日志查看
 	PermBatchRun              = "batch:run"               // 批量推理（独立于单题出题）
 	PermKnowledgeMng          = "knowledge:manage"        // 知识点导入/增删
-	PermGenerationQuotaManage = "generation_quota:manage" // 生成任务配额查看与调整
+	PermGenerationQuotaManage = "generation_quota:manage" // 生成任务配额查看与调整；仅内置 super_admin/admin 角色可用，不可直接授予用户或自定义角色
 
 	// ===== 题库范围权限 =====
 	PermQuestionView        = "question:view"         // 查看题目列表/详情（过程题库）
@@ -70,7 +70,8 @@ type PermissionMeta struct {
 	BankScope bool   `json:"bank_scope"` // 是否可按题库限定范围
 }
 
-// AllPermissions 全部可分配权限点（供权限矩阵 UI 和角色模板使用）。
+// AllPermissions 全部权限点目录；部分权限（如生成任务配额）有额外角色约束，
+// API 会标注 admin_only，角色/用户权限矩阵不会提供该项的直接勾选。
 func AllPermissions() []PermissionMeta {
 	all := []PermissionMeta{
 		// 题库权限

@@ -43,6 +43,8 @@ export function permissionName(permission) {
 
 // 当前用户是否拥有某权限（user.permissions 为后端计算的有效权限并集）
 export function hasPerm(p) {
+  // 配额管理是内置管理员专属能力；此处仅避免旧浏览器缓存短暂显示菜单，
+  // 后端仍以实时有效权限和当前身份做最终校验，不能靠前端判断授权。
   if (p === "generation_quota:manage" && !["super_admin", "admin"].includes(user.value?.role)) return false;
   return (user.value?.permissions || []).includes(p);
 }

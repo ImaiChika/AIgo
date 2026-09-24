@@ -279,7 +279,7 @@ func withBodyLimit(next http.Handler) http.Handler {
 	})
 }
 
-// handleListPermissions 返回全部可分配权限点元数据。
+// handleListPermissions 返回权限点目录；admin_only 表示内置管理员专属、不可直接分配。
 func (s *Server) handleListPermissions(w http.ResponseWriter, r *http.Request) {
 	type permissionItem struct {
 		domain.PermissionMeta
