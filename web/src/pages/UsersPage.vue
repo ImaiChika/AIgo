@@ -2,7 +2,7 @@
 import { ref, onMounted } from "vue";
 import { api } from "../api.js";
 import { currentUser, permissionName } from "../auth.js";
-import { rolesAfterPrimarySwitch } from "../userRoles.js";
+import { rolesAfterRoleChange } from "../userRoles.js";
 
 const toast = ref("");
 const toastError = ref(false);
@@ -136,9 +136,10 @@ async function togglePerm(u, code) {
 
 async function changeRole(u, role) {
   if (isProtectedUser(u)) return;
-  // 主身份下拉只决定“哪个身份为主”，身份集合只增不减；移除身份走身份勾选。
-  // 此前实现会把集合替换成 [新角色]，静默清掉原有身份，导致用户切不回原身份。
-  const next = rolesAfterPrimarySwitch(roleIDs(u), role);
+  // 下拉换主身份：新主身份加入、旧主身份让位（附加勾选自动取消，对全部
+  // 角色模板一致）；账号原本只有一个身份时原岗位保留为附加身份（升级后
+  // 仍可切回）。附加身份的手工增删走身份勾选。
+  const next = rolesAfterRoleChange(roleIDs(u), u.role, role);
   await saveUser(u, { role, roles: next });
 }
 
@@ -239,7 +240,7 @@ onMounted(loadAll);
         </button>
       </div>
       <p class="permission-summary">
-	      超级管理员仅保留一名；管理员负责业务管理。管理员可由超级管理员授予给业务账号并保留其原岗位身份（如审题老师升级管理员后仍可切回），同一账号可挂载多种身份并在左下角切换。命题教师负责单题/批量出题和提交审核，审题老师只处理分配任务。直接勾选的权限属于账号级覆盖，会在所有身份下生效；双身份老师通常不要直接勾选出题或审题权限，以免绕过身份隔离。
+	      超级管理员仅保留一名；管理员负责业务管理。管理员可由超级管理员授予给业务账号并保留其原岗位身份（如审题老师升级管理员后仍可切回）；将角色下拉换为其他角色时，原主身份的附加勾选会自动取消。同一账号可挂载多种身份并在左下角切换。命题教师负责单题/批量出题和提交审核，审题老师只处理分配任务。直接勾选的权限属于账号级覆盖，会在所有身份下生效；双身份老师通常不要直接勾选出题或审题权限，以免绕过身份隔离。
       </p>
 
       <!-- 新建用户表单 -->

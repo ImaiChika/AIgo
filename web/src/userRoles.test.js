@@ -1,23 +1,37 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeRoleIDs, rolesAfterPrimarySwitch } from "./userRoles.js";
+import { normalizeRoleIDs, rolesAfterRoleChange } from "./userRoles.js";
 
-test("primary switch keeps existing identities and adds the new one", () => {
-  // 审题老师切为主管理员：expert 身份必须保留，否则切回原身份会报“未分配角色模板”。
-  assert.deepEqual(rolesAfterPrimarySwitch(["expert"], "admin"), ["expert", "admin"]);
+test("single-identity upgrade keeps the original job as additional identity", () => {
+  // 审题老师升级管理员：expert 保留为附加身份，账号可随时切回原岗位。
+  assert.deepEqual(rolesAfterRoleChange(["expert"], "expert", "admin"), ["admin", "expert"]);
 });
 
-test("primary switch to an already-assigned role leaves the set unchanged", () => {
-  assert.deepEqual(rolesAfterPrimarySwitch(["expert", "teacher"], "teacher"), ["expert", "teacher"]);
+test("leaving a role removes it from additional identities", () => {
+  // 主身份从管理员换为命题教师：管理员附加勾选自动取消，原岗位 expert 保留。
+  assert.deepEqual(
+    rolesAfterRoleChange(["expert", "admin"], "admin", "teacher"),
+    ["expert", "teacher"],
+  );
 });
 
-test("primary switch tolerates duplicates, blanks and legacy single role", () => {
-  assert.deepEqual(rolesAfterPrimarySwitch(["expert", "", "expert"], "admin"), ["expert", "admin"]);
-  assert.deepEqual(rolesAfterPrimarySwitch([], "expert"), ["expert"]);
+test("rotation among attached identities replaces the previous primary", () => {
+  assert.deepEqual(
+    rolesAfterRoleChange(["expert", "teacher"], "teacher", "expert"),
+    ["expert"],
+  );
 });
 
-test("empty target role keeps the current set", () => {
-  assert.deepEqual(rolesAfterPrimarySwitch(["expert"], ""), ["expert"]);
+test("revoking a granted role via dropdown returns to the remaining set", () => {
+  assert.deepEqual(
+    rolesAfterRoleChange(["expert", "admin"], "admin", "expert"),
+    ["expert"],
+  );
+});
+
+test("tolerates duplicates, blanks and legacy single role field", () => {
+  assert.deepEqual(rolesAfterRoleChange(["", "expert", "expert"], "expert", "admin"), ["admin", "expert"]);
+  assert.deepEqual(rolesAfterRoleChange([], "", "teacher"), ["teacher"]);
 });
 
 test("normalizeRoleIDs falls back to the legacy single role field", () => {
