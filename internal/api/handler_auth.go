@@ -144,11 +144,10 @@ func (s *Server) handleMySummary(w http.ResponseWriter, r *http.Request) {
 // handleSwitchRole 切换当前账号的工作身份。角色集合由管理员维护，服务端
 // 重新签发 JWT，后续接口的权限只取所选身份及用户直接授权。
 //
-// 切换准入按「权限集合」判定，不依赖任何内置角色模板 ID（模板随时可能被
-// 删除重建）：
-//   - 目标身份有效权限（模板 ∪ 账号级直接授权）包含当前身份全部权限 → 纯升级，直接切换；
-//   - 否则按将失去的权限检查需要本人处理的在途任务（审题/决断/退修），
-//     仍有未完成任务则 409 拦截并给出具体任务，全部处理完毕后可自由切换。
+// 已挂载身份之间的切换永远自由：任务归属账号本身，与当前查看身份无关，
+// 随时可以切回处理；切换只改变可见页面，不改变任务归属与数据。
+// 「升级放行 / 收权查在途任务」的准入语义属于 admin 权限分配界面
+// （handleUpdateUser 的占用守卫），不属于身份切换。
 func (s *Server) handleSwitchRole(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Role string `json:"role"`
@@ -162,22 +161,6 @@ func (s *Server) handleSwitchRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请选择要切换的身份")
 		return
 	}
-	if s.reviewSvc != nil {
-		target, targetErr := s.authSvc.GetUserByIDForRole(r.Context(), auth.GetUserID(r.Context()), role)
-		if targetErr != nil {
-			writeError(w, http.StatusForbidden, targetErr.Error())
-			return
-		}
-		blockers, guardErr := s.switchBlockers(r.Context(), role, target.Permissions)
-		if guardErr != nil {
-			writeError(w, http.StatusInternalServerError, "检查在途任务失败")
-			return
-		}
-		if len(blockers) > 0 {
-			writeError(w, http.StatusConflict, "切换身份后将无法继续处理以下未完成任务，请先完成或移交："+strings.Join(blockers, "；"))
-			return
-		}
-	}
 	token, user, err := s.authSvc.SwitchRole(r.Context(), auth.GetUserID(r.Context()), role)
 	if err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
@@ -188,49 +171,6 @@ func (s *Server) handleSwitchRole(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("切换工作身份 → %s", role))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "user": user})
-}
-
-// switchBlockers 比较当前身份与目标身份的有效权限，返回按将失去的权限
-// 关联的在途任务阻断项。当前身份已被移除（旧令牌）时视为空集，允许切换。
-func (s *Server) switchBlockers(ctx context.Context, targetRole string, targetPerms []string) ([]string, error) {
-	userID := auth.GetUserID(ctx)
-	currentRole := auth.GetRole(ctx)
-	currentPerms := []string(nil)
-	if currentIdentity, err := s.authSvc.GetUserByIDForRole(ctx, userID, currentRole); err == nil && currentIdentity != nil {
-		currentPerms = currentIdentity.Permissions
-	}
-	lost := make(map[string]bool)
-	for _, p := range currentPerms {
-		if !slices.Contains(targetPerms, p) {
-			lost[p] = true
-		}
-	}
-	if len(lost) == 0 {
-		return nil, nil
-	}
-	var blockers []string
-	refs, err := s.reviewSvc.AssignmentReferencesByPermission(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	// 切换是临时行为：只拦「现在就需要本人处理」的在途任务；
-	// 流程配置引用（轮审人/把关人）只在永久收权时拦截。
-	if lost[domain.PermReviewDo] {
-		blockers = append(blockers, refs.ActiveReviewDo...)
-	}
-	if lost[domain.PermReviewFinal] {
-		blockers = append(blockers, refs.ActiveFinal...)
-	}
-	if lost[domain.PermQuestionEdit] {
-		pendings, err := s.reviewSvc.RevisionPendingQuestions(ctx, userID)
-		if err != nil {
-			return nil, err
-		}
-		for _, questionID := range pendings {
-			blockers = append(blockers, "待本人修改的题目 "+questionID)
-		}
-	}
-	return blockers, nil
 }
 
 // handleUpdateProfile 修改当前用户的昵称。

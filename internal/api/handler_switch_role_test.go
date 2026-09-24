@@ -12,8 +12,8 @@ import (
 	"aigo/internal/domain"
 )
 
-// switchRoleTestQuestion 构造一道可送审的题目（归属 reviewerID，AI 检查已通过）。
-func switchRoleTestQuestion(id, reviewerID string) domain.A2Question {
+// switchRoleTestQuestion 构造一道归属 reviewerID 的题目。
+func switchRoleTestQuestion(id, reviewerID string, status domain.QuestionStatus) domain.A2Question {
 	question := domain.A2Question{
 		ID:           id,
 		ClinicalStem: "男，45岁。反复上腹痛2年，加重1天。该患者最可能的诊断是",
@@ -30,7 +30,7 @@ func switchRoleTestQuestion(id, reviewerID string) domain.A2Question {
 		OutlineCode: "110.4.3.1.1",
 		Profession:  "消化",
 		System:      "消化系统",
-		Status:      domain.StatusAIReviewed,
+		Status:      status,
 		Version:     1,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
@@ -40,11 +40,22 @@ func switchRoleTestQuestion(id, reviewerID string) domain.A2Question {
 	return question
 }
 
-// TestSwitchRoleAdmissionFollowsPermissionSubset 回归（2026-09-25）：
-// 切换身份准入按「权限集合」判定——目标权限覆盖当前权限时自由切换；
-// 失去权限但无在途任务时同样放行；有在途任务时 409 并给出具体任务。
-// 全程不依赖内置角色模板 ID（第 8 步用自定义角色证明）。
-func TestSwitchRoleAdmissionFollowsPermissionSubset(t *testing.T) {
+// switchToken 从切换身份响应中取新令牌。
+func switchToken(t *testing.T, response *httptest.ResponseRecorder) string {
+	t.Helper()
+	var payload struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || payload.Token == "" {
+		t.Fatalf("switch response missing token: %s", response.Body.String())
+	}
+	return payload.Token
+}
+
+// TestSwitchRoleStaysFreeWithInflightWork 回归（2026-09-25）：已挂载身份之间的
+// 切换永远自由，即使名下有在途审核任务或待本人修改的退修题——任务归属账号，
+// 切换只改变可见页面，用户随时切回处理。此前错误加入的准入拦截必须保持移除。
+func TestSwitchRoleStaysFreeWithInflightWork(t *testing.T) {
 	server, store, cleanup := authHandlerTestServer(t)
 	defer cleanup()
 	handler := server.Handler()
@@ -63,15 +74,8 @@ func TestSwitchRoleAdmissionFollowsPermissionSubset(t *testing.T) {
 
 	dualToken := loginForAuthTest(t, handler, "reviewer-dual", "switch-password", "203.0.113.10")
 
-	// 1. 无在途任务时，teacher→expert（失去出题等权限）放行。
-	firstSwitch := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/switch-role", dualToken, "203.0.113.10", map[string]any{"role": "expert"})
-	if firstSwitch.Code != http.StatusOK {
-		t.Fatalf("downgrade without tasks should pass: status=%d body=%s", firstSwitch.Code, firstSwitch.Body.String())
-	}
-	dualToken = switchToken(t, firstSwitch)
-
-	_ = ctx
-	// 2. 建流程（dual 为第 1 轮审题人）+ 送审一道题，制造在途任务。
+	// 制造两类在途占用：
+	// 1) 名下送审的题目（进行中的审核任务，需要 review:do 处理）；
 	flowCreate := serveAuthJSON(t, handler, http.MethodPost, "/api/review/flows", adminToken, "198.51.100.1", map[string]any{
 		"id":   "flow-switch-regression",
 		"name": "切换回归流程",
@@ -82,96 +86,79 @@ func TestSwitchRoleAdmissionFollowsPermissionSubset(t *testing.T) {
 	if flowCreate.Code != http.StatusCreated {
 		t.Fatalf("create flow: status=%d body=%s", flowCreate.Code, flowCreate.Body.String())
 	}
-	if err := store.SaveQuestion(ctx, switchRoleTestQuestion("q-switch-regression", dualID)); err != nil {
+	if err := store.SaveQuestion(ctx, switchRoleTestQuestion("q-inflight-review", dualID, domain.StatusAIReviewed)); err != nil {
 		t.Fatal(err)
 	}
-	dualToken = loginForAuthTest(t, handler, "reviewer-dual", "switch-password", "203.0.113.10")
-
 	submit := serveAuthJSON(t, handler, http.MethodPost, "/api/review/submit", dualToken, "203.0.113.10", map[string]any{
-		"question_id": "q-switch-regression", "flow_id": "flow-switch-regression",
+		"question_id": "q-inflight-review", "flow_id": "flow-switch-regression",
 	})
 	if submit.Code != http.StatusOK {
 		t.Fatalf("submit review: status=%d body=%s", submit.Code, submit.Body.String())
 	}
 
-	// 3. teacher→expert（获得审题权限）自由切换。
-	upgrade := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/switch-role", dualToken, "203.0.113.10", map[string]any{"role": "expert"})
-	if upgrade.Code != http.StatusOK {
-		t.Fatalf("upgrade with pending task should pass: status=%d body=%s", upgrade.Code, upgrade.Body.String())
+	// 2) 名下退回修改中的题目（待本人修改，需要 question:edit 处理）。
+	if err := store.SaveQuestion(ctx, switchRoleTestQuestion("q-own-revision", dualID, domain.StatusAIReviewed)); err != nil {
+		t.Fatal(err)
 	}
-	dualToken = switchToken(t, upgrade)
+	submit2 := serveAuthJSON(t, handler, http.MethodPost, "/api/review/submit", dualToken, "203.0.113.10", map[string]any{
+		"question_id": "q-own-revision", "flow_id": "flow-switch-regression",
+	})
+	if submit2.Code != http.StatusOK {
+		t.Fatalf("submit second review: status=%d body=%s", submit2.Code, submit2.Body.String())
+	}
+	// 先切到 expert（拿到 review:do），再把第二题审成「需修改」。
+	toExpert := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/switch-role", dualToken, "203.0.113.10", map[string]any{"role": "expert"})
+	if toExpert.Code != http.StatusOK {
+		t.Fatalf("switch to expert: status=%d body=%s", toExpert.Code, toExpert.Body.String())
+	}
+	dualToken = switchToken(t, toExpert)
+	myTasks := serveAuthJSON(t, handler, http.MethodGet, "/api/review/my-tasks", dualToken, "203.0.113.10", nil)
+	if myTasks.Code != http.StatusOK {
+		t.Fatalf("my-tasks: status=%d body=%s", myTasks.Code, myTasks.Body.String())
+	}
+	var taskPage struct {
+		Tasks []struct {
+			Task struct {
+				ID         string `json:"id"`
+				QuestionID string `json:"question_id"`
+			} `json:"task"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal(myTasks.Body.Bytes(), &taskPage); err != nil {
+		t.Fatal(err)
+	}
+	var ownTaskID string
+	for _, item := range taskPage.Tasks {
+		if item.Task.QuestionID == "q-own-revision" {
+			ownTaskID = item.Task.ID
+		}
+	}
+	if ownTaskID == "" {
+		t.Fatalf("own review task not found: %s", myTasks.Body.String())
+	}
+	revision := serveAuthJSON(t, handler, http.MethodPost, "/api/review/action", dualToken, "203.0.113.10", map[string]any{
+		"task_id": ownTaskID, "action": "revision_required", "opinion": "回归：退回修改",
+	})
+	if revision.Code != http.StatusOK {
+		t.Fatalf("revision action: status=%d body=%s", revision.Code, revision.Body.String())
+	}
 
-	// 4. expert→teacher（失去审题权限）被在途任务拦截。
-	blocked := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/switch-role", dualToken, "203.0.113.10", map[string]any{"role": "teacher"})
-	if blocked.Code != http.StatusConflict {
-		t.Fatalf("downgrade with pending review task should 409: status=%d body=%s", blocked.Code, blocked.Body.String())
+	// 两类占用都在：expert ↔ teacher 双向切换都必须自由。
+	back := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/switch-role", dualToken, "203.0.113.10", map[string]any{"role": "teacher"})
+	if back.Code != http.StatusOK {
+		t.Fatalf("switch with inflight review task and own revision must stay free: status=%d body=%s",
+			back.Code, back.Body.String())
 	}
-	if !strings.Contains(blocked.Body.String(), "进行中的审核任务") {
-		t.Fatalf("conflict should name the pending task: %s", blocked.Body.String())
-	}
-
-	// 4b. 仅有流程配置引用（轮审人）、无在途任务的用户可自由切换：
-	// 切换是临时行为，未来才可能派生的任务不构成阻断。
-	refOnly := serveAuthJSON(t, handler, http.MethodPost, "/api/users", adminToken, "198.51.100.1", map[string]any{
-		"username": "ref-only", "password": "ref-password", "display_name": "仅配置引用",
-		"role": "teacher", "roles": []string{"teacher", "expert"},
-	})
-	if refOnly.Code != http.StatusOK && refOnly.Code != http.StatusCreated {
-		t.Fatalf("create ref-only user: status=%d body=%s", refOnly.Code, refOnly.Body.String())
-	}
-	refID := decodeUserID(t, refOnly.Body.String())
-	flow2 := serveAuthJSON(t, handler, http.MethodPost, "/api/review/flows", adminToken, "198.51.100.1", map[string]any{
-		"id":   "flow-ref-only",
-		"name": "仅配置引用流程",
-		"rounds": []map[string]any{{
-			"round_number": 2, "name": "复审", "expert_ids": []string{refID}, "required_count": 1,
-		}},
-	})
-	if flow2.Code != http.StatusCreated {
-		t.Fatalf("create ref-only flow: status=%d body=%s", flow2.Code, flow2.Body.String())
-	}
-	refToken := loginForAuthTest(t, handler, "ref-only", "ref-password", "203.0.113.9")
-	up := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/switch-role", refToken, "203.0.113.9", map[string]any{"role": "expert"})
-	if up.Code != http.StatusOK {
-		t.Fatalf("ref-only upgrade: status=%d body=%s", up.Code, up.Body.String())
-	}
-	refToken = switchToken(t, up)
-	down := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/switch-role", refToken, "203.0.113.9", map[string]any{"role": "teacher"})
-	if down.Code != http.StatusOK {
-		t.Fatalf("ref-only downgrade should pass (reference is not an in-flight task): status=%d body=%s",
-			down.Code, down.Body.String())
-	}
-
-	// 5. 自定义角色证明：删除内置模板也不影响判定。
-	customRole := serveAuthJSON(t, handler, http.MethodPost, "/api/roles", adminToken, "198.51.100.1", map[string]any{
-		"id": "desk-reviewer", "name": "桌面审题", "permissions": []string{"question:view", "review:do"},
-	})
-	if customRole.Code != http.StatusOK && customRole.Code != http.StatusCreated {
-		t.Fatalf("create custom role: status=%d body=%s", customRole.Code, customRole.Body.String())
-	}
-	// 新增自定义身份、保留 teacher（不失去任何权限，编辑守卫不应拦截）。
-	added := serveAuthJSON(t, handler, http.MethodPut, "/api/users/"+dualID, adminToken, "198.51.100.1", map[string]any{
-		"display_name": "双身份审题", "role": "desk-reviewer", "roles": []string{"desk-reviewer", "teacher"},
-	})
-	if added.Code != http.StatusOK {
-		t.Fatalf("add custom role keeping teacher: status=%d body=%s", added.Code, added.Body.String())
-	}
-	// 旧令牌身份（expert）已被移除：视为空集，允许切换到自定义身份。
-	stale := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/switch-role", dualToken, "203.0.113.10", map[string]any{"role": "desk-reviewer"})
-	if stale.Code != http.StatusOK {
-		t.Fatalf("switch with stale current identity should pass: status=%d body=%s", stale.Code, stale.Body.String())
-	}
-	dualToken = switchToken(t, stale)
-	blockedCustom := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/switch-role", dualToken, "203.0.113.10", map[string]any{"role": "teacher"})
-	if blockedCustom.Code != http.StatusConflict || !strings.Contains(blockedCustom.Body.String(), "进行中的审核任务") {
-		t.Fatalf("custom role losing review:do should be blocked by task: status=%d body=%s",
-			blockedCustom.Code, blockedCustom.Body.String())
+	dualToken = switchToken(t, back)
+	again := serveAuthJSON(t, handler, http.MethodPost, "/api/auth/switch-role", dualToken, "203.0.113.10", map[string]any{"role": "expert"})
+	if again.Code != http.StatusOK {
+		t.Fatalf("switch back must stay free: status=%d body=%s", again.Code, again.Body.String())
 	}
 }
 
 // TestEditGuardBlockersPartitionByLostPermission 回归（2026-09-25）：
-// 用户编辑守卫的阻断项必须按「实际失去的权限」分组——只收编辑权限时，
-// 审题相关引用不得拦截；只收审题权限时才拦截流程审人引用。
+// admin 权限分配的收权守卫按「实际失去的权限」分组阻断——只收 question:edit
+// 时，审题相关引用不得拦截；收 review:do 时才拦截流程审人引用。
 func TestEditGuardBlockersPartitionByLostPermission(t *testing.T) {
 	server, _, cleanup := authHandlerTestServer(t)
 	defer cleanup()
@@ -210,6 +197,7 @@ func TestEditGuardBlockersPartitionByLostPermission(t *testing.T) {
 	if flowCreate.Code != http.StatusCreated {
 		t.Fatalf("create flow: status=%d body=%s", flowCreate.Code, flowCreate.Body.String())
 	}
+
 	// 只收 question:edit（保留 review:do）：流程审人引用不应拦截。
 	keepReview := serveAuthJSON(t, handler, http.MethodPut, "/api/users/"+userID, adminToken, "198.51.100.1", map[string]any{
 		"display_name": "分组回归", "role": "view-reviewer", "roles": []string{"view-reviewer"},
@@ -226,16 +214,4 @@ func TestEditGuardBlockersPartitionByLostPermission(t *testing.T) {
 		t.Fatalf("dropping review:do with flow reference should 409: status=%d body=%s",
 			dropReview.Code, dropReview.Body.String())
 	}
-}
-
-// switchToken 从切换身份响应中取新令牌。
-func switchToken(t *testing.T, response *httptest.ResponseRecorder) string {
-	t.Helper()
-	var payload struct {
-		Token string `json:"token"`
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || payload.Token == "" {
-		t.Fatalf("switch response missing token: %s", response.Body.String())
-	}
-	return payload.Token
 }
