@@ -143,6 +143,12 @@ func (s *Server) handleMySummary(w http.ResponseWriter, r *http.Request) {
 
 // handleSwitchRole 切换当前账号的工作身份。角色集合由管理员维护，服务端
 // 重新签发 JWT，后续接口的权限只取所选身份及用户直接授权。
+//
+// 切换准入按「权限集合」判定，不依赖任何内置角色模板 ID（模板随时可能被
+// 删除重建）：
+//   - 目标身份有效权限（模板 ∪ 账号级直接授权）包含当前身份全部权限 → 纯升级，直接切换；
+//   - 否则按将失去的权限检查需要本人处理的在途任务（审题/决断/退修），
+//     仍有未完成任务则 409 拦截并给出具体任务，全部处理完毕后可自由切换。
 func (s *Server) handleSwitchRole(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Role string `json:"role"`
@@ -156,6 +162,22 @@ func (s *Server) handleSwitchRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请选择要切换的身份")
 		return
 	}
+	if s.reviewSvc != nil {
+		target, targetErr := s.authSvc.GetUserByIDForRole(r.Context(), auth.GetUserID(r.Context()), role)
+		if targetErr != nil {
+			writeError(w, http.StatusForbidden, targetErr.Error())
+			return
+		}
+		blockers, guardErr := s.switchBlockers(r.Context(), role, target.Permissions)
+		if guardErr != nil {
+			writeError(w, http.StatusInternalServerError, "检查在途任务失败")
+			return
+		}
+		if len(blockers) > 0 {
+			writeError(w, http.StatusConflict, "切换身份后将无法继续处理以下未完成任务，请先完成或移交："+strings.Join(blockers, "；"))
+			return
+		}
+	}
 	token, user, err := s.authSvc.SwitchRole(r.Context(), auth.GetUserID(r.Context()), role)
 	if err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
@@ -166,6 +188,47 @@ func (s *Server) handleSwitchRole(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("切换工作身份 → %s", role))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "user": user})
+}
+
+// switchBlockers 比较当前身份与目标身份的有效权限，返回按将失去的权限
+// 关联的在途任务阻断项。当前身份已被移除（旧令牌）时视为空集，允许切换。
+func (s *Server) switchBlockers(ctx context.Context, targetRole string, targetPerms []string) ([]string, error) {
+	userID := auth.GetUserID(ctx)
+	currentRole := auth.GetRole(ctx)
+	currentPerms := []string(nil)
+	if currentIdentity, err := s.authSvc.GetUserByIDForRole(ctx, userID, currentRole); err == nil && currentIdentity != nil {
+		currentPerms = currentIdentity.Permissions
+	}
+	lost := make(map[string]bool)
+	for _, p := range currentPerms {
+		if !slices.Contains(targetPerms, p) {
+			lost[p] = true
+		}
+	}
+	if len(lost) == 0 {
+		return nil, nil
+	}
+	var blockers []string
+	refs, err := s.reviewSvc.AssignmentReferencesByPermission(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if lost[domain.PermReviewDo] {
+		blockers = append(blockers, refs.ReviewDo...)
+	}
+	if lost[domain.PermReviewFinal] {
+		blockers = append(blockers, refs.ReviewFinal...)
+	}
+	if lost[domain.PermQuestionEdit] {
+		pendings, err := s.reviewSvc.RevisionPendingQuestions(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		for _, questionID := range pendings {
+			blockers = append(blockers, "待本人修改的题目 "+questionID)
+		}
+	}
+	return blockers, nil
 }
 
 // handleUpdateProfile 修改当前用户的昵称。
@@ -378,12 +441,19 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		losesEditRole := current != nil && slices.Contains(current.Permissions, domain.PermQuestionEdit) && !slices.Contains(futurePermissions, domain.PermQuestionEdit)
 		if currentErr == nil && permissionErr == nil && current != nil && (!futureEnabled || losesReviewRole || losesFinalRole || losesEditRole) {
 			var blockers []string
-			references, referenceErr := s.reviewSvc.UserAssignmentReferences(r.Context(), userID)
+			// 阻断项按「实际失去的权限」取对应分组：丢审题权限才看轮审人/进行中
+			// 任务引用，丢决断权限才看把关人/待决断引用，避免丢 A 权限被 B 占用误拦。
+			references, referenceErr := s.reviewSvc.AssignmentReferencesByPermission(r.Context(), userID)
 			if referenceErr != nil {
 				writeError(w, http.StatusInternalServerError, "检查审核任务引用失败")
 				return
 			}
-			blockers = append(blockers, references...)
+			if losesReviewRole || !futureEnabled {
+				blockers = append(blockers, references.ReviewDo...)
+			}
+			if losesFinalRole || !futureEnabled {
+				blockers = append(blockers, references.ReviewFinal...)
+			}
 			if losesEditRole || !futureEnabled {
 				// 属主侧互斥占用：退回修改中 / 审核中 / 待最终决断的题目。
 				pendings, pendErr := s.reviewSvc.OwnerInFlightQuestions(r.Context(), userID)
