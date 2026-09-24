@@ -453,6 +453,9 @@ async function switchRole(role) {
   margin: 0;
   color: #b53d52;
   font-size: 11px;
+  /* 错误为纯提示：不得遮挡下方的身份切换按钮（拦截点击会导致无法再次切换） */
+  pointer-events: none;
+  z-index: -1;
 }
 
 .sr-only {
