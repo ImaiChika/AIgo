@@ -3,6 +3,9 @@
 
 # Go
 output/
+# 本地构建产物（start.sh 会重新 go build；锚定根目录，勿忽略 cmd/aigo 源码）
+/aigo
+/verify
 
 # Node
 web/node_modules/
@@ -10,7 +13,8 @@ web/dist/
 
 # Env
 .env
-账号密码.txt
+# 任意文件名中含「账号密码」的凭据文件（含《必读：…账号密码.txt》）
+*账号密码.txt
 
 # Local datasets, screenshots, planning state, and SSH artifacts
 data/
