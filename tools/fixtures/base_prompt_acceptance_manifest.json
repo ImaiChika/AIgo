@@ -1,0 +1,61 @@
+{
+  "source": "2020至2025执医真题.xlsx",
+  "source_sha256": "6bed3e6b44308eb77934e1721bee98b30a9f1f26171870c7a3454d7892cfd2bf",
+  "scope": "No KB import or generation few-shot. Simulated checker comparisons only.",
+  "cases": [
+    {
+      "id": "reasonable_surgery",
+      "original_row": 3357,
+      "year": "2023（二）",
+      "expected_usable": true,
+      "variant": "original"
+    },
+    {
+      "id": "reasonable_treatment",
+      "original_row": 4502,
+      "year": "2024（二）",
+      "expected_usable": true,
+      "variant": "original"
+    },
+    {
+      "id": "qualified_principle",
+      "original_row": 4770,
+      "year": "2024（二）",
+      "expected_usable": true,
+      "variant": "wording_only"
+    },
+    {
+      "id": "diagnostic_purpose",
+      "original_row": 822,
+      "year": "2021",
+      "expected_usable": true,
+      "variant": "wording_only"
+    },
+    {
+      "id": "duplicate_best_option",
+      "original_row": 3357,
+      "expected_usable": false,
+      "variant": "duplicate_correct_option"
+    },
+    {
+      "id": "wrong_answer",
+      "original_row": 4770,
+      "expected_usable": false,
+      "variant": "replace_key_only"
+    },
+    {
+      "id": "contradictory_explanation",
+      "original_row": 4502,
+      "expected_usable": false,
+      "variant": "answer_explanation_conflict"
+    }
+  ],
+  "generation_topics": [
+    "社区获得性肺炎的诊断与鉴别诊断",
+    "消化性溃疡的治疗原则",
+    "原发性高血压的具体处理措施",
+    "儿童急性腹泻的脱水评估和补液原则",
+    "缺铁性贫血的辅助检查和诊断",
+    "急性胆囊炎的诊断与鉴别诊断"
+  ]
+}

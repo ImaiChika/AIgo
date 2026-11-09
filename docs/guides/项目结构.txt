@@ -1,0 +1,226 @@
+2026-10-27 更新：当前Schema62与后续扩充见客户需求.txt第29节。旧独立命题规则已迁入个人知识库，支持手工新增及AI总结，共用私有范围/版本/启停和冻结采用；旧规则模块与旧RAG运行入口不再存在。批量候选自动核对，teacher/expert新登录默认teacher。1—61历史迁移不改；本轮仅独立本地库验收，不代表日常服务或ECS已升级。
+
+2026-10-27 C6架构补充（当前口径，Schema61）
+- 当前需求/验收/交接统一见根目录客户需求.txt第28节。主线临床生成→强制首检→本人整理/0轮确认→普通库查看导出，审核是可选兼容分支。
+- internal/questionlib：三轴确认/可恢复删除与恢复；library_state不以审核status替代。
+- internal/learning：真实v1 diff、主动独立异步分析、个人经验导入/历史/冻结匹配。learning_analysis_jobs与生成/首检池分开。
+- PostgreSQL personal_experiences/personal_experience_versions/learning_import_operations/question_experience_contexts保留私有来源；共享knowledge_cards与固定share snapshot保持分离。
+- 生成/首检attempt回写栅栏与学习token+attempt保护持久恢复；HTTP排空/学习安全回写先于DB关闭。
+- tools/e2e/customer_acceptance.py + opt-in CustomerBrowserAcceptance为安全当前入口；旧有危险默认脚本已先于任何副作用停用。
+下文目录为较早结构参考；已移除的旧路径不代表应恢复功能，历史清空动作不构成当前升级指令。
+
+执行与验收约束（2026-10-15，用户明确要求，适用于本文所有历史步骤）
+- 默认只在本地修改和测试。未经用户对当前任务明确允许，不连接ECS、不上传/部署ECS，不上传GitHub或push；“双端同步”“执行CI”等历史说明不构成远端操作授权。本地commit保存进度不等于push，改前核对分支/最新进度并保存已有改动，验收后本地commit。
+- 2026-10-15本轮例外：用户仅授权本次ECS更新及必要远端测试；先把ECS现有部署、配置、数据库及恢复所需产物备份到本地项目根目录并验证，再上传本地已验收版本、核对双端进度，保持ECS健康、本地服务关闭。该授权随本次交付结束失效，不得凭此历史记录执行下一次远端操作；GitHub上传/push仍未授权。
+- 备份只在本地根目录保留，不在ECS新留备份包；备份/密钥/账号口令不得进入Git、同步包或聊天输出。服务器production.env及Secrets是权威源，不用本地测试配置覆盖；仅按本轮明确改动调整指定配置。
+- 以真实用户体验验收，不能只证明代码可运行：保护既有正常功能、身份/权限隔离、题库与质量门禁、页面手感；验证单题/批量、同账号/多账号并发、在途热调冲突、超时/重试/耗尽、崩溃恢复、进度及成功/质量淘汰/检查失败提示，必要时登录前端并实际截图目检。真实API和账号只在用户已授权范围内使用。
+- 首次AI检查任务可内部重试，最多3次总尝试（首次+2次），15s/30s退避；质量不通过或故障耗尽的题均不可见且不入任何题库，保留相应档案与醒目持久计数。禁止通过关闭检查、降质量门槛或人工强制通过来换取速度；保留已通过题目，补生成不重检旧题。
+- 首检默认120秒；HTTP预算与租约同步，默认各150秒。默认三池并发仍2/2/2。三次全超时约6分45秒加排队/存储时间，不承诺整批在该时间内结束。
+- 测试优先独立库/Schema和明确标记的测试资源，事前记录基线，按本轮ID精确清理；不得按“最近N分钟”等粗条件删除业务数据，不擅自清理历史库/Schema、真实题目或其他任务的资源。
+- 测试结束删除本轮临时脚本、日志、凭证、构建/截图和隔离库等痕迹，退出测试账号，关闭本轮本地服务；仅处理已核对归属的进程，不误停其他本地工作。ECS正常生产服务保留健康，只清理由本轮创建的测试痕迹。
+- 出题并发优化的计划、结论、实测和未验证边界统一记入根目录《出题并发优化.txt》，不新建分散报告；用户指定保留的本地ECS备份属于交付物，不作为测试痕迹删除。指引记录不能替代下一次用户授权。
+本次执行状态：本轮ECS更新与验收已完成，单次授权已使用完毕。不得据此开始下一次ECS连接、上传、部署或测试；后续必须重新取得用户明确授权。
+
+AIgo 智能命题系统 - 项目结构
+==============================
+
+.
+├── CLAUDE.md                      # Claude Code 开发约束文件
+├── AGENTS.md                      # Codex 开发约束文件
+├── README.md                      # 项目说明
+├── 功能需求文档.txt                # 产品需求基准（树状图在内）
+├── start.sh                       # 一键启动脚本（PostgreSQL + 后端 + 前端）
+├── end.sh                         # 一键停止脚本
+├── .env                           # 环境变量（API Key、数据库连接，不提交git）
+├── .gitignore                     # git 忽略规则
+├── go.mod                         # Go 模块定义
+├── docs/                          # 专家材料、项目指南、分析与研究资料
+├── data/                          # 需求表、参考大纲、样题和批量运行资料
+│   └── README.md                   # 数据资料索引
+│
+├── cmd/                           # 命令行入口
+│   └── aigo/
+│       └── main.go                # CLI 主入口：doctor/serve/import/generate 等命令
+│
+├── configs/                       # 配置文件
+│   ├── example.env                # 环境变量示例（不含真实Key）
+│   └── review_flows.json          # 审核流程配置（可自定义轮数和审核人）
+│
+├── internal/                      # 核心业务代码（Go 后端）
+│   ├── api/                       # HTTP API 层
+│   │   ├── server.go              # 路由注册、中间件、统计接口
+│   │   ├── handler_auth.go        # 认证接口：登录、用户信息、修改昵称/密码、用户管理
+│   │   ├── handler_question.go    # 题目接口：生成、列表、搜索、更新、删除
+│   │   ├── handler_knowledge.go   # 知识点接口：列表、搜索、创建、删除、Excel导入
+│   │   ├── handler_expert.go      # 历史专家接口兼容；当前审核人来自登录账号权限
+│   │   ├── handler_review.go      # 审核接口：提交、审核操作、任务查询、记录、流程列表
+│   │   ├── handler_batch.go       # 批量推理接口：提交、状态查询、列表、下载导入
+│   │   ├── handler_ai_check.go    # AI检查接口：批量检查、结果查询
+│   │   ├── handler_export.go      # 导出接口：Excel、Word 导出
+│   │   ├── handler_audit.go       # 审计日志接口
+│   │   ├── handler_utils.go       # 工具函数：JSON读写、CORS、错误响应
+│   │   └── helper.go              # 文件上传辅助函数
+│   │
+│   ├── aicheck/                   # AI 检查模块
+│   │   └── service.go             # LLM 检查题目质量，四维评分，结果持久化
+│   │
+│   ├── auth/                      # 认证模块
+│   │   ├── auth.go                # JWT 签发/验证、bcrypt 密码哈希、RBAC 权限表、用户CRUD
+│   │   └── middleware.go          # HTTP 认证中间件、context 注入用户信息
+│   │
+│   ├── audit/                     # 审计日志模块
+│   │   └── service.go             # 操作日志记录
+│   │
+│   ├── batch/                     # 批量推理模块
+│   │   └── service.go             # DashScope 批量 API：生成JSONL、上传、提交、状态查询、导入
+│   │
+│   ├── config/                    # 配置模块
+│   │   └── config.go              # 从环境变量和 .env 文件加载配置
+│   │
+│   ├── domain/                    # 领域模型（核心数据结构）
+│   │   ├── types.go               # 题目、知识点、选项、难度、来源、生成请求、评估报告
+│   │   ├── validate.go            # 题目基础校验（题干非空、选项4-5个、答案在选项中）
+│   │   └── review.go              # 专家、审核流程、审核任务、审核记录、AI检查结果
+│   │
+│   ├── evaluator/                 # 质量评估模块
+│   │   ├── service.go             # 规则评估：选项数量、答案存在性、解析加分
+│   │   └── evaluator_test.go      # 评估器单元测试
+│   │
+│   ├── exporter/                  # 导出模块
+│   │   └── docx.go                # Word (.docx) 导出
+│   │
+│   ├── generator/                 # 题目生成模块
+│   │   ├── prompt.go              # 千问 prompt 构建、JSON schema、响应解析
+│   │   ├── service.go             # 生成服务：调千问API、解析结果、存入题库
+│   │   └── generator_test.go      # 生成器测试
+│   │
+│   ├── importer/                  # 数据导入模块
+│   │   └── xlsx.go                # 题目/知识点 xlsx 读取和转换
+│   │
+│   ├── knowledge/                 # 知识点服务模块
+│   │   ├── service.go             # 知识点导入、搜索、筛选、统计、删除
+│   │   └── knowledge_test.go      # 知识点导入+搜索集成测试
+│   │
+│   ├── llm/                       # 大模型调用模块
+│   │   ├── client.go              # LLM 通用接口定义（可调换模型）
+│   │   └── qwen.go                # 千问 OpenAI 兼容客户端
+│   │
+│   ├── pipeline/                  # 流程编排模块
+│   │   └── pipeline.go            # 串联生成→评估→存储，对外暴露各业务方法
+│   │
+│   ├── review/                    # 审核服务模块
+│   │   └── service.go             # 可选审核：1/N完成模式与旧external_final，按任务分配和当前资格投票
+│   │
+│   └── storage/                   # 存储模块
+│       ├── interfaces.go          # 所有存储接口定义
+│       ├── testutil/
+│       │   └── store.go           # 内存存储实现（仅供测试）
+│       └── postgres/              # PostgreSQL 持久化存储
+│           ├── schema.sql         # 数据库建表语句（12张表）
+│           └── store.go           # PostgreSQL 存储实现（所有接口）
+│
+├── output/                        # 运行时输出（导出文件、日志）
+│
+└── web/                           # 前端（Vue 3 + Vite）
+    ├── index.html                 # HTML 入口
+    ├── package.json               # Node.js 依赖配置
+    ├── vite.config.js             # Vite 构建配置
+    └── src/
+        ├── main.js                # Vue 应用入口
+        ├── App.vue                # 根组件：侧边栏导航、用户信息、昵称编辑
+        ├── auth.js                # 前端认证状态管理（token、用户信息）
+        ├── api.js                 # API 服务层（封装所有后端接口调用）
+        ├── router.js              # Vue Router 路由配置 + 登录守卫 + admin守卫
+        ├── styles.css             # 全局样式
+        └── pages/                 # 页面组件
+            ├── LoginPage.vue      # 登录页
+            ├── GeneratePage.vue   # AI出题页：选知识点→生成→自动质检
+            ├── KnowledgePage.vue  # 知识点管理页：搜索、添加、删除、Excel导入
+            ├── AICheckPage.vue    # AI检查页：选题→LLM检查→评分/问题/建议
+            ├── ReviewPage.vue     # 审核页：选题→提交审核→多轮审核→记录
+            ├── BankPage.vue       # 题库页：搜索、筛选、详情、删除、导出
+            ├── BatchPage.vue      # 批量推理页：提交任务、状态监控、导入结果
+            ├── ExpertsPage.vue    # 专家库页：增删改查、启用停用（admin）
+            ├── ReviewFlowPage.vue # 审核流程配置页（admin）
+            ├── AuditPage.vue      # 操作日志页（admin）
+            └── UsersPage.vue      # 用户管理页：创建账号、查看列表（admin）
+
+
+数据库表（PostgreSQL）
+====================
+
+users                # 用户表（账号、密码哈希、角色、昵称）
+knowledge_points     # 知识点表（科目、系统、名称、关键词）
+questions            # 题目表（题干、选项、答案、解析、状态、版本）
+experts              # 历史兼容表保留；当前审核人来自 users/roles，不能按旧说明再次清空
+review_flows         # 审核流程配置表（流程名、轮次配置JSON）
+review_tasks         # 审核任务表（题目ID、流程ID、当前轮次、状态）
+review_records       # 审核记录表（任务ID、轮次、审核人、结论、意见）
+batch_jobs           # 批量任务表（任务名、状态、进度、知识点JSON）
+ai_review_results    # AI检查结果表（verdict、四维评分、问题列表、建议）
+
+
+API 接口
+========
+
+认证:
+  POST   /api/auth/login              登录（返回JWT）
+  GET    /api/auth/me                 当前用户信息
+  PUT    /api/auth/profile            修改昵称
+  POST   /api/auth/change-password    修改密码
+
+用户管理（仅管理员）:
+  GET    /api/users                   用户列表
+  POST   /api/users                   创建用户
+
+题目:
+  POST   /api/questions/generate      生成题目（调千问）
+  GET    /api/questions               题目列表
+  GET    /api/questions/search?q=     搜索题目
+  GET    /api/questions/{id}          题目详情
+  PUT    /api/questions/{id}          修改题目
+  DELETE /api/questions/{id}          删除题目
+
+知识点:
+  GET    /api/knowledge-points        知识点列表
+  GET    /api/knowledge-points/search 搜索知识点
+  POST   /api/knowledge-points/import Excel导入
+  DELETE /api/knowledge-points/{id}   删除知识点
+
+专家:
+  /api/experts                         历史兼容接口（当前 Web 与新审核流程不使用）
+
+AI检查:
+  POST   /api/ai-check                批量AI检查题目
+  GET    /api/ai-check/result/{id}    单题检查结果
+  GET    /api/ai-check/results        所有检查结果
+
+批量推理:
+  POST   /api/batch/submit            提交批量任务
+  GET    /api/batch/list              任务列表
+  GET    /api/batch/status/{jobId}    任务状态
+  POST   /api/batch/download/{jobId}  下载结果并导入
+
+审核:
+  POST   /api/review/submit           提交审核
+  POST   /api/review/action           审核操作
+  GET    /api/review/task/{id}        审核任务详情
+  GET    /api/review/task-by-question/{id}  按题目查审核任务
+  GET    /api/review/records/{id}     审核记录
+  GET    /api/review/flows            审核流程列表
+
+导出:
+  POST   /api/export/xlsx             导出Excel
+  POST   /api/export/docx             导出Word
+  GET    /api/export/download/{file}  下载导出文件
+
+统计:
+  GET    /api/stats                   系统统计
+
+
+角色权限
+========
+
+admin（管理员）:  全部权限
+expert（审题老师）:  仅处理分配到的审核任务；命题能力通过 teacher 身份切换获得
+teacher（教师）:  出题、知识点查看、AI检查、提交审核

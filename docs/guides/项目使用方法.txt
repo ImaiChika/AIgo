@@ -1,0 +1,175 @@
+2026-10-27 更新：当前Schema62与后续扩充见客户需求.txt第29节。旧独立命题规则已迁入个人知识库，支持手工新增及AI总结，共用私有范围/版本/启停和冻结采用；旧规则模块与旧RAG运行入口不再存在。批量候选自动核对，teacher/expert新登录默认teacher。1—61历史迁移不改；本轮仅独立本地库验收，不代表日常服务或ECS已升级。
+
+2026-10-27 当前客户使用路径（Schema61）
+临床大纲选题→单题或随机共N题→等待强制首次检查→题目整理微调并保存→确认入库（0轮，无需审核）→个人普通题库查看/Excel或Word导出。修订后需重新确认当前版，不重复首检。
+学习可从题目整理/本人普通库主动打开v1对当前版差异，选择调用AI产三版候选，选改后保存草稿或启用；我的经验管理范围/历史/停用，新任务按选择冻结采用。经验不公开，不训练参数，当前真实格式/样式遵循仍有局限。
+审核1/N轮和旧最终决断仅在主动选用时适用；共享pending锁源，approved保留公共固定版本、私人修订不污染公共。
+开发验收只用tools/e2e/README.md所述专用隔离库入口；下文旧开发启动方式用于日常开发，不是本轮测试环境，旧审核必经/不可修订/仅published导出说明不再适用。完整结果与下一步见客户需求.txt第28节。
+
+执行与验收约束（2026-10-15，用户明确要求，适用于本文所有历史步骤）
+- 默认只在本地修改和测试。未经用户对当前任务明确允许，不连接ECS、不上传/部署ECS，不上传GitHub或push；“双端同步”“执行CI”等历史说明不构成远端操作授权。本地commit保存进度不等于push，改前核对分支/最新进度并保存已有改动，验收后本地commit。
+- 2026-10-15本轮例外：用户仅授权本次ECS更新及必要远端测试；先把ECS现有部署、配置、数据库及恢复所需产物备份到本地项目根目录并验证，再上传本地已验收版本、核对双端进度，保持ECS健康、本地服务关闭。该授权随本次交付结束失效，不得凭此历史记录执行下一次远端操作；GitHub上传/push仍未授权。
+- 备份只在本地根目录保留，不在ECS新留备份包；备份/密钥/账号口令不得进入Git、同步包或聊天输出。服务器production.env及Secrets是权威源，不用本地测试配置覆盖；仅按本轮明确改动调整指定配置。
+- 以真实用户体验验收，不能只证明代码可运行：保护既有正常功能、身份/权限隔离、题库与质量门禁、页面手感；验证单题/批量、同账号/多账号并发、在途热调冲突、超时/重试/耗尽、崩溃恢复、进度及成功/质量淘汰/检查失败提示，必要时登录前端并实际截图目检。真实API和账号只在用户已授权范围内使用。
+- 首次AI检查任务可内部重试，最多3次总尝试（首次+2次），15s/30s退避；质量不通过或故障耗尽的题均不可见且不入任何题库，保留相应档案与醒目持久计数。禁止通过关闭检查、降质量门槛或人工强制通过来换取速度；保留已通过题目，补生成不重检旧题。
+- 首检默认120秒；HTTP预算与租约同步，默认各150秒。默认三池并发仍2/2/2。三次全超时约6分45秒加排队/存储时间，不承诺整批在该时间内结束。
+- 测试优先独立库/Schema和明确标记的测试资源，事前记录基线，按本轮ID精确清理；不得按“最近N分钟”等粗条件删除业务数据，不擅自清理历史库/Schema、真实题目或其他任务的资源。
+- 测试结束删除本轮临时脚本、日志、凭证、构建/截图和隔离库等痕迹，退出测试账号，关闭本轮本地服务；仅处理已核对归属的进程，不误停其他本地工作。ECS正常生产服务保留健康，只清理由本轮创建的测试痕迹。
+- 出题并发优化的计划、结论、实测和未验证边界统一记入根目录《出题并发优化.txt》，不新建分散报告；用户指定保留的本地ECS备份属于交付物，不作为测试痕迹删除。指引记录不能替代下一次用户授权。
+本次执行状态：本轮ECS更新与验收已完成，单次授权已使用完毕。不得据此开始下一次ECS连接、上传、部署或测试；后续必须重新取得用户明确授权。
+
+AIgo 项目使用方法
+=================
+
+说明：
+本项目包含 Go 后端 + Vue 3 前端 + PostgreSQL 数据库。
+默认超级管理员：admin / admin（仅演示库；新库首次启动时创建为唯一 super_admin，密码随机生成并由启动日志打印，或由 AIGO_ADMIN_PASSWORD 指定）
+
+
+一、环境要求
+------------
+
+- Go 1.26+
+- Node.js 18+
+- PostgreSQL 16+
+- 阿里云百炼 API Key（使用云端文本或百炼 Batch 时需要）
+
+
+二、首次启动
+------------
+
+1. 启动 PostgreSQL：
+
+   brew services start postgresql@16
+
+2. 创建数据库：
+
+   createdb aigo
+
+3. 配置环境变量：
+
+   cp configs/example.env .env
+   # 编辑 .env，至少填入 DB_DSN 和 JWT_SECRET。
+   # 实时 Qwen 也可用环境变量首次预置，启动后会加密导入数据库；上线后建议登录“AI 服务配置”页面维护：
+   # DASHSCOPE_API_KEY=你的API Key
+   # QWEN_DEPLOYMENT=cloud
+   # QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+   # QWEN_MODEL=qwen3.5-flash
+   # DB_DSN=postgres://localhost:5432/aigo?sslmode=disable
+
+   # 本地实时推理示例（本地模式不会自动发送 DASHSCOPE_API_KEY）：
+   # QWEN_DEPLOYMENT=local
+   # QWEN_BASE_URL=http://qwen-vllm.internal:8000/v1
+   # QWEN_MODEL=Qwen/Qwen3.5-35B-A3B
+   # QWEN_LOCAL_API_KEY=  # 本地网关无鉴权时留空
+   # Web 批量任务使用本地单题 API 队列；QWEN_BATCH_BACKEND 仅供 CLI 兼容命令
+
+4. 启动后端：
+
+   go run ./cmd/aigo serve
+
+   首次启动会自动建表和创建唯一超级管理员；已有演示库的 admin 账号会自动升级为超级管理员。
+
+5. 启动前端（另一个终端）：
+
+   cd web
+   npm install
+   npm run dev -- --port 5174
+
+6. 浏览器访问：
+
+   http://127.0.0.1:5174
+
+   登录：admin / admin（演示库）；新库见启动日志打印的超级管理员密码
+
+   超级管理员登录后，可在“系统管理 → AI 服务配置”新增、切换或删除实时 AI 配置；“AI 生成模型”和“AI 检查模型”分别填写，默认相同。
+
+
+三、导入数据
+------------
+
+导入知识点：
+
+  go run ./cmd/aigo kp-import data/knowledge/知识点表.xlsx
+
+导入题目：
+
+  go run ./cmd/aigo import data/samples/2025执医A2.xlsx
+
+或通过前端页面上传。
+
+
+四、关闭服务
+------------
+
+  # 停止后端（Ctrl+C 或）
+  pkill -f "aigo serve"
+
+  # 停止前端（Ctrl+C 或）
+  pkill -f "vite"
+
+  # 停止 PostgreSQL
+  brew services stop postgresql@16
+
+
+五、CLI 命令
+------------
+
+  go run ./cmd/aigo doctor              检查框架状态
+  go run ./cmd/aigo serve               启动 HTTP 服务（默认 8080 端口）
+  go run ./cmd/aigo serve 3000          指定端口启动
+  go run ./cmd/aigo import <file.xlsx>  导入题目
+  go run ./cmd/aigo kp-import <file.xlsx> 导入知识点
+  go run ./cmd/aigo kp-list             列出知识点
+  go run ./cmd/aigo kp-search <关键词>  搜索知识点
+  go run ./cmd/aigo list                列出题目
+  go run ./cmd/aigo generate            调 API 生成新题（需 Key）
+
+
+六、前端页面
+------------
+
+  /login          登录页
+  /generate       AI出题（选知识点 → 生成 → 自动质检）
+  /knowledge      知识点管理（搜索、添加、删除、Excel导入）
+  /review         多轮审核（选题 → 提交审核 → 审核 → 记录）
+  /bank           题库（搜索、筛选、详情、编辑、删除、导出）
+  （无专家库页面；审题老师由用户角色与权限统一管理）
+  /review-flows   审核流程配置（仅管理员）
+  /audit          操作日志（仅管理员）
+  /users          用户管理（仅管理员）
+
+
+七、API 接口
+------------
+
+  POST   /api/auth/login              登录
+  GET    /api/auth/me                 当前用户
+  GET    /api/stats                   统计
+
+  POST   /api/questions/generate      生成题目
+  GET    /api/questions               题目列表
+  GET    /api/questions/search?q=     搜索题目
+  GET    /api/questions/{id}          题目详情
+  PUT    /api/questions/{id}          修改题目
+  DELETE /api/questions/{id}          删除题目
+  POST   /api/questions/{id}/publish  旧客户端兼容接口（published 状态幂等）
+
+  GET    /api/knowledge-points        知识点列表
+  GET    /api/knowledge-points/search 搜索知识点
+  POST   /api/knowledge-points        创建知识点
+  POST   /api/knowledge-points/import Excel导入
+  DELETE /api/knowledge-points/{id}   删除知识点
+
+  /api/experts                         历史兼容接口（当前 Web 与新审核流程不使用）
+
+  GET    /api/review/flows            审核流程列表
+  POST   /api/review/flows            创建审核流程
+  POST   /api/review/submit           提交审核
+  POST   /api/review/action           审核操作
+  GET    /api/review/task/{id}        审核任务
+  GET    /api/review/records/{id}     审核记录
+
+  GET    /api/audit-logs              操作日志
+  GET    /api/users                   用户列表
+  POST   /api/users                   创建用户

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"aigo/internal/auth"
 	"aigo/internal/domain"
 )
 
@@ -51,6 +52,10 @@ func (s *Server) handleCreateExpert(w http.ResponseWriter, r *http.Request) {
 	if err := s.reviewSvc.CreateExpert(r.Context(), expert); err != nil {
 		writeError(w, 500, "创建失败: "+err.Error())
 		return
+	}
+	if s.auditSvc != nil {
+		_ = s.auditSvc.LogExpert(r.Context(), expert.ID, auth.GetUsername(r.Context()), "create",
+			fmt.Sprintf("新增专家「%s」（%s %s）", expert.Name, expert.Department, expert.Title))
 	}
 	writeJSON(w, 201, expert)
 }
@@ -99,6 +104,11 @@ func (s *Server) handleUpdateExpert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "更新失败: "+err.Error())
 		return
 	}
+	if s.auditSvc != nil {
+		enabled := map[bool]string{true: "启用", false: "停用"}[existing.Enabled]
+		_ = s.auditSvc.LogExpert(r.Context(), existing.ID, auth.GetUsername(r.Context()), "update",
+			fmt.Sprintf("更新专家「%s」（%s %s，状态：%s）", existing.Name, existing.Department, existing.Title, enabled))
+	}
 	writeJSON(w, 200, existing)
 }
 
@@ -108,6 +118,9 @@ func (s *Server) handleDeleteExpert(w http.ResponseWriter, r *http.Request) {
 	if err := s.reviewSvc.DeleteExpert(r.Context(), id); err != nil {
 		writeError(w, 500, "删除失败: "+err.Error())
 		return
+	}
+	if s.auditSvc != nil {
+		_ = s.auditSvc.LogExpert(r.Context(), id, auth.GetUsername(r.Context()), "delete", "删除专家")
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok", "id": id})
 }

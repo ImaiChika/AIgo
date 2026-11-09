@@ -1,0 +1,74 @@
+{
+  "purpose": "Opt-in local isolated acceptance only; no expert validation or automatic seed",
+  "source_sha256": {
+    "2020至2025执医真题.xlsx": "6bed3e6b44308eb77934e1721bee98b30a9f1f26171870c7a3454d7892cfd2bf",
+    "2020至2025执医真题_A2标注版.xlsx": "3b2de866df75eb7b0019db9cf3a11cbabb3e482e281e252364d5baf9a5ae0415",
+    "A2真题普遍规律总结-2026-10-23.md": "3937604a5abeb6796c934c36b9e855a01b37d68912b786e52c52a9ff03ee2db9"
+  },
+  "selected": [
+    {
+      "original_row": 5808,
+      "year": "2025（二）",
+      "outline_code": "110.4.1.5.2.5",
+      "topic": "肺炎",
+      "source_stem_characters": 113,
+      "review_status": "unconfirmed_user_material_and_ai_annotation"
+    },
+    {
+      "original_row": 5810,
+      "year": "2025（二）",
+      "outline_code": "110.4.3.1.6.8",
+      "topic": "消化性溃疡",
+      "source_stem_characters": 157,
+      "review_status": "unconfirmed_user_material_and_ai_annotation"
+    },
+    {
+      "original_row": 5774,
+      "year": "2025（二）",
+      "outline_code": "110.4.1.3.1.4",
+      "topic": "支气管哮喘",
+      "source_stem_characters": 80,
+      "review_status": "unconfirmed_user_material_and_ai_annotation"
+    },
+    {
+      "original_row": 2736,
+      "year": "2024（一）",
+      "outline_code": "110.4.3.3.2.5",
+      "topic": "急性胆囊炎",
+      "source_stem_characters": 77,
+      "review_status": "unconfirmed_user_material_and_ai_annotation"
+    },
+    {
+      "original_row": 4625,
+      "year": "2024（二）",
+      "outline_code": "110.4.3.4.1.4",
+      "topic": "急性胰腺炎",
+      "source_stem_characters": 132,
+      "review_status": "unconfirmed_user_material_and_ai_annotation"
+    },
+    {
+      "original_row": 5629,
+      "year": "2025（二）",
+      "outline_code": "110.4.2.4.1.7",
+      "topic": "高血压",
+      "source_stem_characters": 77,
+      "review_status": "unconfirmed_user_material_and_ai_annotation"
+    },
+    {
+      "original_row": 5706,
+      "year": "2025（二）",
+      "outline_code": "110.4.7.7.2.5",
+      "topic": "糖尿病",
+      "source_stem_characters": 92,
+      "review_status": "unconfirmed_user_material_and_ai_annotation"
+    },
+    {
+      "original_row": 5826,
+      "year": "2025（二）",
+      "outline_code": "110.4.3.6.1.2",
+      "topic": "急性阑尾炎",
+      "source_stem_characters": 112,
+      "review_status": "unconfirmed_user_material_and_ai_annotation"
+    }
+  ]
+}

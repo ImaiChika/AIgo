@@ -1,0 +1,21 @@
+.git
+.gitignore
+.DS_Store
+.env
+aigo
+output
+8.19
+820
+824
+web/node_modules
+web/dist
+deploy/production.env
+deploy/secrets
+deploy/offsite-recovery
+**/*.dump
+**/*.log
+**/__pycache__
+# 离线候选医学原文不随应用镜像发布；未来后台资料使用独立私有持久目录。
+rag/originals
+rag/extracted
+data

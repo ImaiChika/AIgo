@@ -1,0 +1,67 @@
+services:
+  offsite:
+    profiles: ["offsite"]
+    image: ${AIGO_OFFSITE_IMAGE:-aigo-offsite:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: offsite
+    command: ["daemon"]
+    restart: unless-stopped
+    environment:
+      AIGO_BACKUP_DIR: /backups
+      AIGO_OFFSITE_STATE_DIR: /state
+      AIGO_OFFSITE_ACCESS_KEY_FILE: /run/secrets/offsite_access_key
+      AIGO_OFFSITE_SECRET_KEY_FILE: /run/secrets/offsite_secret_key
+      AIGO_OFFSITE_AGE_RECIPIENT: ${AIGO_OFFSITE_AGE_RECIPIENT:-}
+      AIGO_OFFSITE_S3_PROVIDER: ${AIGO_OFFSITE_S3_PROVIDER:-Other}
+      AIGO_OFFSITE_S3_ENDPOINT: ${AIGO_OFFSITE_S3_ENDPOINT:-}
+      AIGO_OFFSITE_S3_REGION: ${AIGO_OFFSITE_S3_REGION:-us-east-1}
+      AIGO_OFFSITE_S3_BUCKET: ${AIGO_OFFSITE_S3_BUCKET:-}
+      AIGO_OFFSITE_S3_PREFIX: ${AIGO_OFFSITE_S3_PREFIX:-aigo}
+      AIGO_OFFSITE_S3_FORCE_PATH_STYLE: ${AIGO_OFFSITE_S3_FORCE_PATH_STYLE:-true}
+      AIGO_OFFSITE_INTERVAL_SECONDS: ${AIGO_OFFSITE_INTERVAL_SECONDS:-300}
+      AIGO_OFFSITE_LOCK_TIMEOUT_SECONDS: ${AIGO_OFFSITE_LOCK_TIMEOUT_SECONDS:-30}
+      AIGO_OFFSITE_CONNECT_TIMEOUT: ${AIGO_OFFSITE_CONNECT_TIMEOUT:-5s}
+      AIGO_OFFSITE_IO_TIMEOUT: ${AIGO_OFFSITE_IO_TIMEOUT:-30s}
+      AIGO_OFFSITE_HEALTH_GRACE_SECONDS: ${AIGO_OFFSITE_HEALTH_GRACE_SECONDS:-900}
+      AIGO_OFFSITE_ALLOW_INSECURE_ENDPOINT: ${AIGO_OFFSITE_ALLOW_INSECURE_ENDPOINT:-0}
+      AIGO_OFFSITE_REQUIRE_OBJECT_LOCK: ${AIGO_OFFSITE_REQUIRE_OBJECT_LOCK:-1}
+      AIGO_OFFSITE_BUCKET_OBJECT_LOCK_CONFIRMED: ${AIGO_OFFSITE_BUCKET_OBJECT_LOCK_CONFIRMED:-0}
+      TZ: ${TZ:-Asia/Shanghai}
+    secrets:
+      - offsite_access_key
+      - offsite_secret_key
+    depends_on:
+      backup:
+        condition: service_started
+    volumes:
+      - backup_data:/backups:ro
+      - offsite_state:/state
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: ${AIGO_OFFSITE_MEMORY_LIMIT:-512m}
+    cpus: ${AIGO_OFFSITE_CPU_LIMIT:-1.0}
+    stop_grace_period: 2m
+    networks:
+      - edge
+    logging:
+      driver: json-file
+      options:
+        max-size: ${AIGO_LOG_MAX_SIZE:-20m}
+        max-file: ${AIGO_LOG_MAX_FILES:-5}
+
+secrets:
+  offsite_access_key:
+    file: ${AIGO_OFFSITE_ACCESS_KEY_FILE:-./deploy/secrets/offsite_access_key}
+  offsite_secret_key:
+    file: ${AIGO_OFFSITE_SECRET_KEY_FILE:-./deploy/secrets/offsite_secret_key}
+
+volumes:
+  offsite_state:

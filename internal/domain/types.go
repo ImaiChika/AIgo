@@ -1,5 +1,5 @@
 // Package domain 定义 AIgo 系统的核心领域类型。
-// 包括题目、知识点、选项、多模态素材、生成请求、评估报告等数据结构。
+// 包括题目、知识点、选项、生成请求、评估报告等数据结构。
 package domain
 
 import "time"
@@ -15,30 +15,100 @@ const (
 
 // KnowledgePoint 知识点，对应考试大纲中的一个考点。
 type KnowledgePoint struct {
-	ID         string   `json:"id"`          // 知识点唯一标识
-	Subject    string   `json:"subject"`     // 科目，如"临床医学"
-	System     string   `json:"system"`      // 所属系统，如"呼吸内科"、"心内科"
-	Topic      string   `json:"topic"`       // 知识点名称，如"社区获得性肺炎"
-	OutlineRef string   `json:"outline_ref"` // 考试大纲编号
-	Keywords   []string `json:"keywords"`    // 关键词列表，用于搜索
+	ID          string   `json:"id"` // 跨版本唯一标识，不等同于大纲代码
+	VersionID   string   `json:"version_id,omitempty"`
+	VersionName string   `json:"version_name,omitempty"` // 出题时随知识点一起保存快照
+	VersionYear int      `json:"version_year,omitempty"`
+	Revision    int      `json:"revision,omitempty"`
+	Category    string   `json:"category"`     // 分类：基础医学 / 临床综合
+	Subject     string   `json:"subject"`      // 专业/系统，如"病理"、"呼吸系统"
+	Unit        string   `json:"unit"`         // 单元，如"二、局部血液循环障碍"
+	SubItem     string   `json:"sub_item"`     // 细目，如"1．充血和淤血"
+	Topic       string   `json:"topic"`        // 要点，如"（1）充血的概念和类型"
+	OutlineCode string   `json:"outline_code"` // 大纲代码，如"110.2.6.2.1.1"
+	Keywords    []string `json:"keywords"`     // 关键词列表，用于搜索（兼容旧字段）
 }
 
 // A2Question A2 型单选题（临床情境题）。
 // 国家执业医师考试标准题型：给出临床情境，要求选择最佳诊断或处理。
 type A2Question struct {
-	ID              string           `json:"id"`               // 题目唯一标识
-	ClinicalStem    string           `json:"clinical_stem"`    // 临床情境题干
-	Options         []Option         `json:"options"`          // 选项列表（A-E）
-	Answer          string           `json:"answer"`           // 正确答案标签（A/B/C/D/E）
-	Explanation     string           `json:"explanation"`      // 答案解析（可选）
-	SourceRefs      []SourceRef      `json:"source_refs"`      // 解析来源引用（可选）
-	KnowledgePoints []KnowledgePoint `json:"knowledge_points"` // 关联的知识点
-	MediaRefs       []MediaRef       `json:"media_refs"`       // 关联的多模态素材（图片、影像等）
-	Difficulty      Difficulty       `json:"difficulty"`       // 难度等级
-	Status          QuestionStatus   `json:"status"`           // 审核状态
-	Version         int              `json:"version"`          // 版本号，每次修改递增
-	CreatedAt       time.Time        `json:"created_at"`       // 创建时间
-	UpdatedAt       time.Time        `json:"updated_at"`       // 最后更新时间
+	GenerationContext   *QuestionGenerationContext  `json:"-"`
+	PersonalExperiences *PersonalExperienceSnapshot `json:"-"`
+	ID                  string                      `json:"id"`               // 题目唯一标识
+	ClinicalStem        string                      `json:"clinical_stem"`    // 临床情境题干
+	Options             []Option                    `json:"options"`          // 选项列表（A-E）
+	Answer              string                      `json:"answer"`           // 正确答案标签（A/B/C/D/E）
+	Explanation         string                      `json:"explanation"`      // 答案解析
+	SourceRefs          []SourceRef                 `json:"source_refs"`      // 解析来源引用（可选）
+	KnowledgePoints     []KnowledgePoint            `json:"knowledge_points"` // 关联的知识点
+	Difficulty          Difficulty                  `json:"difficulty"`       // 难度等级（0-1，如"0.65"）
+	CognitiveLevel      string                      `json:"cognitive_level"`  // 认知层次：记忆/理解/应用/综合应用（历史数据兼容“简单应用”）
+	ExamPoints          string                      `json:"exam_points"`      // 考核要点，如"诊断与鉴别诊断，临床表现"
+	OutlineCode         string                      `json:"outline_code"`     // 大纲代码（标到最后一级）
+	Profession          string                      `json:"profession"`       // 专业，如"消化"、"生理，消化"
+	System              string                      `json:"system"`           // 系统，如"消化系统"
+	BankIDs             []string                    `json:"bank_ids"`         // 所属分类子题库列表（一道题可属于多个，空=待归类）
+	Status              QuestionStatus              `json:"status"`           // 审核状态
+	Version             int                         `json:"version"`          // 版本号，每次修改递增
+	ReviewRevision      int64                       `json:"review_revision"`  // 审核并发修订号，不属于内容版本；初值0也必须显式返回
+	CreatedBy           string                      `json:"-"`                // 生成者（仅审计/内部追溯，题目接口不向前端暴露）
+	OwnerID             string                      `json:"owner_id"`         // 个人题库归属用户 ID（前端判定"自己的题"以展示删除入口）
+	CreatedAt           time.Time                   `json:"created_at"`       // 创建时间
+	UpdatedAt           time.Time                   `json:"updated_at"`       // 最后更新时间
+
+	WorkflowVersion string `json:"workflow_version,omitempty"` // Frozen generation provenance; immutable after creation.
+	FormatVersion   string `json:"format_version,omitempty"`   // 命题格式协议；空值保留历史规则，生成后不可改换
+
+	// 个人题库归属（C3）：unfiled/active/deleted 与 QuestionStatus 独立演化。
+	// 空值按 unfiled 兼容解释（迁移前的历史行/测试夹具）。
+	LibraryState       LibraryState `json:"library_state,omitempty"`
+	ConfirmedVersion   int          `json:"confirmed_version,omitempty"`   // 最近一次确认入库的内容版本
+	ConfirmationSource string       `json:"confirmation_source,omitempty"` // self/review/legacy
+	LibraryRevision    int64        `json:"library_revision,omitempty"`    // 归属并发修订号（确认/删除/恢复递增）
+	DeletedReason      string       `json:"deleted_reason,omitempty"`      // owner_delete/admin_delete/review_reject/legacy_*
+	ConfirmedBy        string       `json:"confirmed_by,omitempty"`
+	ConfirmedAt        *time.Time   `json:"confirmed_at,omitempty"`
+	DeletedBy          string       `json:"deleted_by,omitempty"`
+	DeletedFromState   LibraryState `json:"deleted_from_state,omitempty"`
+}
+
+// QuestionShareStatus 是个人题目进入全局题库的单次申请状态。
+// 状态同时决定全局题库分层：pending=待审核、approved=正式、rejected=淘汰。
+type QuestionShareStatus string
+
+const (
+	QuestionSharePending  QuestionShareStatus = "pending"
+	QuestionShareApproved QuestionShareStatus = "approved"
+	QuestionShareRejected QuestionShareStatus = "rejected"
+)
+
+// QuestionShareRequest 个人题目分享申请。一个 question_id 只能有一条记录，
+// 申请一旦审批即结束，不能重复申请或重新提交。
+type QuestionShareRequest struct {
+	ID                      string              `json:"id"`
+	QuestionID              string              `json:"question_id"`
+	OwnerID                 string              `json:"-"`
+	Status                  QuestionShareStatus `json:"status"`
+	ReviewedBy              string              `json:"-"`
+	ReviewNote              string              `json:"review_note,omitempty"`
+	CreatedAt               time.Time           `json:"created_at"`
+	ReviewedAt              *time.Time          `json:"reviewed_at,omitempty"`
+	QuestionVersion         int                 `json:"question_version"`
+	LibraryRevision         int64               `json:"library_revision"`
+	Revision                int64               `json:"revision"`
+	Snapshot                *A2Question         `json:"-"`
+	ExpectedVersion         int                 `json:"-"`
+	ExpectedLibraryRevision *int64              `json:"-"`
+	ExpectedReviewRevision  *int64              `json:"-"`
+}
+
+// QuestionShareExpectation binds a sharing request to the author's inspected
+// saved version and its two independent concurrency axes.
+type QuestionShareExpectation struct {
+	QuestionID              string `json:"question_id"`
+	ExpectedVersion         int    `json:"expected_version"`
+	ExpectedLibraryRevision *int64 `json:"expected_library_revision"`
+	ExpectedReviewRevision  *int64 `json:"expected_review_revision"`
 }
 
 // Option 题目选项。
@@ -49,36 +119,53 @@ type Option struct {
 
 // SourceRef 来源引用，记录解析所依据的教材、指南或文献。
 type SourceRef struct {
-	Title string `json:"title"`           // 来源标题
-	URL   string `json:"url,omitempty"`   // 来源链接（可选）
-	Note  string `json:"note,omitempty"`  // 备注（可选）
-}
-
-// MediaKind 多模态素材类型。
-type MediaKind string
-
-const (
-	MediaKindImage       MediaKind = "image"        // 普通图片
-	MediaKindMedicalScan MediaKind = "medical_scan" // 医学影像（CT、MRI等）
-	MediaKindDocument    MediaKind = "document"     // 文档
-)
-
-// MediaRef 多模态素材引用。
-type MediaRef struct {
-	ID          string            `json:"id"`                    // 素材唯一标识
-	Kind        MediaKind         `json:"kind"`                  // 素材类型
-	URI         string            `json:"uri"`                   // 素材地址（本地路径或URL）
-	Description string            `json:"description,omitempty"` // 素材描述
-	Metadata    map[string]string `json:"metadata,omitempty"`    // 附加元数据
+	Title string `json:"title"`          // 来源标题
+	URL   string `json:"url,omitempty"`  // 来源链接（可选）
+	Note  string `json:"note,omitempty"` // 备注（可选）
 }
 
 // GenerationRequest 题目生成请求，发送给千问大模型。
 type GenerationRequest struct {
-	Subject         string           `json:"subject"`          // 专业或科目
-	Difficulty      Difficulty       `json:"difficulty"`       // 期望难度
-	KnowledgePoints []KnowledgePoint `json:"knowledge_points"` // 关联知识点
-	MediaRefs       []MediaRef       `json:"media_refs"`       // 可选的多模态素材
-	Count           int              `json:"count"`            // 生成数量
+	PersonalExperiences *PersonalExperienceSnapshot `json:"personal_experiences,omitempty"`
+	Workflow            *KnowledgeWorkflowSnapshot  `json:"knowledge_workflow,omitempty"`
+	WorkflowOffset      int                         `json:"workflow_offset,omitempty"`
+	PromptSnapshot       *GenerationPromptSnapshot     `json:"prompt_snapshot,omitempty"`
+	Subject             string                      `json:"subject"`          // 专业或科目
+	Difficulty          Difficulty                  `json:"difficulty"`       // 期望难度
+	KnowledgePoints     []KnowledgePoint            `json:"knowledge_points"` // 关联知识点
+	Count               int                         `json:"count"`            // 生成数量
+}
+
+// 单题命题运行状态。运行记录用于刷新恢复与幂等重试，不改变题目生命周期。
+// pending 为持久化队列的待执行态：请求快照已落库，等待 worker 抢占执行；
+// 进程重启后未完成运行由新进程的 worker 接管（running 且租约过期可重新抢占）。
+const (
+	GenerationRunPending   = "pending"
+	GenerationRunRunning   = "running"
+	GenerationRunSucceeded = "succeeded"
+	GenerationRunFailed    = "failed"
+)
+
+// GenerationRun 是一次单题命题请求的持久化执行记录。
+// 请求快照（RequestJSON）在提交时落库，worker 依据快照执行，不再依赖发起时的 HTTP 请求；
+// 题目与 AI 检查仍分别落在 questions / ai_check_tasks，此处只保存执行指针和时间。
+type GenerationRun struct {
+	ID             string     `json:"id"`
+	OwnerID        string     `json:"-"`
+	Status         string     `json:"status"`
+	RequestedCount int        `json:"requested_count"`
+	QuestionIDs    []string   `json:"question_ids"`
+	Error          string     `json:"error,omitempty"`
+	StartedAt      time.Time  `json:"started_at"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	// Attempts 已执行次数（worker 抢占时递增）；MaxAttempts 重试上限，超过即 failed 终态。
+	Attempts    int `json:"attempts,omitempty"`
+	MaxAttempts int `json:"max_attempts,omitempty"`
+	// LeasedUntil running 租约到期时间；pending 态复用为可重试时间。仅服务端调度使用，不外发。
+	LeasedUntil time.Time `json:"-"`
+	// RequestJSON 提交时的请求快照（pipeline.GenerationSpec 序列化），仅服务端执行使用。
+	RequestJSON []byte `json:"-"`
 }
 
 // EvaluationReport 题目质量评估报告。

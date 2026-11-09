@@ -1,14 +1,35 @@
 <script setup>
-import { ref } from "vue";
-import { useRouter } from "vue-router";
+import { onMounted, ref } from "vue";
+import { useRouter, useRoute } from "vue-router";
 import { api } from "../api.js";
 import { setAuth } from "../auth.js";
+import BeianFooter from "../components/BeianFooter.vue";
 
 const router = useRouter();
+const route = useRoute();
+const mode = ref("login"); // login | register
+const registerEnabled = ref(false);
 const username = ref("");
 const password = ref("");
+const confirmPassword = ref("");
+const displayName = ref("");
 const error = ref("");
+const success = ref("");
 const loading = ref(false);
+
+onMounted(async () => {
+  // 工作身份被管理员撤销且账号已无可切换身份时，引导重新登录。
+  if (route.query.revoked) {
+    error.value = "当前身份已被管理员撤销，请重新登录";
+  }
+  try {
+    const res = await fetch("/api/auth/register-enabled");
+    const data = await res.json();
+    registerEnabled.value = !!data.enabled;
+  } catch (e) {
+    registerEnabled.value = false;
+  }
+});
 
 async function doLogin() {
   if (!username.value || !password.value) {
@@ -20,12 +41,47 @@ async function doLogin() {
   try {
     const data = await api.login(username.value, password.value);
     setAuth(data.token, data.user);
-    router.push("/generate");
+    router.push("/my");
   } catch (e) {
     error.value = e.message;
   } finally {
     loading.value = false;
   }
+}
+
+async function doRegister() {
+  error.value = "";
+  success.value = "";
+  if (!username.value || !password.value) {
+    error.value = "请输入用户名和密码";
+    return;
+  }
+  if (password.value.length < 8) {
+    error.value = "密码至少8位";
+    return;
+  }
+  if (password.value !== confirmPassword.value) {
+    error.value = "两次输入的密码不一致";
+    return;
+  }
+  loading.value = true;
+  try {
+    await api.register(username.value, password.value, displayName.value);
+    success.value = "注册成功，请等待管理员分配权限后登录";
+    mode.value = "login";
+    password.value = "";
+    confirmPassword.value = "";
+  } catch (e) {
+    error.value = e.message;
+  } finally {
+    loading.value = false;
+  }
+}
+
+function switchMode(m) {
+  mode.value = m;
+  error.value = "";
+  success.value = "";
 }
 </script>
 
@@ -33,29 +89,65 @@ async function doLogin() {
   <div class="login-page">
     <div class="login-card">
       <div class="login-brand">
-        <div class="brand-mark">A</div>
-        <h1>AIgo</h1>
-        <p>智能命题系统</p>
+        <img class="login-logo" src="/zhique-logo.png" alt="治趣" />
+        <h1>AI医学试题生成系统</h1>
       </div>
 
-      <form @submit.prevent="doLogin">
-        <div class="field">
-          <label>用户名</label>
-          <input v-model="username" type="text" placeholder="请输入用户名" autocomplete="username" />
-        </div>
-        <div class="field">
-          <label>密码</label>
-          <input v-model="password" type="password" placeholder="请输入密码" autocomplete="current-password" />
-        </div>
-        <div v-if="error" class="error">{{ error }}</div>
-        <button class="primary-button full" type="submit" :disabled="loading">
-          {{ loading ? "登录中..." : "登录" }}
-        </button>
-      </form>
-
-      <div class="login-hint">
-        默认管理员：admin / admin
+      <div v-if="mode === 'login'">
+        <form @submit.prevent="doLogin">
+          <div class="field">
+            <label>用户名</label>
+            <input v-model="username" type="text" placeholder="请输入用户名" autocomplete="username" />
+          </div>
+          <div class="field">
+            <label>密码</label>
+            <input v-model="password" type="password" placeholder="请输入密码" autocomplete="current-password" />
+          </div>
+          <div v-if="error" class="error">{{ error }}</div>
+          <div v-if="success" class="success">{{ success }}</div>
+          <button class="primary-button full" type="submit" :disabled="loading">
+            {{ loading ? "登录中..." : "登录" }}
+          </button>
+        </form>
+        <p class="switch-hint" v-if="registerEnabled">
+          没有账号？
+          <a href="#" @click.prevent="switchMode('register')">注册新账号</a>
+        </p>
       </div>
+
+      <div v-else>
+        <form @submit.prevent="doRegister">
+          <div class="field">
+            <label>用户名</label>
+            <input v-model="username" type="text" placeholder="登录用户名" autocomplete="username" />
+          </div>
+          <div class="field">
+            <label>显示名</label>
+            <input v-model="displayName" type="text" placeholder="真实姓名（可选）" />
+          </div>
+          <div class="field">
+            <label>密码</label>
+            <input v-model="password" type="password" placeholder="至少8位" autocomplete="new-password" />
+          </div>
+          <div class="field">
+            <label>确认密码</label>
+            <input v-model="confirmPassword" type="password" placeholder="再次输入密码" autocomplete="new-password" />
+          </div>
+          <div v-if="error" class="error">{{ error }}</div>
+          <button class="primary-button full" type="submit" :disabled="loading">
+            {{ loading ? "注册中..." : "注册" }}
+          </button>
+        </form>
+        <p class="switch-hint">
+          已有账号？
+          <a href="#" @click.prevent="switchMode('login')">返回登录</a>
+        </p>
+        <p class="switch-hint note">注册后默认无任何权限，请联系管理员在「用户管理」中分配权限。</p>
+      </div>
+
+    </div>
+    <div class="login-beian">
+      <BeianFooter />
     </div>
   </div>
 </template>
@@ -65,7 +157,19 @@ async function doLogin() {
   display: grid;
   place-items: center;
   min-height: 100vh;
+  padding-bottom: 44px;
   background: #f3f6fb;
+}
+
+.login-beian {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 10px;
+}
+
+.login-beian .beian-footer {
+  margin-top: 0;
 }
 
 .login-card {
@@ -81,29 +185,17 @@ async function doLogin() {
   margin-bottom: 32px;
 }
 
-.brand-mark {
-  display: inline-grid;
-  place-items: center;
-  width: 56px;
-  height: 56px;
-  border-radius: 12px;
-  background: #1385f8;
-  color: #fff;
-  font-size: 28px;
-  font-weight: 800;
-  margin-bottom: 12px;
+.login-logo {
+  display: block;
+  width: min(100%, 300px);
+  height: auto;
+  margin: 0 auto 16px;
 }
 
 .login-brand h1 {
   margin: 0;
   font-size: 24px;
   color: #172033;
-}
-
-.login-brand p {
-  margin: 4px 0 0;
-  color: #6e7b8f;
-  font-size: 14px;
 }
 
 .field {
@@ -126,6 +218,7 @@ async function doLogin() {
   padding: 0 12px;
   font-size: 14px;
   color: #172033;
+  box-sizing: border-box;
 }
 
 .field input:focus {
@@ -138,6 +231,15 @@ async function doLogin() {
   padding: 8px 12px;
   background: #fff0f0;
   color: #c54858;
+  border-radius: 6px;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+.success {
+  padding: 8px 12px;
+  background: #f0fff8;
+  color: #087c55;
   border-radius: 6px;
   font-size: 13px;
   margin-bottom: 16px;
@@ -167,10 +269,32 @@ async function doLogin() {
   width: 100%;
 }
 
-.login-hint {
-  margin-top: 20px;
+.switch-hint {
+  margin: 16px 0 0;
   text-align: center;
-  font-size: 12px;
+  font-size: 13px;
   color: #6e7b8f;
 }
+
+.switch-hint a {
+  color: #1385f8;
+  text-decoration: none;
+}
+
+.switch-hint.note {
+  font-size: 12px;
+  color: #9aa5b4;
+}
+
+@media (max-width: 460px) {
+  .login-card {
+    width: calc(100vw - 28px);
+    padding: 28px 22px;
+  }
+
+  .login-logo {
+    width: min(100%, 280px);
+  }
+}
+
 </style>

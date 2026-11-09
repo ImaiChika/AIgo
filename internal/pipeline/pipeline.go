@@ -8,47 +8,97 @@ import (
 
 	"aigo/internal/domain"
 	"aigo/internal/evaluator"
+	"aigo/internal/exporter"
 	"aigo/internal/generator"
-	"aigo/internal/image"
 	"aigo/internal/importer"
 	"aigo/internal/knowledge"
+	"aigo/internal/knowledgebase"
 	"aigo/internal/review"
 	"aigo/internal/storage"
 )
 
-type Pipeline struct {
-	generator *generator.Service
-	evaluator *evaluator.Service
-	review    *review.Service
-	imageSvc  *image.Service
-	kpSvc     *knowledge.Service
-	store     storage.QuestionStore
+// DraftChecker 草稿自动检查接口，由 aicheck.Service 实现（CheckAsync 入队后台检查）。
+// 通过 SetDraftChecker 注入，使 pipeline 与检查实现解耦：CLI 路径不注入即不触发。
+type DraftChecker interface {
+	CheckAsync(questionIDs ...string)
 }
 
-func New(generator *generator.Service, evaluator *evaluator.Service, review *review.Service, imageSvc *image.Service, kpSvc *knowledge.Service, store storage.QuestionStore) *Pipeline {
-	return &Pipeline{
+type Pipeline struct {
+	GenerationLimiter *storage.ConcurrencyLimiter // Inject before starting; limits mutate in place.
+	generator         *generator.Service
+	evaluator         *evaluator.Service
+	review            *review.Service
+	kpSvc             *knowledge.Service
+	store             storage.QuestionStore
+	checker           DraftChecker
+	// runs 单题命题运行记录存储（即持久化生成队列）；store 同时实现时自动可用。
+	runs storage.GenerationRunStore
+	// bankAssigner/auditor 由 serve 模式注入，worker 执行时复用与原同步路径相同的题库归纳与审计行为。
+	bankAssigner BankAssigner
+	auditor      GenerationAuditor
+
+	// GenerationPollInterval/GenerationRetryBackoff 生成 worker 可调参数，零值使用默认（见 generation_worker.go）。
+	GenerationPollInterval time.Duration
+	GenerationRetryBackoff time.Duration
+	FirstCheckMaxAttempts  int
+}
+
+func New(generator *generator.Service, evaluator *evaluator.Service, review *review.Service, kpSvc *knowledge.Service, store storage.QuestionStore) *Pipeline {
+	p := &Pipeline{
 		generator: generator,
 		evaluator: evaluator,
 		review:    review,
-		imageSvc:  imageSvc,
 		kpSvc:     kpSvc,
 		store:     store,
 	}
+	if rs, ok := store.(storage.GenerationRunStore); ok {
+		p.runs = rs
+	}
+	return p
 }
 
 func (p *Pipeline) Doctor(ctx context.Context) error {
 	fmt.Println("framework: ok")
 	fmt.Println("language: go")
-	fmt.Println("llm: qwen openai-compatible text-only client")
-	fmt.Println("multimodal: interfaces reserved; current cli path is text-only")
+	fmt.Println("llm: qwen openai-compatible text-only client (cloud/local selected by deployment config)")
+	fmt.Println("question format: text-only A2 single-choice")
 	return nil
 }
 
-// Generate 直接调用生成服务，供 API 使用。
+// SetDraftChecker 注入草稿自动检查器（serve 模式装配，见 cmd/aigo/main.go）。
+func (p *Pipeline) SetDraftChecker(c DraftChecker) { p.checker = c }
+
+// Generate 直接调用生成服务，供 API 与 CLI 使用。
+// 生成 → 校验标注 → 逐题落库 → 触发 AI 检查；持久化 worker 路径拆用
+// generateDrafts/persistDrafts 以区分可重试与不可重试阶段（见 generation_worker.go）。
 func (p *Pipeline) Generate(ctx context.Context, req domain.GenerationRequest) ([]domain.A2Question, error) {
+	questions, err := p.generateDrafts(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.persistDrafts(ctx, questions); err != nil {
+		return nil, err
+	}
+	// 草稿落库后自动提交 AI 质量检查（后台异步执行，不阻塞生成响应）
+	if p.checker != nil && len(questions) > 0 {
+		ids := make([]string, 0, len(questions))
+		for _, q := range questions {
+			ids = append(ids, q.ID)
+		}
+		p.checker.CheckAsync(ids...)
+	}
+	return questions, nil
+}
+
+// generateDrafts 调用 LLM 生成并校验题目草稿，不产生任何落库副作用。
+// 该阶段失败（LLM 超时、解析失败等）可安全重试。
+func (p *Pipeline) generateDrafts(ctx context.Context, req domain.GenerationRequest) ([]domain.A2Question, error) {
 	questions, err := p.generator.Generate(ctx, req)
 	if err != nil {
 		return nil, err
+	}
+	if len(questions) == 0 {
+		return nil, fmt.Errorf("模型未返回可用题目，请重新生成")
 	}
 	for i := range questions {
 		if err := questions[i].Validate(); err != nil {
@@ -57,11 +107,19 @@ func (p *Pipeline) Generate(ctx context.Context, req domain.GenerationRequest) (
 				Note:  err.Error(),
 			})
 		}
-		if err := p.store.SaveQuestion(ctx, questions[i]); err != nil {
-			return nil, err
-		}
 	}
 	return questions, nil
+}
+
+// persistDrafts 把草稿逐题写入存储。任何失败由调用方决定重试语义；
+// 部分落库后的失败不允许盲目重试（会生成重复题目）。
+func (p *Pipeline) persistDrafts(ctx context.Context, questions []domain.A2Question) error {
+	for i := range questions {
+		if err := p.store.SaveQuestion(ctx, questions[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p *Pipeline) GenerateSample(ctx context.Context) error {
@@ -69,28 +127,23 @@ func (p *Pipeline) GenerateSample(ctx context.Context) error {
 		Subject:    "临床医学",
 		Difficulty: domain.DifficultyMedium,
 		KnowledgePoints: []domain.KnowledgePoint{{
-			ID:      "demo-kp-001",
-			Subject: "临床医学",
-			Topic:   "常见症状鉴别诊断",
+			ID:          "demo-kp-001",
+			Category:    "临床综合",
+			Subject:     "临床医学",
+			Topic:       "常见症状鉴别诊断",
+			OutlineCode: "demo-kp-001",
 		}},
 		Count: 1,
 	}
 
-	questions, err := p.generator.Generate(ctx, req)
+	frozen, loadErr := p.FreezeAuthoringBaseline(ctx, []domain.GenerationRequest{req})
+	if loadErr != nil {
+		return fmt.Errorf("读取通用命题规范失败: %w", loadErr)
+	}
+	req.PromptSnapshot = frozen
+	questions, err := p.Generate(ctx, req)
 	if err != nil {
 		return fmt.Errorf("生成失败: %w", err)
-	}
-
-	for i := range questions {
-		if err := questions[i].Validate(); err != nil {
-			questions[i].SourceRefs = append(questions[i].SourceRefs, domain.SourceRef{
-				Title: "校验未通过",
-				Note:  err.Error(),
-			})
-		}
-		if err := p.store.SaveQuestion(ctx, questions[i]); err != nil {
-			return fmt.Errorf("存储失败: %w", err)
-		}
 	}
 
 	return printJSON(questions)
@@ -102,46 +155,15 @@ func (p *Pipeline) EvaluateSample(ctx context.Context) error {
 		return err
 	}
 	if len(questions) == 0 {
-		return fmt.Errorf("题库为空，请先运行 generate 或 import 导入题目")
+		return fmt.Errorf("题库为空，请先运行 generate 生成题目")
 	}
 
 	q := questions[len(questions)-1]
+	// 纯诊断：只输出规则评估报告，不修改题目状态。
+	// 题目状态推进统一由 AI 质量检查负责（通过→ai_reviewed；不通过→淘汰删除），
+	// 规则校验也已并入检查流程（ValidateForReview），CLI 评估不再单独改状态。
 	report := p.evaluator.Evaluate(q)
-
-	// 评估后更新状态为 auto_checked
-	q.Status = domain.StatusAutoChecked
-	q.UpdatedAt = time.Now()
-	p.store.SaveQuestion(ctx, q)
-
 	return printJSON(report)
-}
-
-// ImportXlsx 从 xlsx 文件导入题目到题库。
-func (p *Pipeline) ImportXlsx(ctx context.Context, path string) error {
-	rows, err := importer.ReadXlsx(path, true)
-	if err != nil {
-		return fmt.Errorf("读取xlsx失败: %w", err)
-	}
-	fmt.Printf("读取到 %d 行原始数据\n", len(rows))
-
-	questions, errs := importer.ConvertToQuestions(rows)
-	if len(errs) > 0 {
-		fmt.Printf("转换警告 (%d 条):\n", len(errs))
-		for _, e := range errs {
-			fmt.Printf("  - %v\n", e)
-		}
-	}
-	fmt.Printf("有效题目: %d 道\n", len(questions))
-
-	count, err := p.store.SaveQuestions(ctx, questions)
-	if err != nil {
-		return fmt.Errorf("批量存储失败: %w", err)
-	}
-	fmt.Printf("成功导入 %d 道题目到题库\n", count)
-
-	total, _ := p.store.Count(ctx)
-	fmt.Printf("题库当前总量: %d 道\n", total)
-	return nil
 }
 
 // ListQuestions 列出题库中的所有题目摘要。
@@ -165,7 +187,7 @@ func (p *Pipeline) ListQuestions(ctx context.Context) error {
 	return nil
 }
 
-// EvaluateByID 根据 ID 评估指定题目。
+// EvaluateByID 根据 ID 诊断评估指定题目（只输出报告，不改状态）。
 func (p *Pipeline) EvaluateByID(ctx context.Context, id string) error {
 	q, err := p.store.GetQuestion(ctx, id)
 	if err != nil {
@@ -175,11 +197,6 @@ func (p *Pipeline) EvaluateByID(ctx context.Context, id string) error {
 		return fmt.Errorf("未找到 ID=%s 的题目", id)
 	}
 	report := p.evaluator.Evaluate(*q)
-
-	q.Status = domain.StatusAutoChecked
-	q.UpdatedAt = time.Now()
-	p.store.SaveQuestion(ctx, *q)
-
 	return printJSON(report)
 }
 
@@ -318,12 +335,12 @@ func (p *Pipeline) PublishQuestion(ctx context.Context, questionID string) error
 
 // ImportKnowledgePoints 从 xlsx 导入知识点。
 func (p *Pipeline) ImportKnowledgePoints(ctx context.Context, path string) error {
-	count, err := p.kpSvc.ImportFromXlsx(ctx, path)
+	inserted, updated, duplicated, excludedBasic, err := p.kpSvc.ImportFromXlsx(ctx, path)
 	if err != nil {
 		return err
 	}
 	total, _ := p.kpSvc.Count(ctx)
-	fmt.Printf("导入 %d 个知识点，当前总量 %d\n", count, total)
+	fmt.Printf("导入完成：新增 %d，更新 %d，跳过重复 %d，剔除基础医学 %d；当前总量 %d\n", inserted, updated, duplicated, excludedBasic, total)
 	return nil
 }
 
@@ -343,7 +360,7 @@ func (p *Pipeline) SearchKnowledgePoints(ctx context.Context, keyword string) er
 		if len(pt.Keywords) > 0 {
 			kw = pt.Keywords[0]
 		}
-		fmt.Printf("  %s | %s | %s | %s\n", pt.ID, pt.System, pt.Topic, kw)
+		fmt.Printf("  %s | %s | %s | %s\n", pt.ID, pt.Subject, pt.Topic, kw)
 	}
 	return nil
 }
@@ -353,7 +370,7 @@ func (p *Pipeline) ListKnowledgePoints(ctx context.Context, system string) error
 	var points []domain.KnowledgePoint
 	var err error
 	if system != "" {
-		points, err = p.kpSvc.ListBySystem(ctx, system)
+		points, err = p.kpSvc.ListBySubject(ctx, system)
 	} else {
 		points, err = p.kpSvc.ListAll(ctx)
 	}
@@ -374,81 +391,148 @@ func (p *Pipeline) ListKnowledgePoints(ctx context.Context, system string) error
 		if len(pt.Keywords) > 0 {
 			kw = pt.Keywords[0]
 		}
-		fmt.Printf("  %s | %s | %s | %s\n", pt.ID, pt.System, pt.Topic, kw)
+		fmt.Printf("  %s | %s | %s | %s\n", pt.ID, pt.Subject, pt.Topic, kw)
 	}
 	return nil
 }
 
 // KnowledgePointStats 知识点统计。
 func (p *Pipeline) KnowledgePointStats(ctx context.Context) error {
-	systems, err := p.kpSvc.ListSystems(ctx)
+	categories, err := p.kpSvc.ListCategories(ctx)
 	if err != nil {
 		return err
 	}
 	total, _ := p.kpSvc.Count(ctx)
 	fmt.Printf("知识点总量: %d\n", total)
-	fmt.Printf("\n各系统分布:\n")
-	for sys, count := range systems {
-		fmt.Printf("  %s: %d\n", sys, count)
+	fmt.Printf("\n各分类分布:\n")
+	for cat, count := range categories {
+		fmt.Printf("  %s: %d\n", cat, count)
 	}
 	return nil
 }
 
-// ===== 图片相关 =====
+// ===== 批量生成 =====
 
-// GenerateImagePrompt 为题目生成结构化生图提示词。
-func (p *Pipeline) GenerateImagePrompt(ctx context.Context, questionID string) error {
-	prompt, err := p.imageSvc.GeneratePrompt(ctx, questionID)
+// GenerateAll 遍历所有知识点，逐个调用千问生成题目。
+// 生成过程中会打印进度信息。返回生成的题目总数。
+func (p *Pipeline) GenerateAll(ctx context.Context, countPerPoint int) (int, error) {
+	// 获取所有知识点
+	points, err := p.kpSvc.ListAll(ctx)
 	if err != nil {
-		return err
+		return 0, fmt.Errorf("获取知识点列表失败: %w", err)
 	}
-	fmt.Printf("已为题目 %s 生成生图提示词\n", questionID)
-	return printJSON(prompt)
+	if len(points) == 0 {
+		return 0, fmt.Errorf("知识点库为空，请先导入考试大纲")
+	}
+
+	fmt.Printf("共 %d 个知识点，每个生成 %d 道题\n", len(points), countPerPoint)
+
+	total := 0
+	failed := 0
+	for i, kp := range points {
+		if !domain.IsEligibleClinicalPoint(kp) {
+			continue
+		}
+		// 打印进度
+		if (i+1)%50 == 0 || i == 0 {
+			fmt.Printf("[%d/%d] 正在为 %s 生成题目...\n", i+1, len(points), kp.Topic)
+		}
+
+		req := domain.GenerationRequest{
+			Subject:         kp.Subject,
+			Difficulty:      domain.Difficulty("0.65"),
+			KnowledgePoints: []domain.KnowledgePoint{kp},
+			Count:           countPerPoint,
+		}
+
+		frozen, loadErr := p.FreezeAuthoringBaseline(ctx, []domain.GenerationRequest{req})
+		if loadErr != nil {
+			return total, fmt.Errorf("读取通用命题规范失败: %w", loadErr)
+		}
+		req.PromptSnapshot = frozen
+		questions, err := p.Generate(ctx, req)
+		if err != nil {
+			failed++
+			if failed <= 10 {
+				fmt.Printf("  ⚠ 生成失败 (%s): %v\n", kp.OutlineCode, err)
+			}
+			continue
+		}
+
+		total += len(questions)
+
+		// 避免 API 限流，每 10 个请求暂停 1 秒
+		if (i+1)%10 == 0 {
+			time.Sleep(1 * time.Second)
+		}
+	}
+
+	fmt.Printf("\n生成完成！成功 %d 道，失败 %d 个知识点\n", total, failed)
+	return total, nil
 }
 
-// GenerateImages 为题目生成候选图。
-func (p *Pipeline) GenerateImages(ctx context.Context, questionID string, count int) error {
-	images, err := p.imageSvc.GenerateImages(ctx, questionID, count)
+// ExportXlsx 将题库中所有题目导出为 xlsx 文件。
+func (p *Pipeline) ExportXlsx(ctx context.Context, path string) error {
+	questions, err := p.store.ListQuestions(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("获取题目列表失败: %w", err)
 	}
-	fmt.Printf("已为题目 %s 生成 %d 张候选图\n", questionID, len(images))
-	return printJSON(images)
-}
+	if len(questions) == 0 {
+		return fmt.Errorf("题库为空")
+	}
 
-// ListImages 列出题目的候选图。
-func (p *Pipeline) ListImages(ctx context.Context, questionID string) error {
-	images, err := p.imageSvc.ListImages(ctx, questionID)
-	if err != nil {
-		return err
+	if err := importer.ExportToXlsx(questions, path); err != nil {
+		return fmt.Errorf("导出 xlsx 失败: %w", err)
 	}
-	if len(images) == 0 {
-		fmt.Printf("题目 %s 暂无候选图\n", questionID)
-		return nil
-	}
-	fmt.Printf("题目 %s 共 %d 张候选图:\n", questionID, len(images))
-	for _, img := range images {
-		fmt.Printf("  %s | %s | 状态:%s | 路径:%s\n", img.ID, img.ModelName, img.Status, img.ImagePath)
-	}
+	fmt.Printf("已导出 %d 道题目到 %s\n", len(questions), path)
 	return nil
 }
 
-// ReviewImage 审核图片。
-func (p *Pipeline) ReviewImage(ctx context.Context, imageID string, expertID string, action domain.ImageStatus, opinion string) error {
-	return p.imageSvc.ReviewImage(ctx, imageID, expertID, action, opinion)
+// ExportDocx 将题库中所有题目导出为 Word 文档。
+func (p *Pipeline) ExportDocx(ctx context.Context, path string) error {
+	questions, err := p.store.ListQuestions(ctx)
+	if err != nil {
+		return fmt.Errorf("获取题目列表失败: %w", err)
+	}
+	if len(questions) == 0 {
+		return fmt.Errorf("题库为空")
+	}
+
+	if err := exporter.ExportToDocx(questions, path); err != nil {
+		return fmt.Errorf("导出 docx 失败: %w", err)
+	}
+	fmt.Printf("已导出 %d 道题目到 %s\n", len(questions), path)
+	return nil
 }
 
-// GetImagePrompt 获取题目的生图提示词。
-func (p *Pipeline) GetImagePrompt(ctx context.Context, questionID string) error {
-	prompt, err := p.imageSvc.GetPrompt(ctx, questionID)
+// ClearQuestions 清空题库中所有题目。
+func (p *Pipeline) ClearQuestions(ctx context.Context) error {
+	questions, err := p.store.ListQuestions(ctx)
 	if err != nil {
 		return err
 	}
-	if prompt == nil {
-		fmt.Printf("题目 %s 尚未生成提示词\n", questionID)
-		return nil
+	for _, q := range questions {
+		if err := p.store.DeleteQuestion(ctx, q.ID); err != nil {
+			return err
+		}
 	}
-	return printJSON(prompt)
+	fmt.Printf("已清空 %d 道题目\n", len(questions))
+	return nil
+}
+
+// ClearKnowledgePoints 清空所有知识点。
+func (p *Pipeline) ClearKnowledgePoints(ctx context.Context) error {
+	points, err := p.kpSvc.ListAll(ctx)
+	if err != nil {
+		return err
+	}
+	for _, p2 := range points {
+		if err := p.kpSvc.DeletePoint(ctx, p2.ID); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("已清空 %d 个知识点\n", len(points))
+	return nil
 }
 
 func printJSON(value any) error {
@@ -458,4 +542,22 @@ func printJSON(value any) error {
 	}
 	fmt.Println(string(encoded))
 	return nil
+}
+
+// FreezeAuthoringBaseline admits trusted CLI tasks with the same shared methods
+// as web submissions. Workers and retries never reload live methods.
+func (p *Pipeline) FreezeAuthoringBaseline(ctx context.Context, requests []domain.GenerationRequest) (*domain.GenerationPromptSnapshot, error) {
+	snapshot := &domain.GenerationPromptSnapshot{}
+	if store, ok := p.store.(knowledgebase.Store); ok {
+		entries, err := (&knowledgebase.Service{Store: store}).ActiveGuidelines(ctx)
+		if err != nil {
+			return nil, err
+		}
+		snapshot.Guidelines = entries
+	}
+	snapshot, err := storage.FreezeGenerationSampling(ctx, p.store, snapshot)
+	if err != nil {
+		return nil, err
+	}
+	return generator.FreezeCurrentBaseline(snapshot, requests), nil
 }

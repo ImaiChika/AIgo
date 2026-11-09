@@ -1,0 +1,802 @@
+<script setup>
+import { ref, onMounted, onBeforeUnmount, computed } from "vue";
+import { api } from "../api.js";
+import { reviewCompletionLabel } from "../reviewCompletion.js";
+import { hasPerm } from "../auth.js";
+import { useLiveRefresh } from "../useLiveRefresh.js";
+import PreviousReviewHistory from "../components/PreviousReviewHistory.vue";
+import CompactPager from "../components/CompactPager.vue";
+import ReviewCommentCard from "../components/ReviewCommentCard.vue";
+import AICheckScoreButton from "../components/AICheckScoreButton.vue";
+
+const toast = ref("");
+const items = ref([]);
+const stats = ref(null);
+const total = ref(0);
+const hasMore = ref(false);
+let resultSearchTicket = 0;
+const loading = ref(false);
+// 审核记录范围：我的审核记录（review:view_results，审题人本人参审题目）、
+// 我的题库（question:view，本人归属题目）、全局题库（question:view_global，管理员级）。
+// 双身份账号默认停在管理员口径（我的题库）；纯审题身份默认进入“我的审核记录”。
+const canMineReviews = computed(() => hasPerm("review:view_results"));
+const canPersonalBank = computed(() => hasPerm("question:view"));
+const canGlobalBank = computed(() => hasPerm("question:view_global"));
+const reviewScope = ref(
+  canGlobalBank.value
+    ? "personal"
+    : canMineReviews.value
+      ? "mine"
+      : canPersonalBank.value
+        ? "personal"
+        : "global",
+);
+const scopeLabel = computed(
+  () => ({ mine: "我的审核记录", personal: "我的题库", global: "全局题库" })[reviewScope.value] || "",
+);
+
+const filterStatus = ref("");
+const searchQuery = ref("");
+const page = ref(1);
+const pageSize = 50;
+const expandedId = ref(""); // 展开查看专家评语的题目ID
+const experts = ref([]);
+
+const statusMeta = {
+  pending: { label: "未提交审核", cls: "s-pending" },
+  reviewing: { label: "审核中", cls: "s-reviewing" },
+  conflict: { label: "待决断", cls: "s-conflict" },
+  revision_required: { label: "需修改", cls: "s-revision" },
+  rejected: { label: "已驳回", cls: "s-rejected" },
+  published: { label: "已通过", cls: "s-published" },
+  archived: { label: "已归档", cls: "s-archived" },
+};
+
+function statusText(s) {
+  return statusMeta[s]?.label || s;
+}
+function statusClass(s) {
+  return statusMeta[s]?.cls || "";
+}
+
+// 问题题目快速筛选（需修改/已驳回/待决断）
+const problemFilters = ["revision_required", "rejected", "conflict"];
+
+function showToast(msg) {
+  toast.value = msg;
+  window.clearTimeout(showToast.timer);
+  showToast.timer = window.setTimeout(() => { toast.value = ""; }, 3000);
+}
+
+async function loadResults(resetPage = true, silent = false) {
+  const ticket = ++resultSearchTicket;
+  if (!silent) loading.value = true;
+  if (resetPage) page.value = 1;
+  try {
+    const data = await api.reviewResults({
+      final_status: filterStatus.value,
+      q: searchQuery.value,
+      page: page.value,
+      page_size: pageSize,
+      scope: reviewScope.value,
+    });
+    if (ticket !== resultSearchTicket) return;
+    items.value = data.items || [];
+    total.value = data.total || 0;
+    const maxPage = Math.max(1, Math.ceil(total.value / pageSize));
+    if (page.value > maxPage) { page.value = maxPage; return loadResults(false, silent); }
+    if (!items.value.some(x => x.question.id === expandedId.value)) expandedId.value = "";
+    hasMore.value = !!data.has_more;
+    stats.value = data.stats || null;
+  } catch (e) {
+    if (ticket !== resultSearchTicket) return;
+    if (!silent && !e.staleSession) showToast("加载失败: " + e.message);
+  } finally {
+    if (ticket === resultSearchTicket) loading.value = false;
+  }
+}
+
+function goPage(next) {
+  page.value = next;
+  expandedId.value = "";
+  loadResults(false);
+}
+
+function doSearch() {
+  expandedId.value = "";
+  loadResults();
+}
+
+function switchScope(scope) {
+  if (scope === reviewScope.value) return;
+  reviewScope.value = scope;
+  items.value = [];
+  stats.value = null;
+  total.value = 0;
+  clearFilters();
+}
+
+function clearFilters() {
+  filterStatus.value = "";
+  searchQuery.value = "";
+  doSearch();
+}
+
+function setStatusFilter(s) {
+  filterStatus.value = filterStatus.value === s ? "" : s;
+  doSearch();
+}
+
+async function loadExperts() {
+  try {
+    const data = await api.listReviewers();
+    experts.value = data.reviewers || [];
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function expertName(id) {
+  const e = experts.value.find((x) => x.id === id);
+  return e ? e.display_name || e.username : id;
+}
+
+function reviewDisplayName(id, storedName = "") {
+  const value = (storedName || "").trim();
+  if (value && !value.startsWith("user-")) return value;
+  return expertName(id);
+}
+
+function difficultyText(d) {
+  const map = { easy: "简单", medium: "中等", hard: "困难" };
+  if (map[d]) return map[d];
+  if (d && !isNaN(Number(d))) {
+    const v = Number(d);
+    if (v <= 0.6) return "简单";
+    if (v <= 0.8) return "中等";
+    return "困难";
+  }
+  return d || "-";
+}
+
+// 决断记录（轮外把关/撤回修改）按 ID 前缀识别：不参与轮内分组，单独成区。
+function isDecisionRecord(r) {
+  const id = r?.id || "";
+  return id.startsWith("rec-final-") || id.startsWith("rec-unpublish-");
+}
+
+// 专家评语（审核记录按轮次分组，跨提交批次合并展示并标注批次；决断记录除外）
+function recordsByRound(item) {
+  const map = new Map();
+  for (const r of item.records || []) {
+    if (isDecisionRecord(r)) continue;
+    if (!map.has(r.round_number)) map.set(r.round_number, []);
+    map.get(r.round_number).push(r);
+  }
+  return Array.from(map.entries()).sort((a, b) => a[0] - b[0]);
+}
+
+// 决断区：在全部轮次之后按“第 N 次送审”分组展示，把关流程是轮外的最后一道。
+function decisionsByAttempt(item) {
+  const map = new Map();
+  for (const r of item.records || []) {
+    if (!isDecisionRecord(r)) continue;
+    const attempt = r.attempt || 1;
+    if (!map.has(attempt)) map.set(attempt, []);
+    map.get(attempt).push(r);
+  }
+  return Array.from(map.entries()).sort((a, b) => a[0] - b[0]);
+}
+
+function conclusionText(c) {
+  const map = {
+    approved: "通过",
+    rejected: "驳回",
+    revision_required: "需修改",
+    final_approved: "决断：通过",
+    final_rejected: "决断：驳回",
+    final_revision_required: "决断：退回修改",
+  };
+  return map[c] || c;
+}
+
+useLiveRefresh(() => loadResults(false, true));
+onBeforeUnmount(() => ++resultSearchTicket);
+onMounted(() => {
+  loadResults();
+  loadExperts();
+});
+</script>
+
+<template>
+  <div class="results-layout">
+    <div
+      v-if="canMineReviews || canPersonalBank || canGlobalBank"
+      class="review-scope"
+      aria-label="审核记录范围"
+    >
+      <button v-if="canMineReviews" type="button" :class="{ active: reviewScope === 'mine' }" @click="switchScope('mine')">我的审核记录</button>
+      <button v-if="canPersonalBank" type="button" :class="{ active: reviewScope === 'personal' }" @click="switchScope('personal')">我的题库</button>
+      <button v-if="canGlobalBank" type="button" :class="{ active: reviewScope === 'global' }" @click="switchScope('global')">全局题库</button>
+    </div>
+    <!-- 统计卡片 -->
+    <section class="panel" v-if="stats">
+      <div class="section-heading">
+        <span class="dot blue"></span>
+        <h2>{{ scopeLabel }} · 审核结果统计</h2>
+        <small>共 {{ stats.total }} 道题</small>
+      </div>
+      <div class="stats-grid">
+        <button type="button" class="stat-card s-pending" :class="{ active: filterStatus === 'pending' }" @click="setStatusFilter('pending')">
+          <strong>{{ stats.pending }}</strong><span>未提交审核</span>
+        </button>
+        <button type="button" class="stat-card s-reviewing" :class="{ active: filterStatus === 'reviewing' }" @click="setStatusFilter('reviewing')">
+          <strong>{{ stats.reviewing }}</strong><span>审核中</span>
+        </button>
+        <button type="button" class="stat-card s-conflict" :class="{ active: filterStatus === 'conflict' }" @click="setStatusFilter('conflict')">
+          <strong>{{ stats.conflict }}</strong><span>待决断</span>
+        </button>
+        <button type="button" class="stat-card s-revision" :class="{ active: filterStatus === 'revision_required' }" @click="setStatusFilter('revision_required')">
+          <strong>{{ stats.revision_required }}</strong><span>需修改</span>
+        </button>
+        <button type="button" class="stat-card s-rejected" :class="{ active: filterStatus === 'rejected' }" @click="setStatusFilter('rejected')">
+          <strong>{{ stats.rejected }}</strong><span>已驳回</span>
+        </button>
+        <button type="button" class="stat-card s-published" :class="{ active: filterStatus === 'published' }" @click="setStatusFilter('published')">
+          <strong>{{ stats.published }}</strong><span>已通过</span>
+        </button>
+        <button type="button" class="stat-card s-archived" :class="{ active: filterStatus === 'archived' }" @click="setStatusFilter('archived')">
+          <strong>{{ stats.archived }}</strong><span>已归档</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- 列表 -->
+    <section class="panel">
+      <div class="section-heading">
+        <span class="dot blue"></span>
+        <h2>题目审核情况</h2>
+        <small>共 {{ total }} 道匹配</small>
+        <button class="ghost-button" type="button" @click="setStatusFilter(problemFilters.includes(filterStatus) ? filterStatus : 'rejected')">
+          {{ problemFilters.includes(filterStatus) ? "取消问题筛选" : "找出问题题目" }}
+        </button>
+      </div>
+
+      <div class="filter-row">
+        <input v-model="searchQuery" placeholder="搜索题干、选项、解析、专业、系统、大纲要点或ID..." @keyup.enter="doSearch" />
+        <select v-model="filterStatus" @change="doSearch">
+          <option value="">全部状态</option>
+          <option value="pending">未提交审核</option>
+          <option value="reviewing">审核中</option>
+          <option value="conflict">待决断</option>
+          <option value="revision_required">需修改</option>
+          <option value="rejected">已驳回</option>
+          <option value="published">已通过</option>
+          <option value="archived">已归档</option>
+        </select>
+        <button class="ghost-button" type="button" @click="doSearch">搜索</button>
+        <button class="ghost-button" type="button" @click="clearFilters">重置</button>
+      </div>
+
+      <div v-if="loading && !items.length" class="loading">加载中...</div>
+      <div v-else class="result-list">
+        <div v-for="item in items" :key="item.question.id" class="result-card">
+          <div class="result-head" @click="expandedId = expandedId === item.question.id ? '' : item.question.id">
+            <div class="r-info">
+              <span class="r-stem">{{ (item.question.clinical_stem || "").slice(0, 70) }}{{ (item.question.clinical_stem || "").length > 70 ? "..." : "" }}</span>
+              <span class="r-meta">
+                <span v-if="item.question.profession">专业：{{ item.question.profession }}</span>
+                <span>难度：{{ item.question.difficulty }}</span>
+              </span>
+            </div>
+            <span class="r-status" :class="statusClass(item.final_status)">{{ statusText(item.final_status) }}</span>
+            <AICheckScoreButton :question-id="item.question.id" />
+            <span class="r-expand">{{ expandedId === item.question.id ? "收起 ▲" : "查看评语 ▼" }}</span>
+          </div>
+
+          <!-- 展开：完整题目详情 + 任务信息 + 专家评语 -->
+          <div v-if="expandedId === item.question.id" class="result-detail">
+            <!-- 题目完整信息 -->
+            <div class="q-detail">
+              <div class="q-params">
+                <span v-if="item.question.outline_code" class="q-param"><label>大纲代码</label>{{ item.question.outline_code }}</span>
+                <span v-if="item.question.profession" class="q-param"><label>专业</label>{{ item.question.profession }}</span>
+                <span v-if="item.question.system" class="q-param"><label>系统</label>{{ item.question.system }}</span>
+                <span class="q-param"><label>难度</label>{{ difficultyText(item.question.difficulty) }}</span>
+                <span v-if="item.question.cognitive_level" class="q-param"><label>认知层次</label>{{ item.question.cognitive_level }}</span>
+              </div>
+              <div v-if="item.question.exam_points" class="q-sub">
+                <label>考核要点</label>{{ item.question.exam_points }}
+              </div>
+              <div class="q-stem-full">
+                <label>题干</label>
+                <p>{{ item.question.clinical_stem }}</p>
+              </div>
+              <div class="q-opts">
+                <label>选项</label>
+                <div v-for="opt in item.question.options || []" :key="opt.label" class="q-opt" :class="{ correct: opt.label === item.question.answer }">
+                  <span class="q-opt-label">{{ opt.label }}</span>
+                  <span>{{ opt.text }}</span>
+                  <span v-if="opt.label === item.question.answer" class="q-correct">✓ 正确答案</span>
+                </div>
+              </div>
+              <div class="q-sub">
+                <label>解析</label>
+                <span v-if="item.question.explanation">{{ item.question.explanation }}</span>
+                <span v-else class="q-none">（无解析）</span>
+              </div>
+            </div>
+
+            <div v-if="item.task" class="task-line">
+              审核任务：第 {{ item.task.current_round }} 轮 / 共
+              {{ reviewCompletionLabel(item.task, item.round_count || 0) }} ｜ 流程：{{ item.task.flow_name || item.task.flow_id }} ｜
+              审核人：{{ (item.task.assigned_to || []).map(expertName).join("、") || "自动匹配" }}
+              <span v-if="item.task.final_decision" class="final-decision">
+                ｜ 最终决断：{{ reviewDisplayName(item.task.final_decision.expert_id, item.task.final_decision.expert_name) }} → {{ conclusionText("final_" + item.task.final_decision.conclusion) }}
+                <span v-if="item.task.final_decision.opinion">（{{ item.task.final_decision.opinion }}）</span>
+              </span>
+            </div>
+            <div v-else class="task-line none">未提交审核</div>
+
+            <div v-if="(item.records || []).length" class="rounds">
+              <div v-for="[round, recs] in recordsByRound(item)" :key="round" class="round-block">
+                <div class="round-title">第 {{ round }} 轮（{{ recs.length }} 条评语）</div>
+                <div class="record-grid">
+                  <ReviewCommentCard
+                    v-for="rec in recs"
+                    :key="rec.id"
+                    :record="rec"
+                    :fallback-name="reviewDisplayName(rec.expert_id, rec.expert_name)"
+                    compact
+                  />
+                </div>
+              </div>
+              <div v-for="[attempt, recs] in decisionsByAttempt(item)" :key="`d-${attempt}`" class="round-block decision-block">
+                <div class="round-title decision-title">最终决断（{{ recs.length }} 条）</div>
+                <div class="record-grid">
+                  <ReviewCommentCard
+                    v-for="rec in recs"
+                    :key="rec.id"
+                    :record="rec"
+                    :fallback-name="reviewDisplayName(rec.expert_id, rec.expert_name)"
+                    compact
+                  />
+                </div>
+              </div>
+            </div>
+            <div v-else class="task-line none">暂无专家审核记录</div>
+            <PreviousReviewHistory :question-id="item.question.id" />
+          </div>
+        </div>
+
+        <div v-if="!items.length && !loading" class="empty">{{ reviewScope === 'global' ? '全局题库暂无匹配记录；本人生成的题目请切换至「我的题库」查看。' : '我的题库暂无匹配的题目' }}</div>
+        <CompactPager :page="page" :total-pages="Math.max(1, Math.ceil(total / pageSize))" :disabled="loading" @change="goPage" />
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" :class="{ show: toast }" role="status" aria-live="polite">{{ toast }}</div>
+</template>
+
+<style scoped>
+.review-scope { display: flex; gap: 4px; }
+.review-scope button { padding: 8px 16px; border: 1px solid #dde6ef; border-radius: 6px; color: #607086; background: #fff; }
+.review-scope button.active { color: #0571dc; background: #edf6ff; border-color: #97cdfd; }
+.results-layout {
+  display: grid;
+  gap: 16px;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 10px;
+}
+
+.stat-card {
+  padding: 14px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  border-top-width: 3px;
+  text-align: center;
+  cursor: pointer;
+  background: #fff;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.stat-card:hover {
+  border-color: #1385f8;
+}
+
+.stat-card.active {
+  border-color: #8fc2ed;
+  border-top-color: #1385f8;
+  background: #f7fbff;
+}
+
+.stat-card strong {
+  display: block;
+  font-size: 22px;
+}
+
+.stat-card span {
+  font-size: 12px;
+}
+
+.s-pending strong { color: #6e7b8f; }
+.s-reviewing strong { color: #0571dc; }
+.s-conflict strong { color: #3a4658; }
+.s-revision strong { color: #c07b22; }
+.s-rejected strong { color: #c54858; }
+.s-published strong { color: #087c55; }
+
+.stat-card.s-pending,
+.stat-card.s-reviewing,
+.stat-card.s-conflict,
+.stat-card.s-revision,
+.stat-card.s-rejected,
+.stat-card.s-published {
+  background: #fff;
+}
+
+.stat-card.s-archived {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+}
+
+.stat-card.s-archived strong {
+  color: #6b7280;
+}
+
+.status-tag.s-archived {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+
+.stat-card.s-pending { border-top-color: #aeb9c7; }
+.stat-card.s-reviewing { border-top-color: #73b6e8; }
+.stat-card.s-conflict { border-top-color: #8e9aa8; }
+.stat-card.s-revision { border-top-color: #e0a23c; }
+.stat-card.s-rejected { border-top-color: #d95d6e; }
+.stat-card.s-published { border-top-color: #2fae7c; }
+
+.filter-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.filter-row input {
+  flex: 1;
+  min-width: 200px;
+  height: 34px;
+  border: 1px solid #e5ebf3;
+  border-radius: 7px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.filter-row select {
+  height: 34px;
+  border: 1px solid #e5ebf3;
+  border-radius: 7px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+
+.result-list {
+  display: grid;
+  gap: 8px;
+}
+
+.result-card {
+  border: 1px solid #e5ebf3;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.result-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+}
+
+.result-head:hover {
+  background: #f8fbff;
+}
+
+.r-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.r-stem {
+  display: block;
+  font-size: 13px;
+  color: #172033;
+  font-weight: 600;
+}
+
+.r-meta {
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #6e7b8f;
+}
+
+.r-status {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.s-pending { background: #f0f3f7; color: #6e7b8f; }
+.s-reviewing { background: #eff8ff; color: #0571dc; }
+.s-conflict { background: #eef2f7; color: #3a4658; }
+.s-revision { background: #fdf2e3; color: #c07b22; }
+.s-rejected { background: #fff0f0; color: #c54858; }
+.s-published { background: #f0fff8; color: #087c55; }
+
+.r-expand {
+  font-size: 12px;
+  color: #1385f8;
+  white-space: nowrap;
+}
+
+.result-detail {
+  border-top: 1px solid #f0f3f7;
+  padding: 12px 14px;
+  background: #fafcff;
+}
+
+/* 题目完整详情 */
+.q-detail {
+  border: 1px solid #dce8f7;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fff;
+  margin-bottom: 10px;
+}
+
+.q-params {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-bottom: 8px;
+}
+
+.q-param {
+  font-size: 12px;
+  color: #3a4658;
+}
+
+.q-param label {
+  color: #6e7b8f;
+  margin-right: 5px;
+}
+
+.q-sub {
+  font-size: 13px;
+  color: #3a4658;
+  margin-bottom: 8px;
+}
+
+.q-sub label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6e7b8f;
+  margin-bottom: 2px;
+}
+
+.q-stem-full {
+  margin-bottom: 8px;
+}
+
+.q-stem-full label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6e7b8f;
+  margin-bottom: 2px;
+}
+
+.q-stem-full p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #172033;
+}
+
+.q-opts {
+  margin-bottom: 8px;
+}
+
+.q-opts label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6e7b8f;
+  margin-bottom: 2px;
+}
+
+.q-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+  color: #3a4658;
+}
+
+.q-opt.correct {
+  color: #087c55;
+  font-weight: 600;
+}
+
+.q-opt-label {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #e8f0f8;
+  color: #1385f8;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.q-correct {
+  font-size: 11px;
+  color: #087c55;
+}
+
+.q-none {
+  color: #9aa5b4;
+  font-size: 12px;
+}
+
+.task-line {
+  font-size: 12px;
+  color: #3a4658;
+  margin-bottom: 10px;
+}
+
+.task-line.none {
+  color: #9aa5b4;
+}
+
+.final-decision {
+  color: #3a4658;
+  font-weight: 600;
+}
+
+.rounds {
+  display: grid;
+  gap: 10px;
+}
+
+.round-block {
+  border: 1px solid #e5ebf3;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #fff;
+}
+
+.round-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1385f8;
+  margin-bottom: 6px;
+}
+
+.round-title.decision-title {
+  color: #8a5ae0;
+}
+
+.record-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 8px;
+  align-items: start;
+}
+
+.load-more-btn {
+  width: 100%;
+  padding: 10px;
+  border: 1px dashed #dce8f7;
+  border-radius: 6px;
+  background: #f8fbff;
+  color: #1385f8;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.loading {
+  text-align: center;
+  color: #6e7b8f;
+  padding: 30px;
+}
+
+.empty {
+  text-align: center;
+  color: #6e7b8f;
+  padding: 30px;
+}
+
+@media (max-width: 700px) {
+  .review-scope {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .review-scope button {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .stat-card {
+    min-width: 0;
+    padding: 11px 6px;
+  }
+
+  .filter-row input {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .filter-row select,
+  .filter-row button {
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .result-head {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .r-info {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .r-meta {
+    flex-wrap: wrap;
+    gap: 4px 8px;
+  }
+
+  .r-status {
+    margin-left: 0;
+  }
+
+  .r-expand {
+    margin-left: auto;
+  }
+
+  .result-detail {
+    padding: 10px;
+  }
+
+  .record-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .task-line {
+    overflow-wrap: anywhere;
+  }
+}
+</style>

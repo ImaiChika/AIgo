@@ -3,6 +3,9 @@
 
 # Go
 output/
+# 本地构建产物（start.sh 会重新 go build；锚定根目录，勿忽略 cmd/aigo 源码）
+/aigo
+/verify
 
 # Node
 web/node_modules/
@@ -10,3 +13,36 @@ web/dist/
 
 # Env
 .env
+# ECS snapshots contain deployment secrets and business data; local only.
+/ecs-backup-*/
+# 任意文件名中含「账号密码」的凭据文件（含《必读：…账号密码.txt》）
+*账号密码.txt
+
+# Local datasets, screenshots, planning state, and SSH artifacts
+data/
+screenshots/
+.zcode/
+id_ed25519*
+server_public_key.txt
+8.19
+820
+824
+
+deploy/production.env
+deploy/secrets/*
+!deploy/secrets/.gitkeep
+deploy/offsite-recovery/*
+!deploy/offsite-recovery/.gitkeep
+
+# Verified local business database recovery packages; private.
+/local-backup-network-*/
+
+# Retired original reference material remains private.
+/rag/originals/
+/rag/extracted/
+
+# Verified local recovery package for official knowledge rollout.
+/local-backup-official-*/
+
+# Current local database/config/code recovery package.
+/local-backup-current-*/
